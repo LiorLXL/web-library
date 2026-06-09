@@ -56,6 +56,13 @@
 | `tag_shortcuts` | `app-data/app.sqlite.tag_shortcuts` | 文库级快捷标签清单，只是 UI 辅助，不是 Zotero 标签字段 |
 | `semantic_counts` | 所有 `items[*].semantic` | 前端筛选区计数 |
 
+附件说明：
+
+- Zotero 附件本身也是 `items` 表中的 item，类型是 `attachment`，通过 `itemAttachments.parentItemID` 挂到主文献条目下。
+- 附件标题不是 `itemAttachments` 字段，而是附件 item 的原生 `title` 字段。
+- `storage:<filename>` 表示文件位于 `storage/<attachment_key>/<filename>`。
+- v1 添加网页链接使用链接型 URL 附件，只保存 URL，不抓取网页快照。
+
 ## 字段映射总表
 
 | 网页字段 | 前端显示 | Zotero 来源 | 写回规则 |
@@ -74,8 +81,71 @@
 | 期刊等级 | `item.semantic.venue_rank` | `CCF-A`, `JCR Q1`, `中科院1区`, `SCI` 等标签 | 当前只解析展示，不单独写回 |
 | 普通标签 | `item.semantic.plain` | 未被语义规则分类的 `tags.name` | 当前不提供专门写回入口 |
 | 文件夹 | `item.collections` | `collections` + `collectionItems` | 通过插入或删除 `collectionItems` 调整归属 |
-| 附件 | `item.attachments` | `itemAttachments` 加 `storage/` 文件 | 当前只读和打开，不写回 |
+| 附件 | `item.attachments` | 子 item：`items.itemType = attachment` + `itemAttachments` + 可选 `storage/` 文件 | 本地副本模式可新增、重命名、删除；不新增 Zotero schema |
 | 笔记 | `item.notes` | `itemNotes.note` | 当前只读 |
+
+## 添加条目导入规则
+
+“添加条目”v1 只在本地副本模式可用。只读连接模式禁止导入，避免直接修改用户真实 Zotero 源库。
+
+导入入口分两类：
+
+- 标识符导入：输入 DOI、PMID、arXiv ID、ADS Bibcode、ISBN。
+- 引用文本导入：粘贴 RIS、BibTeX、CSL JSON、PubMed XML。
+
+导入流程：
+
+1. 解析输入，生成统一 metadata，包括 `item_type`、`fields`、`creators`、`tags`、`identifiers`、`source`。
+2. 用强标识符自动去重。
+3. 命中一个已有条目时，不创建新条目、不覆盖已有字段；如果当前选中真实文件夹，只追加 `collectionItems` 关联。
+4. 命中多个已有条目时，返回重复冲突候选，不创建新条目。
+5. 未命中重复时，才写入 Zotero 原生结构创建新条目。
+
+强标识符去重规则：
+
+- DOI：去掉 URL / `doi:` 前缀并忽略大小写。
+- PMID、PMCID：按规范化 ID 比较。
+- arXiv ID：去掉 URL / `arXiv:` 前缀和版本号。
+- ADS Bibcode：按完整 bibcode 比较。
+- ISBN：去掉空格和连字符，并把 ISBN-10 规范化为 ISBN-13。
+
+创建新条目时只写 Zotero 原生表：
+
+- `items`
+- `itemData`
+- `itemDataValues`
+- `creators`
+- `itemCreators`
+- `tags`
+- `itemTags`
+- `collectionItems`
+
+字段写回仍然遵守本文档总原则：只允许写 `fields` 表中已经存在的字段名，不新增 `fields.fieldName`，不修改 Zotero schema。新条目设置 `synced = 0`，并写入应用自己的 `sync_journal` 作为后续同步追踪记录。
+
+Zotero translators 的调研和 v1 可复用边界见 `docs/zotero-translators.md`。本项目不直接执行 Zotero translator JS，只参考其识别规则、API 地址和字段映射。
+
+## 引用导出规则
+
+“引用导出”v1 是只读功能，只读取当前后端状态中的 Zotero 原生字段和派生展示字段，不写 Zotero SQLite，不写 `app-data/app.sqlite`，不影响同步状态。
+
+导出入口：
+
+- 只导出前端已勾选条目。
+- 支持 `BibTeX`、`BibLaTeX`、`RIS`、`CSL JSON`、`CSV`。
+- 只导出主文献条目，不导出附件、笔记、annotation，也不打包 PDF 或附件文件数据。
+
+导出字段来源：
+
+- 标题、日期、期刊/会议、DOI、ISBN、ISSN、URL、摘要、publisher、place、volume、issue、pages、extra 等来自 `items[*].fields`。
+- 作者来自 `items[*].creators`。
+- 类型来自 `items[*].type`，导出时映射为目标格式的类型名。
+- 标签来自 `items[*].tags`，BibTeX/BibLaTeX 导出为 `keywords`，RIS 导出为 `KW`，CSV 导出为 `tags`。
+
+导出实现边界：
+
+- 不直接执行 Zotero translator JS。
+- 参考 Zotero 官方 `BibTeX.js`、`BibLaTeX.js`、`RIS.js`、`CSL JSON.js`、`CSV.js` 的字段映射和格式习惯。
+- RDF、TEI、CFF、Note HTML/Markdown、Evernote、Wikidata、Wikipedia Citation Templates 暂不进入 v1。
 
 ## 标签语义规则
 
@@ -157,6 +227,10 @@
 | 设置阅读状态 | 删除当前条目已解析为阅读状态的标签，再添加目标阅读标签；未读可以不写标签 |
 | 编辑原生字段 | 只允许写 Zotero 已存在字段名；通过 `itemData/itemDataValues` 保存值；如果 `fields.fieldName` 不存在则报错，不允许新增 |
 | 调整文件夹 | 添加或删除 `collectionItems` 关联，不改变条目本身字段 |
+| 添加文件附件 | 创建 `attachment` 子 item，写 `itemAttachments`，复制文件到本地副本 `storage/<attachment_key>/`，标题写附件 item 的 `title` 字段 |
+| 添加 URL 附件 | 创建 `attachment` 子 item，写 URL 链接型 `itemAttachments`，标题写 `title`，URL 写已有 `url` 字段；v1 不下载网页快照 |
+| 重命名附件 | 更新附件 item 的 `title`；对于 `storage:` 文件附件，同时重命名本地副本中的真实文件并更新 `itemAttachments.path` |
+| 删除附件 | 删除附件 item 及其关联记录；对于本地 `storage:` 文件附件，同时删除 `storage/<attachment_key>/` 文件夹 |
 | 删除快捷标签 | 只删除 `app-data/app.sqlite.tag_shortcuts`，不影响 Zotero 原生标签 |
 | 只读连接模式 | 禁止写 Zotero 源目录 |
 | 本地副本模式 | 只写复制到 `app-data/libraries/<library-id>/` 下的副本 |

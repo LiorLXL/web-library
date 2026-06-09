@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, render_template, request, send_file
 
 from . import app_store
+from .citation_export import CitationExportError, export_citations, export_filename
+from .metadata_import import MetadataImportError, parse_import_text, resolve_identifier
 from .semantic_tags import normalize_hash_tag, stable_tag_color
 from .sources import SourceError, create_local_copy, create_read_only_source, delete_source
 from .sync import mark_conflicts_for_changed_keys, prepare_sync_payloads
@@ -128,6 +131,42 @@ def create_app() -> Flask:
         except (SourceError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.delete("/api/library/<library_id>/collections/<collection_key>")
+    def api_delete_collection(library_id: str, collection_key: str):
+        try:
+            result = ZoteroRepository(library_or_404(library_id)).delete_collection(collection_key)
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/items/delete")
+    def api_delete_items(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        item_keys = payload.get("item_keys")
+        mode = str(payload.get("mode") or "trash").strip()
+        if not isinstance(item_keys, list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            result = ZoteroRepository(library_or_404(library_id)).delete_items([str(key) for key in item_keys], mode)
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/items/move")
+    def api_move_items(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        item_keys = payload.get("item_keys")
+        target_collection_key = str(payload.get("target_collection_key") or "").strip()
+        if not isinstance(item_keys, list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        if not target_collection_key:
+            return jsonify({"ok": False, "error": "请选择目标文件夹。"}), 400
+        try:
+            result = ZoteroRepository(library_or_404(library_id)).move_items([str(key) for key in item_keys], target_collection_key)
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.patch("/api/library/<library_id>/items/<item_key>/field")
     def api_update_item_field(library_id: str, item_key: str):
         payload = request.get_json(silent=True) or {}
@@ -211,6 +250,56 @@ def create_app() -> Flask:
         except (SourceError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.post("/api/library/<library_id>/items/import-identifier")
+    def api_import_identifier(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        identifier = str(payload.get("identifier") or "").strip()
+        collection_key = str(payload.get("collection_key") or "").strip() or None
+        if not identifier:
+            return jsonify({"ok": False, "error": "标识符不能为空。"}), 400
+        try:
+            repo = ZoteroRepository(library_or_404(library_id))
+            summary = repo.import_metadata_items([resolve_identifier(identifier)], collection_key)
+            return jsonify({"ok": True, **summary})
+        except (SourceError, ValueError, MetadataImportError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/items/import-text")
+    def api_import_text(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        text = str(payload.get("text") or "")
+        fmt = str(payload.get("format") or "auto").strip() or "auto"
+        collection_key = str(payload.get("collection_key") or "").strip() or None
+        if not text.strip():
+            return jsonify({"ok": False, "error": "导入文本不能为空。"}), 400
+        try:
+            repo = ZoteroRepository(library_or_404(library_id))
+            summary = repo.import_metadata_items(parse_import_text(text, fmt), collection_key)
+            return jsonify({"ok": True, **summary})
+        except (SourceError, ValueError, MetadataImportError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/items/export-citations")
+    def api_export_citations(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        item_keys = payload.get("item_keys") or []
+        fmt = str(payload.get("format") or "").strip()
+        if not isinstance(item_keys, list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            repo = ZoteroRepository(library_or_404(library_id))
+            content, meta = export_citations(repo.items(), [str(key) for key in item_keys], fmt)
+            return Response(
+                content,
+                mimetype=meta["mime"].split(";")[0],
+                headers={
+                    "Content-Type": meta["mime"],
+                    "Content-Disposition": f"attachment; filename={export_filename(fmt)}",
+                },
+            )
+        except (SourceError, ValueError, CitationExportError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.get("/api/library/<library_id>/semantic-rules")
     def api_semantic_rules(library_id: str):
         library_or_404(library_id)
@@ -255,6 +344,62 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "标签不能为空。"}), 400
         app_store.delete_tag_shortcut(library_id, tag)
         return jsonify({"ok": True})
+
+    @app.post("/api/library/<library_id>/items/<item_key>/attachments/file")
+    def api_add_file_attachment(library_id: str, item_key: str):
+        upload = request.files.get("file")
+        if not upload or not upload.filename:
+            return jsonify({"ok": False, "error": "请选择要上传的文件。"}), 400
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                filename = Path(upload.filename).name
+                temp_path = Path(tmp_dir) / filename
+                upload.save(temp_path)
+                result = ZoteroRepository(library_or_404(library_id)).add_file_attachment(
+                    item_key,
+                    temp_path,
+                    filename,
+                    upload.mimetype or None,
+                )
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/items/<item_key>/attachments/url")
+    def api_add_url_attachment(library_id: str, item_key: str):
+        payload = request.get_json(silent=True) or {}
+        url = str(payload.get("url") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        if not url:
+            return jsonify({"ok": False, "error": "网址不能为空。"}), 400
+        try:
+            result = ZoteroRepository(library_or_404(library_id)).add_url_attachment(item_key, url, title)
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.patch("/api/library/<library_id>/attachments/<attachment_key>")
+    def api_rename_attachment(library_id: str, attachment_key: str):
+        payload = request.get_json(silent=True) or {}
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            return jsonify({"ok": False, "error": "附件名称不能为空。"}), 400
+        try:
+            result = ZoteroRepository(library_or_404(library_id)).rename_attachment(attachment_key, title)
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.delete("/api/library/<library_id>/attachments/<attachment_key>")
+    def api_delete_attachment(library_id: str, attachment_key: str):
+        payload = request.get_json(silent=True) or {}
+        keys = payload.get("attachment_keys")
+        attachment_keys = [str(key) for key in keys] if isinstance(keys, list) else [attachment_key]
+        try:
+            result = ZoteroRepository(library_or_404(library_id)).delete_attachments(attachment_keys)
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.get("/api/library/<library_id>/sync/payloads")
     def api_sync_payloads(library_id: str):

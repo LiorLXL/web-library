@@ -47,6 +47,8 @@ def create_fixture_zotero(root: Path) -> Path:
             (8, "computerProgram"),
             (9, "magazineArticle"),
             (10, "newspaperArticle"),
+            (11, "document"),
+            (12, "book"),
         ],
     )
     conn.executemany(
@@ -67,7 +69,21 @@ def create_fixture_zotero(root: Path) -> Path:
             (13, 10, "2026-01-15", "2026-01-16", 1, "ITEM0008", 0, 1),
         ],
     )
-    fields = [(1, "title"), (2, "date"), (3, "publicationTitle"), (4, "DOI"), (5, "abstractNote"), (6, "extra")]
+    fields = [
+        (1, "title"),
+        (2, "date"),
+        (3, "publicationTitle"),
+        (4, "DOI"),
+        (5, "abstractNote"),
+        (6, "extra"),
+        (7, "ISBN"),
+        (8, "url"),
+        (9, "publisher"),
+        (10, "pages"),
+        (11, "volume"),
+        (12, "issue"),
+        (13, "repository"),
+    ]
     values = [
         (1, "OpenVLA"),
         (2, "2024-09-05"),

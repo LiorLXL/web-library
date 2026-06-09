@@ -85,6 +85,33 @@ const state = {
   detailStructuredEditing: false,
   detailStructuredDraft: { remark: "", title_zh: "", abstract_zh: "" },
   expandedNotes: new Set(),
+  addItemMode: "identifier",
+  addItemMessage: "",
+  addItemResults: [],
+  addItemBusy: false,
+  citationExportFormat: "bibtex",
+  citationExportMessage: "",
+  citationExportBusy: false,
+  deleteItemsMode: "trash",
+  deleteItemsMessage: "",
+  deleteItemsBusy: false,
+  deleteItemsPermanentConfirmed: false,
+  moveItemsTargetKey: "",
+  moveItemsMessage: "",
+  moveItemsBusy: false,
+  attachmentEditorItemKey: "",
+  attachmentEditorMessage: "",
+  attachmentEditorBusy: false,
+  selectedAttachmentKeys: new Set(),
+  editingAttachmentKey: "",
+  editingAttachmentTitle: "",
+  activeCollectionMenuKey: "",
+  editingCollectionKey: "",
+  editingCollectionName: "",
+  movingCollectionKey: "",
+  movingCollectionTargetKey: "",
+  creatingCollectionParentKey: "",
+  creatingCollectionName: "",
 };
 
 function postJSON(url, payload, method = "POST") {
@@ -203,11 +230,16 @@ function clearFilteredSelection() {
   filteredItemKeys().forEach((key) => state.selectedItemKeys.delete(key));
 }
 
+function selectedItemKeys() {
+  return [...state.selectedItemKeys].filter(Boolean);
+}
+
 function notifyFeatureInProgress(action) {
   const labels = new Map([
     ["add-item", "添加条目"],
-    ["delete-items", "删除"],
-    ["add-attachment", "添加附件"],
+    ["delete-items", "删除条目"],
+    ["move-items", "移动条目"],
+    ["edit-attachments", "附件编辑"],
     ["download-papers", "文献下载"],
     ["query-rank", "期刊&会议等级查询"],
     ["export-citation", "引用导出"],
@@ -215,6 +247,659 @@ function notifyFeatureInProgress(action) {
     ["knowledge-qa", "知识库问答"],
   ]);
   window.alert(`${labels.get(action) || "该功能"}开发中`);
+}
+
+function currentRealCollectionKey() {
+  const key = String(state.selectedCollectionKey || "");
+  if (!key || key.startsWith("__")) return "";
+  return key;
+}
+
+function importResultMessage(summary) {
+  const created = Number(summary.created_count || 0);
+  const existing = Number(summary.existing_count || 0);
+  const conflict = Number(summary.conflict_count || 0);
+  const failed = Number(summary.failed_count || 0);
+  const parts = [];
+  if (created) parts.push(`新建 ${created} 条`);
+  if (existing) parts.push(`复用已有 ${existing} 条`);
+  if (conflict) parts.push(`冲突 ${conflict} 条`);
+  if (failed) parts.push(`失败 ${failed} 条`);
+  if (!parts.length) return "没有导入条目。";
+  if (existing && !created && !conflict && !failed) return "条目已存在，已定位到已有条目。";
+  return parts.join(" · ");
+}
+
+function renderAddItemResults() {
+  if (!state.addItemResults.length) return "";
+  return `<div class="import-results" data-import-results>
+    ${state.addItemResults.map((result) => {
+      const statusLabel = { created: "已新建", existing: "已存在", conflict: "重复冲突", failed: "失败" }[result.status] || result.status;
+      const title = result.title || result.item_key || "未命名条目";
+      const candidates = (result.candidates || []).map((candidate) => `<button type="button" class="import-candidate" data-import-select-item="${escapeHtml(candidate.key)}">${escapeHtml(candidate.title || candidate.key)}</button>`).join("");
+      return `<div class="import-result ${result.status}" data-import-result-status="${escapeHtml(result.status || "")}">
+        <strong>${escapeHtml(statusLabel)}</strong>
+        <span>${escapeHtml(title)}</span>
+        ${candidates ? `<div class="import-candidates">${candidates}</div>` : ""}
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function renderAddItemModal() {
+  const panel = document.querySelector("[data-add-item-modal]");
+  if (!panel) return;
+  const isIdentifier = state.addItemMode === "identifier";
+  panel.innerHTML = `
+    <section class="floating-card add-item-card" data-add-item-card>
+      <div class="pane-head">
+        <div>
+          <h2>添加条目</h2>
+          <p>${currentRealCollectionKey() ? "导入后会加入当前文件夹" : "当前不是实际文件夹，导入后不加入文件夹"}</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-add-item>×</button>
+      </div>
+      <div class="add-item-tabs">
+        <button type="button" class="${isIdentifier ? "active" : ""}" data-add-item-mode="identifier">标识符</button>
+        <button type="button" class="${!isIdentifier ? "active" : ""}" data-add-item-mode="text">引用文本</button>
+      </div>
+      ${isIdentifier ? `
+        <form class="add-item-form" data-import-identifier-form>
+          <label>
+            <span>ISBN / DOI / PMID / arXiv ID / ADS Bibcode</span>
+            <input name="identifier" data-import-identifier-input placeholder="例如 10.1038/s41586-024-... 或 2406.09246">
+          </label>
+          <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "导入中..." : "导入条目"}</button>
+        </form>
+      ` : `
+        <form class="add-item-form" data-import-text-form>
+          <label>
+            <span>格式</span>
+            <select name="format" data-import-text-format>
+              <option value="auto">自动识别</option>
+              <option value="ris">RIS</option>
+              <option value="bibtex">BibTeX</option>
+              <option value="csl_json">CSL JSON</option>
+              <option value="pubmed_xml">PubMed XML</option>
+            </select>
+          </label>
+          <label>
+            <span>引用文本</span>
+            <textarea name="text" rows="10" data-import-text-input placeholder="粘贴 RIS、BibTeX、CSL JSON 或 PubMed XML"></textarea>
+          </label>
+          <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "导入中..." : "导入引用文本"}</button>
+        </form>
+      `}
+      ${state.addItemMessage ? `<p class="import-message" data-import-message>${escapeHtml(state.addItemMessage)}</p>` : ""}
+      ${renderAddItemResults()}
+    </section>
+  `;
+  panel.querySelectorAll("[data-add-item-mode]").forEach((button) => button.addEventListener("click", () => {
+    state.addItemMode = button.dataset.addItemMode;
+    state.addItemMessage = "";
+    state.addItemResults = [];
+    renderAddItemModal();
+  }));
+  panel.querySelector("[data-close-add-item]")?.addEventListener("click", closeAddItemModal);
+  panel.querySelector("[data-import-identifier-form]")?.addEventListener("submit", submitIdentifierImport);
+  panel.querySelector("[data-import-text-form]")?.addEventListener("submit", submitTextImport);
+  panel.querySelectorAll("[data-import-select-item]").forEach((button) => button.addEventListener("click", () => {
+    const item = state.items.find((value) => value.key === button.dataset.importSelectItem);
+    if (item) {
+      state.selectedItem = item;
+      renderTable();
+      renderDetail();
+    }
+  }));
+}
+
+function openAddItemModal() {
+  if (!state.library?.editable) {
+    window.alert("只读源库不能添加条目。请先创建本地副本。");
+    return;
+  }
+  state.addItemMessage = "";
+  state.addItemResults = [];
+  document.querySelector("[data-add-item-modal]").hidden = false;
+  renderAddItemModal();
+}
+
+function closeAddItemModal() {
+  const panel = document.querySelector("[data-add-item-modal]");
+  if (panel) panel.hidden = true;
+}
+
+async function finishImport(summary) {
+  state.addItemMessage = importResultMessage(summary);
+  state.addItemResults = summary.results || [];
+  const targetKey = (state.addItemResults.find((result) => result.item_key)?.item_key) || "";
+  await loadState();
+  if (targetKey) {
+    state.selectedItem = state.items.find((item) => item.key === targetKey) || state.selectedItem;
+    renderTable();
+    renderDetail();
+  }
+  renderAddItemModal();
+}
+
+async function submitIdentifierImport(event) {
+  event.preventDefault();
+  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+  payload.collection_key = currentRealCollectionKey();
+  try {
+    state.addItemBusy = true;
+    renderAddItemModal();
+    const summary = await postJSON(`/api/library/${state.libraryId}/items/import-identifier`, payload);
+    await finishImport(summary);
+  } catch (error) {
+    state.addItemMessage = error.message;
+    state.addItemResults = [];
+    renderAddItemModal();
+  } finally {
+    state.addItemBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function submitTextImport(event) {
+  event.preventDefault();
+  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+  payload.collection_key = currentRealCollectionKey();
+  try {
+    state.addItemBusy = true;
+    renderAddItemModal();
+    const summary = await postJSON(`/api/library/${state.libraryId}/items/import-text`, payload);
+    await finishImport(summary);
+  } catch (error) {
+    state.addItemMessage = error.message;
+    state.addItemResults = [];
+    renderAddItemModal();
+  } finally {
+    state.addItemBusy = false;
+    renderAddItemModal();
+  }
+}
+
+function renderCitationExportModal() {
+  const panel = document.querySelector("[data-export-citation-modal]");
+  if (!panel) return;
+  const selectedCount = selectedItemKeys().length;
+  panel.innerHTML = `
+    <section class="floating-card export-citation-card" data-export-citation-card>
+      <div class="pane-head">
+        <div>
+          <h2>引用导出</h2>
+          <p>已选择 ${selectedCount} 条文献</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-export-citation>×</button>
+      </div>
+      <form class="export-citation-form" data-export-citation-form>
+        <label>
+          <span>导出格式</span>
+          <select name="format" data-export-citation-format>
+            <option value="bibtex" ${state.citationExportFormat === "bibtex" ? "selected" : ""}>BibTeX</option>
+            <option value="biblatex" ${state.citationExportFormat === "biblatex" ? "selected" : ""}>BibLaTeX</option>
+            <option value="ris" ${state.citationExportFormat === "ris" ? "selected" : ""}>RIS</option>
+            <option value="csl_json" ${state.citationExportFormat === "csl_json" ? "selected" : ""}>CSL JSON</option>
+            <option value="csv" ${state.citationExportFormat === "csv" ? "selected" : ""}>CSV</option>
+          </select>
+        </label>
+        <button type="submit" class="form-action-btn" ${state.citationExportBusy ? "disabled" : ""}>${state.citationExportBusy ? "导出中..." : "下载"}</button>
+      </form>
+      ${state.citationExportMessage ? `<p class="export-citation-message" data-export-citation-error>${escapeHtml(state.citationExportMessage)}</p>` : ""}
+    </section>
+  `;
+  panel.querySelector("[data-close-export-citation]")?.addEventListener("click", closeCitationExportModal);
+  panel.querySelector("[data-export-citation-format]")?.addEventListener("change", (event) => {
+    state.citationExportFormat = event.target.value;
+  });
+  panel.querySelector("[data-export-citation-form]")?.addEventListener("submit", submitCitationExport);
+}
+
+function openCitationExportModal() {
+  if (!selectedItemKeys().length) {
+    window.alert("请先勾选要导出的条目。");
+    return;
+  }
+  state.citationExportMessage = "";
+  document.querySelector("[data-export-citation-modal]").hidden = false;
+  renderCitationExportModal();
+}
+
+function closeCitationExportModal() {
+  const panel = document.querySelector("[data-export-citation-modal]");
+  if (panel) panel.hidden = true;
+}
+
+function filenameFromDisposition(headerValue) {
+  const match = String(headerValue || "").match(/filename="?([^";]+)"?/i);
+  return match ? match[1] : `zotero-web-library.${state.citationExportFormat}`;
+}
+
+async function submitCitationExport(event) {
+  event.preventDefault();
+  const formData = Object.fromEntries(new FormData(event.currentTarget).entries());
+  state.citationExportFormat = formData.format || state.citationExportFormat;
+  try {
+    state.citationExportBusy = true;
+    state.citationExportMessage = "";
+    renderCitationExportModal();
+    const response = await fetch(`/api/library/${state.libraryId}/items/export-citations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_keys: selectedItemKeys(), format: state.citationExportFormat }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || "引用导出失败");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filenameFromDisposition(response.headers.get("Content-Disposition"));
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    closeCitationExportModal();
+  } catch (error) {
+    state.citationExportMessage = error.message;
+    renderCitationExportModal();
+  } finally {
+    state.citationExportBusy = false;
+    renderCitationExportModal();
+  }
+}
+
+function renderDeleteItemsModal() {
+  const panel = document.querySelector("[data-delete-items-modal]");
+  if (!panel) return;
+  const selectedCount = selectedItemKeys().length;
+  const isPermanent = state.deleteItemsMode === "permanent";
+  panel.innerHTML = `
+    <section class="floating-card delete-items-card" data-delete-items-card>
+      <div class="pane-head">
+        <div>
+          <h2>删除条目</h2>
+          <p>已选择 ${selectedCount} 条文献</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-delete-items>×</button>
+      </div>
+      <form class="bulk-modal-form" data-delete-items-form>
+        <label class="choice-row">
+          <input type="radio" name="mode" value="trash" ${state.deleteItemsMode === "trash" ? "checked" : ""}>
+          <span><strong>移入回收站</strong><small>保留条目数据，可在回收站查看。</small></span>
+        </label>
+        <label class="choice-row danger-choice">
+          <input type="radio" name="mode" value="permanent" ${isPermanent ? "checked" : ""}>
+          <span><strong>永久删除</strong><small>删除本地副本 SQLite 记录，并删除相关 storage/ 附件文件夹。</small></span>
+        </label>
+        ${isPermanent ? `
+          <label class="confirm-row">
+            <input type="checkbox" data-confirm-permanent-delete ${state.deleteItemsPermanentConfirmed ? "checked" : ""}>
+            <span>我确认永久删除所选条目及其本地附件文件夹。</span>
+          </label>
+        ` : ""}
+        <div class="bulk-modal-actions">
+          <button type="submit" class="danger-btn" ${state.deleteItemsBusy || (isPermanent && !state.deleteItemsPermanentConfirmed) ? "disabled" : ""}>${state.deleteItemsBusy ? "删除中..." : "确认删除"}</button>
+          <button type="button" class="ghost-btn" data-close-delete-items>取消</button>
+        </div>
+      </form>
+      ${state.deleteItemsMessage ? `<p class="import-message" data-delete-items-error>${escapeHtml(state.deleteItemsMessage)}</p>` : ""}
+    </section>
+  `;
+  panel.querySelectorAll("[data-close-delete-items]").forEach((button) => button.addEventListener("click", closeDeleteItemsModal));
+  panel.querySelectorAll("input[name='mode']").forEach((input) => input.addEventListener("change", () => {
+    state.deleteItemsMode = input.value;
+    state.deleteItemsPermanentConfirmed = false;
+    state.deleteItemsMessage = "";
+    renderDeleteItemsModal();
+  }));
+  panel.querySelector("[data-confirm-permanent-delete]")?.addEventListener("change", (event) => {
+    state.deleteItemsPermanentConfirmed = event.target.checked;
+    renderDeleteItemsModal();
+  });
+  panel.querySelector("[data-delete-items-form]")?.addEventListener("submit", submitDeleteItems);
+}
+
+function openDeleteItemsModal() {
+  if (!selectedItemKeys().length) {
+    window.alert("请先勾选要删除的条目。");
+    return;
+  }
+  if (!state.library?.editable) {
+    window.alert("只读源库不能删除条目。请先创建本地副本。");
+    return;
+  }
+  state.deleteItemsMode = "trash";
+  state.deleteItemsMessage = "";
+  state.deleteItemsPermanentConfirmed = false;
+  document.querySelector("[data-delete-items-modal]").hidden = false;
+  renderDeleteItemsModal();
+}
+
+function closeDeleteItemsModal() {
+  const panel = document.querySelector("[data-delete-items-modal]");
+  if (panel) panel.hidden = true;
+}
+
+async function submitDeleteItems(event) {
+  event.preventDefault();
+  const keys = selectedItemKeys();
+  if (!keys.length) return;
+  try {
+    state.deleteItemsBusy = true;
+    state.deleteItemsMessage = "";
+    renderDeleteItemsModal();
+    const result = await postJSON(`/api/library/${state.libraryId}/items/delete`, { item_keys: keys, mode: state.deleteItemsMode });
+    (result.item_keys || keys).forEach((key) => state.selectedItemKeys.delete(key));
+    if (state.selectedItem && (result.item_keys || keys).includes(state.selectedItem.key)) state.selectedItem = null;
+    closeDeleteItemsModal();
+    await loadState();
+  } catch (error) {
+    state.deleteItemsMessage = error.message;
+    renderDeleteItemsModal();
+  } finally {
+    state.deleteItemsBusy = false;
+    renderDeleteItemsModal();
+  }
+}
+
+function renderMoveItemsModal() {
+  const panel = document.querySelector("[data-move-items-modal]");
+  if (!panel) return;
+  const selectedCount = selectedItemKeys().length;
+  const options = collectionSelectOptions({ includeRoot: false, selectedKey: state.moveItemsTargetKey });
+  panel.innerHTML = `
+    <section class="floating-card move-items-card" data-move-items-card>
+      <div class="pane-head">
+        <div>
+          <h2>移动条目</h2>
+          <p>已选择 ${selectedCount} 条文献。移动后只保留目标文件夹归属。</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-move-items>×</button>
+      </div>
+      <form class="bulk-modal-form" data-move-items-form>
+        <label>
+          <span>目标文件夹</span>
+          <select name="target_collection_key" data-move-items-target>
+            ${options || `<option value="">暂无可用文件夹</option>`}
+          </select>
+        </label>
+        <div class="bulk-modal-actions">
+          <button type="submit" class="form-action-btn" ${state.moveItemsBusy || !state.moveItemsTargetKey ? "disabled" : ""}>${state.moveItemsBusy ? "移动中..." : "确认移动"}</button>
+          <button type="button" class="ghost-btn" data-close-move-items>取消</button>
+        </div>
+      </form>
+      ${state.moveItemsMessage ? `<p class="import-message" data-move-items-error>${escapeHtml(state.moveItemsMessage)}</p>` : ""}
+    </section>
+  `;
+  panel.querySelectorAll("[data-close-move-items]").forEach((button) => button.addEventListener("click", closeMoveItemsModal));
+  panel.querySelector("[data-move-items-target]")?.addEventListener("change", (event) => {
+    state.moveItemsTargetKey = event.target.value;
+    renderMoveItemsModal();
+  });
+  panel.querySelector("[data-move-items-form]")?.addEventListener("submit", submitMoveItems);
+}
+
+function openMoveItemsModal() {
+  if (!selectedItemKeys().length) {
+    window.alert("请先勾选要移动的条目。");
+    return;
+  }
+  if (!state.library?.editable) {
+    window.alert("只读源库不能移动条目。请先创建本地副本。");
+    return;
+  }
+  state.moveItemsTargetKey = currentRealCollectionKey() || sortedCollections()[0]?.key || "";
+  state.moveItemsMessage = "";
+  document.querySelector("[data-move-items-modal]").hidden = false;
+  renderMoveItemsModal();
+}
+
+function closeMoveItemsModal() {
+  const panel = document.querySelector("[data-move-items-modal]");
+  if (panel) panel.hidden = true;
+}
+
+async function submitMoveItems(event) {
+  event.preventDefault();
+  const keys = selectedItemKeys();
+  const target = String(new FormData(event.currentTarget).get("target_collection_key") || state.moveItemsTargetKey || "").trim();
+  if (!keys.length || !target) return;
+  try {
+    state.moveItemsBusy = true;
+    state.moveItemsMessage = "";
+    state.moveItemsTargetKey = target;
+    renderMoveItemsModal();
+    await postJSON(`/api/library/${state.libraryId}/items/move`, { item_keys: keys, target_collection_key: target });
+    closeMoveItemsModal();
+    await loadState();
+  } catch (error) {
+    state.moveItemsMessage = error.message;
+    renderMoveItemsModal();
+  } finally {
+    state.moveItemsBusy = false;
+    renderMoveItemsModal();
+  }
+}
+
+function currentAttachmentEditorItem() {
+  return state.items.find((item) => item.key === state.attachmentEditorItemKey) || null;
+}
+
+function renderAttachmentEditorModal() {
+  const panel = document.querySelector("[data-attachment-editor-modal]");
+  if (!panel) return;
+  const item = currentAttachmentEditorItem();
+  if (!item) {
+    panel.innerHTML = "";
+    return;
+  }
+  const attachments = item.attachments || [];
+  panel.innerHTML = `
+    <section class="floating-card attachment-editor-card" data-attachment-editor-card>
+      <div class="pane-head">
+        <div>
+          <h2>附件编辑</h2>
+          <p>${escapeHtml(item.title || item.key)} · ${attachments.length} 个附件</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-attachment-editor>×</button>
+      </div>
+      <div class="attachment-editor-list" data-attachment-editor-list>
+        ${attachments.map((attachment) => {
+          const checked = state.selectedAttachmentKeys.has(attachment.key);
+          const editing = state.editingAttachmentKey === attachment.key;
+          const title = attachment.display_label || attachment.path || attachment.key;
+          return `
+            <div class="attachment-editor-row" data-attachment-editor-row="${escapeHtml(attachment.key)}">
+              <input type="checkbox" data-select-attachment="${escapeHtml(attachment.key)}" ${checked ? "checked" : ""} aria-label="选择附件">
+              <span class="attachment-badge ${attachmentBadgeClass(attachment.kind, attachment.status === "missing")}">${escapeHtml(attachment.kind || "file")}</span>
+              <div class="attachment-editor-main">
+                ${editing ? `
+                  <input class="attachment-rename-input" data-attachment-rename-input value="${escapeHtml(state.editingAttachmentTitle || title)}">
+                ` : `
+                  ${attachment.openable ? `<a href="/api/library/${state.libraryId}/attachments/${attachment.key}" target="_blank">${escapeHtml(title)}</a>` : `<strong>${escapeHtml(title)}</strong>`}
+                  <small>${escapeHtml(attachment.status === "missing" ? "缺失" : attachment.path || attachment.content_type || "")}</small>
+                `}
+              </div>
+              <div class="attachment-editor-actions">
+                ${editing ? `
+                  <button type="button" class="form-action-btn" data-save-attachment-rename="${escapeHtml(attachment.key)}">保存</button>
+                  <button type="button" class="ghost-inline-btn" data-cancel-attachment-rename>取消</button>
+                ` : `
+                  <button type="button" class="ghost-inline-btn" data-edit-attachment-name="${escapeHtml(attachment.key)}">重命名</button>
+                `}
+              </div>
+            </div>
+          `;
+        }).join("") || `<p class="muted">当前条目还没有附件。</p>`}
+      </div>
+      <div class="attachment-editor-toolbar">
+        <button type="button" class="danger-btn" data-delete-selected-attachments ${state.selectedAttachmentKeys.size ? "" : "disabled"}>删除所选附件</button>
+      </div>
+      <div class="attachment-add-grid">
+        <form class="attachment-add-form" data-add-file-attachment-form>
+          <h3>上传本地文件</h3>
+          <input type="file" name="file" data-file-attachment-input>
+          <button type="submit" class="form-action-btn" ${state.attachmentEditorBusy ? "disabled" : ""}>上传附件</button>
+        </form>
+        <form class="attachment-add-form" data-add-url-attachment-form>
+          <h3>添加网页链接</h3>
+          <input name="url" placeholder="https://example.com">
+          <input name="title" placeholder="链接标题（可选）">
+          <button type="submit" class="form-action-btn" ${state.attachmentEditorBusy ? "disabled" : ""}>添加链接</button>
+        </form>
+      </div>
+      ${state.attachmentEditorMessage ? `<p class="import-message" data-attachment-editor-message>${escapeHtml(state.attachmentEditorMessage)}</p>` : ""}
+    </section>
+  `;
+  panel.querySelector("[data-close-attachment-editor]")?.addEventListener("click", closeAttachmentEditorModal);
+  panel.querySelectorAll("[data-select-attachment]").forEach((input) => input.addEventListener("change", () => {
+    if (input.checked) state.selectedAttachmentKeys.add(input.dataset.selectAttachment);
+    else state.selectedAttachmentKeys.delete(input.dataset.selectAttachment);
+    renderAttachmentEditorModal();
+  }));
+  panel.querySelectorAll("[data-edit-attachment-name]").forEach((button) => button.addEventListener("click", () => {
+    const attachment = attachments.find((value) => value.key === button.dataset.editAttachmentName);
+    state.editingAttachmentKey = button.dataset.editAttachmentName;
+    state.editingAttachmentTitle = attachment?.display_label || attachment?.path || "";
+    renderAttachmentEditorModal();
+  }));
+  panel.querySelectorAll("[data-cancel-attachment-rename]").forEach((button) => button.addEventListener("click", () => {
+    state.editingAttachmentKey = "";
+    state.editingAttachmentTitle = "";
+    renderAttachmentEditorModal();
+  }));
+  panel.querySelectorAll("[data-save-attachment-rename]").forEach((button) => button.addEventListener("click", async () => {
+    const row = button.closest("[data-attachment-editor-row]");
+    const title = row?.querySelector("[data-attachment-rename-input]")?.value || "";
+    await renameAttachment(button.dataset.saveAttachmentRename, title);
+  }));
+  panel.querySelector("[data-delete-selected-attachments]")?.addEventListener("click", deleteSelectedAttachments);
+  panel.querySelector("[data-add-file-attachment-form]")?.addEventListener("submit", submitFileAttachment);
+  panel.querySelector("[data-add-url-attachment-form]")?.addEventListener("submit", submitUrlAttachment);
+}
+
+function openAttachmentEditorModal() {
+  const keys = selectedItemKeys();
+  if (keys.length !== 1) {
+    window.alert("附件编辑仅支持勾选一个条目。");
+    return;
+  }
+  if (!state.library?.editable) {
+    window.alert("只读源库不能编辑附件。请先创建本地副本。");
+    return;
+  }
+  state.attachmentEditorItemKey = keys[0];
+  state.attachmentEditorMessage = "";
+  state.selectedAttachmentKeys = new Set();
+  state.editingAttachmentKey = "";
+  state.editingAttachmentTitle = "";
+  document.querySelector("[data-attachment-editor-modal]").hidden = false;
+  renderAttachmentEditorModal();
+}
+
+function closeAttachmentEditorModal() {
+  const panel = document.querySelector("[data-attachment-editor-modal]");
+  if (panel) panel.hidden = true;
+}
+
+async function refreshAfterAttachmentChange(message = "") {
+  state.attachmentEditorMessage = message;
+  await loadState();
+  state.selectedAttachmentKeys = new Set([...state.selectedAttachmentKeys].filter((key) => {
+    const item = currentAttachmentEditorItem();
+    return (item?.attachments || []).some((attachment) => attachment.key === key);
+  }));
+  renderAttachmentEditorModal();
+}
+
+async function renameAttachment(attachmentKey, title) {
+  const value = String(title || "").trim();
+  if (!value) {
+    state.attachmentEditorMessage = "附件名称不能为空。";
+    renderAttachmentEditorModal();
+    return;
+  }
+  try {
+    state.attachmentEditorBusy = true;
+    await postJSON(`/api/library/${state.libraryId}/attachments/${attachmentKey}`, { title: value }, "PATCH");
+    state.editingAttachmentKey = "";
+    state.editingAttachmentTitle = "";
+    await refreshAfterAttachmentChange("附件已重命名。");
+  } catch (error) {
+    state.attachmentEditorMessage = error.message;
+    renderAttachmentEditorModal();
+  } finally {
+    state.attachmentEditorBusy = false;
+    renderAttachmentEditorModal();
+  }
+}
+
+async function deleteSelectedAttachments() {
+  const keys = [...state.selectedAttachmentKeys];
+  if (!keys.length) return;
+  if (!window.confirm(`确认删除 ${keys.length} 个附件？\n会删除本地副本中的附件记录和对应 storage 文件夹。`)) return;
+  try {
+    state.attachmentEditorBusy = true;
+    await deleteJSON(`/api/library/${state.libraryId}/attachments/${keys[0]}`, { attachment_keys: keys });
+    state.selectedAttachmentKeys = new Set();
+    await refreshAfterAttachmentChange("附件已删除。");
+  } catch (error) {
+    state.attachmentEditorMessage = error.message;
+    renderAttachmentEditorModal();
+  } finally {
+    state.attachmentEditorBusy = false;
+    renderAttachmentEditorModal();
+  }
+}
+
+async function submitFileAttachment(event) {
+  event.preventDefault();
+  const item = currentAttachmentEditorItem();
+  const file = event.currentTarget.querySelector("[data-file-attachment-input]")?.files?.[0];
+  if (!item || !file) {
+    state.attachmentEditorMessage = "请选择要上传的文件。";
+    renderAttachmentEditorModal();
+    return;
+  }
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    state.attachmentEditorBusy = true;
+    renderAttachmentEditorModal();
+    const response = await fetch(`/api/library/${state.libraryId}/items/${item.key}/attachments/file`, { method: "POST", body: formData });
+    const data = await response.json();
+    if (!response.ok || data.ok === false) throw new Error(data.error || "上传附件失败");
+    await refreshAfterAttachmentChange("附件已上传。");
+  } catch (error) {
+    state.attachmentEditorMessage = error.message;
+    renderAttachmentEditorModal();
+  } finally {
+    state.attachmentEditorBusy = false;
+    renderAttachmentEditorModal();
+  }
+}
+
+async function submitUrlAttachment(event) {
+  event.preventDefault();
+  const item = currentAttachmentEditorItem();
+  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+  if (!item) return;
+  try {
+    state.attachmentEditorBusy = true;
+    renderAttachmentEditorModal();
+    await postJSON(`/api/library/${state.libraryId}/items/${item.key}/attachments/url`, payload);
+    await refreshAfterAttachmentChange("链接附件已添加。");
+  } catch (error) {
+    state.attachmentEditorMessage = error.message;
+    renderAttachmentEditorModal();
+  } finally {
+    state.attachmentEditorBusy = false;
+    renderAttachmentEditorModal();
+  }
 }
 
 function itemValue(item, key) {
@@ -343,6 +1028,90 @@ function sortedCollections() {
   return result;
 }
 
+function collectionMoveOptions(excludeKey = "") {
+  const excluded = new Set();
+  if (excludeKey) {
+    const target = state.collections.find((collection) => collection.key === excludeKey);
+    if (target) {
+      excluded.add(target.collection_id);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        state.collections.forEach((collection) => {
+          if (collection.parent_id && excluded.has(collection.parent_id) && !excluded.has(collection.collection_id)) {
+            excluded.add(collection.collection_id);
+            changed = true;
+          }
+        });
+      }
+    }
+  }
+  return sortedCollections().filter((collection) => !excluded.has(collection.collection_id));
+}
+
+function collectionSelectOptions({ includeRoot = true, excludeKey = "", selectedKey = "" } = {}) {
+  const root = includeRoot ? `<option value="" ${!selectedKey ? "selected" : ""}>根目录</option>` : "";
+  return root + collectionMoveOptions(excludeKey).map((collection) => {
+    const indent = "　".repeat(collection.depth || 0);
+    return `<option value="${escapeHtml(collection.key)}" ${selectedKey === collection.key ? "selected" : ""}>${indent}${escapeHtml(collection.name)}</option>`;
+  }).join("");
+}
+
+function renderCollectionInlinePanel(collection) {
+  if (!state.library?.editable) return "";
+  const isRoot = collection.key === "__root";
+  const isActive = state.activeCollectionMenuKey === collection.key;
+  const isEditing = state.editingCollectionKey === collection.key;
+  const isMoving = state.movingCollectionKey === collection.key;
+  const isCreating = state.creatingCollectionParentKey === collection.key;
+  if (!isActive && !isEditing && !isMoving && !isCreating) return "";
+  return `
+    <div class="collection-inline-panel" data-collection-inline-panel="${escapeHtml(collection.key)}" style="--depth:${collection.depth || 0}">
+      ${isActive ? `
+        <div class="collection-menu" data-collection-menu-panel>
+          ${isRoot ? "" : `
+            <button type="button" data-rename-collection="${escapeHtml(collection.key)}">重命名</button>
+            <button type="button" data-move-collection="${escapeHtml(collection.key)}">移动到</button>
+            <button type="button" data-delete-collection="${escapeHtml(collection.key)}">删除</button>
+          `}
+          <button type="button" data-create-child-collection="${escapeHtml(collection.key)}">${isRoot ? "在根目录下新建文件夹" : "当前目录下新建文件夹"}</button>
+        </div>
+      ` : ""}
+      ${isEditing ? `
+        <form class="collection-inline-form" data-rename-collection-form="${escapeHtml(collection.key)}">
+          <input name="name" value="${escapeHtml(state.editingCollectionName || collection.name)}" placeholder="文件夹名称">
+          <button type="submit" class="form-action-btn">保存</button>
+          <button type="button" class="ghost-inline-btn" data-cancel-collection-edit>取消</button>
+        </form>
+      ` : ""}
+      ${isMoving ? `
+        <form class="collection-inline-form" data-move-collection-form="${escapeHtml(collection.key)}">
+          <select name="parent_key">${collectionSelectOptions({ includeRoot: true, excludeKey: collection.key, selectedKey: state.movingCollectionTargetKey })}</select>
+          <button type="submit" class="form-action-btn">移动</button>
+          <button type="button" class="ghost-inline-btn" data-cancel-collection-edit>取消</button>
+        </form>
+      ` : ""}
+      ${isCreating ? `
+        <form class="collection-inline-form" data-create-child-collection-form="${escapeHtml(collection.key)}">
+          <input name="name" value="${escapeHtml(state.creatingCollectionName)}" placeholder="新文件夹名称">
+          <button type="submit" class="form-action-btn">新建</button>
+          <button type="button" class="ghost-inline-btn" data-cancel-collection-edit>取消</button>
+        </form>
+      ` : ""}
+    </div>
+  `;
+}
+
+function clearCollectionInlineState() {
+  state.activeCollectionMenuKey = "";
+  state.editingCollectionKey = "";
+  state.editingCollectionName = "";
+  state.movingCollectionKey = "";
+  state.movingCollectionTargetKey = "";
+  state.creatingCollectionParentKey = "";
+  state.creatingCollectionName = "";
+}
+
 function renderTree() {
   const tree = document.querySelector("[data-tree]");
   if (!tree) return;
@@ -353,30 +1122,98 @@ function renderTree() {
     });
   });
   const nodes = [
-    { key: "", name: "全部条目", depth: 0, count: state.items.length },
-    { key: "__recent", name: "最近添加", depth: 0, count: state.items.length },
-    { key: "__unfiled", name: "未分类条目", depth: 0, count: state.items.filter((item) => !item.collections.length).length },
-    { key: "__trash", name: "回收站", depth: 0, count: state.items.filter((item) => item.deleted).length },
-    ...sortedCollections().map((collection) => ({ ...collection, count: countsByCollection.get(collection.key) || 0 })),
+    { key: "", name: "全部条目", depth: 0, count: state.items.length, virtual: true },
+    { key: "__recent", name: "最近添加", depth: 0, count: state.items.length, virtual: true },
+    { key: "__unfiled", name: "未分类条目", depth: 0, count: state.items.filter((item) => !item.collections.length).length, virtual: true },
+    { key: "__trash", name: "回收站", depth: 0, count: state.items.filter((item) => item.deleted).length, virtual: true },
+    { key: "__root", name: "根目录", depth: 0, count: sortedCollections().filter((collection) => !collection.parent_id).length, virtual: true, manageableRoot: true },
+    ...sortedCollections().map((collection) => ({ ...collection, count: countsByCollection.get(collection.key) || 0, virtual: false })),
   ];
   tree.innerHTML = nodes.map((node) => `
-    <button class="tree-node ${state.selectedCollectionKey === node.key ? "active" : ""}" data-tree-key="${node.key}" style="--depth:${node.depth || 0}">
-      <span class="label">${escapeHtml(node.name)}</span><span>${node.count}</span>
-    </button>
+    <div class="tree-row ${state.selectedCollectionKey === node.key ? "active" : ""} ${node.virtual ? "virtual" : ""} ${node.manageableRoot ? "manageable-root" : ""}" style="--depth:${node.depth || 0}">
+      <button class="tree-node" ${node.manageableRoot ? "data-root-tree-node" : `data-tree-key="${node.key}"`}>
+        <span class="label">${escapeHtml(node.name)}</span><span class="tree-count">${node.count}</span>
+      </button>
+      ${(!node.virtual || node.manageableRoot) && state.library?.editable ? `<button type="button" class="tree-action-btn" data-collection-menu="${escapeHtml(node.key)}" title="${node.manageableRoot ? "在根目录下新建文件夹" : "管理文件夹"}">✎</button>` : ""}
+    </div>
+    ${(!node.virtual || node.manageableRoot) ? renderCollectionInlinePanel(node) : ""}
   `).join("");
   tree.querySelectorAll("[data-tree-key]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedCollectionKey = button.dataset.treeKey;
+      clearCollectionInlineState();
       applyFilters();
     });
   });
-  const parentSelect = document.querySelector("[data-parent-select]");
-  if (parentSelect) {
-    parentSelect.innerHTML = `<option value="">根目录</option>` + sortedCollections().map((collection) => {
-      const indent = "　".repeat(collection.depth || 0);
-      return `<option value="${collection.key}">${indent}${escapeHtml(collection.name)}</option>`;
-    }).join("");
-  }
+  tree.querySelectorAll("[data-collection-menu]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const key = button.dataset.collectionMenu;
+    clearCollectionInlineState();
+    state.activeCollectionMenuKey = key;
+    renderTree();
+  }));
+  tree.querySelectorAll("[data-rename-collection]").forEach((button) => button.addEventListener("click", () => {
+    const key = button.dataset.renameCollection;
+    const collection = state.collections.find((value) => value.key === key);
+    clearCollectionInlineState();
+    state.editingCollectionKey = key;
+    state.editingCollectionName = collection?.name || "";
+    renderTree();
+  }));
+  tree.querySelectorAll("[data-move-collection]").forEach((button) => button.addEventListener("click", () => {
+    const key = button.dataset.moveCollection;
+    const collection = state.collections.find((value) => value.key === key);
+    clearCollectionInlineState();
+    state.movingCollectionKey = key;
+    state.movingCollectionTargetKey = state.collections.find((value) => value.collection_id === collection?.parent_id)?.key || "";
+    renderTree();
+  }));
+  tree.querySelectorAll("[data-create-child-collection]").forEach((button) => button.addEventListener("click", () => {
+    clearCollectionInlineState();
+    const parentKey = button.dataset.createChildCollection;
+    state.creatingCollectionParentKey = parentKey === "__root" ? "__root" : parentKey;
+    state.creatingCollectionName = "";
+    renderTree();
+  }));
+  tree.querySelectorAll("[data-delete-collection]").forEach((button) => button.addEventListener("click", async () => {
+    const collection = state.collections.find((value) => value.key === button.dataset.deleteCollection);
+    if (!collection) return;
+    if (!window.confirm(`删除文件夹“${collection.name}”？\n只会删除文件夹结构和条目归属，不会删除条目或附件。`)) return;
+    await deleteJSON(`/api/library/${state.libraryId}/collections/${collection.key}`);
+    if (state.selectedCollectionKey === collection.key) state.selectedCollectionKey = "";
+    clearCollectionInlineState();
+    await loadState();
+  }));
+  tree.querySelectorAll("[data-cancel-collection-edit]").forEach((button) => button.addEventListener("click", () => {
+    clearCollectionInlineState();
+    renderTree();
+  }));
+  tree.querySelectorAll("[data-rename-collection-form]").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const key = form.dataset.renameCollectionForm;
+    const name = String(new FormData(form).get("name") || "").trim();
+    if (!name) return;
+    await postJSON(`/api/library/${state.libraryId}/collections/${key}`, { name }, "PATCH");
+    clearCollectionInlineState();
+    await loadState();
+  }));
+  tree.querySelectorAll("[data-move-collection-form]").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const key = form.dataset.moveCollectionForm;
+    const parentKey = String(new FormData(form).get("parent_key") || "").trim();
+    await postJSON(`/api/library/${state.libraryId}/collections/${key}`, { parent_key: parentKey }, "PATCH");
+    clearCollectionInlineState();
+    await loadState();
+  }));
+  tree.querySelectorAll("[data-create-child-collection-form]").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const parentKey = form.dataset.createChildCollectionForm === "__root" ? "" : form.dataset.createChildCollectionForm;
+    const name = String(new FormData(form).get("name") || "").trim();
+    if (!name) return;
+    await postJSON(`/api/library/${state.libraryId}/collections`, { name, parent_key: parentKey });
+    clearCollectionInlineState();
+    await loadState();
+  }));
 }
 
 function renderTagFilters() {
@@ -902,17 +1739,7 @@ function renderDetail() {
       <div class="field-grid">
         <span>当前</span><strong>${escapeHtml(textOf((item.collections || []).map((collection) => collection.name)) || "未分类")}</strong>
       </div>
-      ${editable ? `
-      <form class="inline-form" data-membership-form>
-        <select name="collection_key">
-          ${state.collections.map((collection) => `<option value="${collection.key}">${escapeHtml(collection.name)}</option>`).join("")}
-        </select>
-        <select name="enabled">
-          <option value="true">加入</option>
-          <option value="false">移出</option>
-        </select>
-        <button type="submit" class="form-action-btn">应用</button>
-      </form>` : `<p class="muted">只读连接模式不能调整文件夹归属。</p>`}
+      <p class="muted">文件夹归属请在条目表批量选择后使用“移动条目”。</p>
     </section>
     <section class="detail-card">
       <h3>原生字段</h3>
@@ -937,13 +1764,6 @@ function renderDetail() {
     event.preventDefault();
     const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
     await postJSON(`/api/library/${state.libraryId}/items/${item.key}/field`, payload, "PATCH");
-    await loadState();
-  });
-  detail.querySelector("[data-membership-form]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-    payload.enabled = payload.enabled === "true";
-    await postJSON(`/api/library/${state.libraryId}/items/${item.key}/collections`, payload);
     await loadState();
   });
   detail.querySelectorAll("[data-note-toggle]").forEach((button) => button.addEventListener("click", () => {
@@ -1036,6 +1856,9 @@ async function loadState() {
   const validKeys = new Set(state.items.map((item) => String(item.key || "")).filter(Boolean));
   state.selectedItemKeys = new Set([...state.selectedItemKeys].filter((key) => validKeys.has(key)));
   state.collections = data.collections || [];
+  if (state.selectedCollectionKey && !state.selectedCollectionKey.startsWith("__") && !state.collections.some((collection) => collection.key === state.selectedCollectionKey)) {
+    state.selectedCollectionKey = "";
+  }
   state.tagShortcuts = data.tag_shortcuts || [];
   state.columns = (data.library.columns || DEFAULT_COLUMNS).filter((key) => new Map(ALL_COLUMNS).has(key));
   state.columnWidths = data.library.column_widths || {};
@@ -1048,8 +1871,11 @@ async function loadState() {
       abstract_zh: state.selectedItem.structured?.abstract_zh || "",
     };
   }
+  if (state.attachmentEditorItemKey && !state.items.some((item) => item.key === state.attachmentEditorItemKey)) {
+    state.attachmentEditorItemKey = "";
+    state.selectedAttachmentKeys = new Set();
+  }
   document.querySelector("[data-unsynced]").textContent = `未同步 ${data.library.unsynced_count || 0}`;
-  document.querySelector("[data-create-collection-form]").hidden = !data.library.editable;
   applyFilters();
   renderDetail();
   rerenderActiveTagPopover();
@@ -1069,15 +1895,13 @@ function setupLibraryPage() {
     await postJSON(`/api/library/${state.libraryId}/preferences/plain-tags`, { collapsed: state.plainCollapsed });
     applyFilters();
   });
-  document.querySelector("[data-create-collection-form]")?.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-    await postJSON(`/api/library/${state.libraryId}/collections`, payload);
-    event.currentTarget.reset();
-    await loadState();
-  });
   document.querySelectorAll("[data-bulk-action]").forEach((button) => button.addEventListener("click", () => {
-    notifyFeatureInProgress(button.dataset.bulkAction);
+    if (button.dataset.bulkAction === "add-item") openAddItemModal();
+    else if (button.dataset.bulkAction === "delete-items") openDeleteItemsModal();
+    else if (button.dataset.bulkAction === "move-items") openMoveItemsModal();
+    else if (button.dataset.bulkAction === "edit-attachments") openAttachmentEditorModal();
+    else if (button.dataset.bulkAction === "export-citation") openCitationExportModal();
+    else notifyFeatureInProgress(button.dataset.bulkAction);
   }));
   setupColumnsPanel();
   loadState().catch((error) => window.alert(error.message));

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import sqlite3
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
 from zotero_web_library import app_store
+from zotero_web_library.metadata_import import ImportedCreator, ImportedItem
 from zotero_web_library.sources import SourceError, create_local_copy, create_read_only_source
 from zotero_web_library.sync import mark_conflicts_for_changed_keys, prepare_sync_payloads
+from zotero_web_library import web
 from zotero_web_library.web import create_app
 from zotero_web_library.zotero_adapter import ZoteroRepository
 
@@ -265,3 +268,367 @@ def test_structured_field_api_updates_supported_keys_only(
 
     item = next(item for item in ZoteroRepository(library).state()["items"] if item["key"] == "ITEM0001")
     assert item["structured"]["remark"] == "接口备注"
+
+
+def test_import_metadata_creates_native_item_and_adds_to_collection(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    summary = repo.import_metadata_items(
+        [
+            ImportedItem(
+                item_type="journalArticle",
+                fields={"title": "Imported Paper", "DOI": "10.9999/imported", "publicationTitle": "Demo Journal", "date": "2026"},
+                creators=[ImportedCreator(first_name="Ada", last_name="Lovelace")],
+                identifiers={"doi": "10.9999/imported"},
+                source="test",
+            )
+        ],
+        "COLL0001",
+    )
+
+    assert summary["created_count"] == 1
+    item = next(item for item in repo.state()["items"] if item["key"] == summary["results"][0]["item_key"])
+    assert item["title"] == "Imported Paper"
+    assert item["fields"]["DOI"] == "10.9999/imported"
+    assert item["creators_display"] == "Ada Lovelace"
+    assert any(collection["key"] == "COLL0001" for collection in item["collections"])
+
+
+def test_import_metadata_reuses_existing_strong_identifier_without_creating_duplicate(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    before = len(repo.state()["items"])
+    summary = repo.import_metadata_items(
+        [
+            ImportedItem(
+                item_type="journalArticle",
+                fields={"title": "Should Not Create", "DOI": "https://doi.org/10.48550/ARXIV.2406.09246"},
+                identifiers={"doi": "10.48550/arXiv.2406.09246"},
+                source="test",
+            )
+        ],
+        "COLL0001",
+    )
+
+    assert summary["existing_count"] == 1
+    assert summary["results"][0]["item_key"] == "ITEM0001"
+    assert len(repo.state()["items"]) == before
+    item = next(item for item in repo.state()["items"] if item["key"] == "ITEM0001")
+    assert any(collection["key"] == "COLL0001" for collection in item["collections"])
+    assert item["title"] == "OpenVLA"
+
+
+def test_import_metadata_reports_conflict_when_multiple_existing_items_match(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    db_path = Path(library["data_path"]) / "zotero.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (99, 1, "2026-01-01", "2026-01-01", 1, "DUP0001", 0, 1))
+        conn.execute("INSERT INTO itemData VALUES (?, ?, ?)", (99, 4, 4))
+        conn.commit()
+
+    summary = ZoteroRepository(library).import_metadata_items(
+        [
+            ImportedItem(
+                item_type="journalArticle",
+                fields={"title": "Conflict", "DOI": "10.48550/arXiv.2406.09246"},
+                identifiers={"doi": "10.48550/arXiv.2406.09246"},
+                source="test",
+            )
+        ]
+    )
+
+    assert summary["conflict_count"] == 1
+    assert {candidate["key"] for candidate in summary["results"][0]["candidates"]} == {"ITEM0001", "DUP0001"}
+
+
+def test_import_metadata_blocked_in_read_only_mode(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_read_only_source(zotero_fixture)
+    with pytest.raises(SourceError):
+        ZoteroRepository(library).import_metadata_items([ImportedItem(item_type="journalArticle", fields={"title": "Nope"})])
+
+
+def test_import_apis_use_shared_metadata_import_flow(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    monkeypatch.setattr(
+        web,
+        "resolve_identifier",
+        lambda value: ImportedItem(
+            item_type="journalArticle",
+            fields={"title": f"Resolved {value}", "DOI": "10.1212/api"},
+            identifiers={"doi": "10.1212/api"},
+            source="mock",
+        ),
+    )
+    monkeypatch.setattr(
+        web,
+        "parse_import_text",
+        lambda text, fmt: [
+            ImportedItem(
+                item_type="book",
+                fields={"title": "Text Import", "ISBN": "9780306406157"},
+                identifiers={"isbn": "9780306406157"},
+                source=fmt,
+            )
+        ],
+    )
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/items/import-identifier",
+        json={"identifier": "10.1212/api", "collection_key": "COLL0001"},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["created_count"] == 1
+
+    duplicate = client.post(
+        f"/api/library/{library['library_id']}/items/import-identifier",
+        json={"identifier": "10.1212/api", "collection_key": "COLL0001"},
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.get_json()["existing_count"] == 1
+
+    text_response = client.post(
+        f"/api/library/{library['library_id']}/items/import-text",
+        json={"text": "@book{}", "format": "bibtex"},
+    )
+    assert text_response.status_code == 200
+    assert text_response.get_json()["created_count"] == 1
+
+
+def test_delete_items_to_trash_marks_deleted_without_removing_item(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    result = repo.delete_items(["ITEM0001"], "trash")
+
+    assert result["deleted_count"] == 1
+    item = next(item for item in repo.state()["items"] if item["key"] == "ITEM0001")
+    assert item["deleted"] is True
+    assert (Path(library["data_path"]) / "storage" / "ATTACH01").exists()
+
+
+def test_permanent_delete_items_removes_records_and_attachment_storage(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+    storage_dir = Path(library["data_path"]) / "storage" / "ATTACH01"
+    assert storage_dir.exists()
+
+    result = repo.delete_items(["ITEM0001"], "permanent")
+
+    assert result["deleted_count"] == 1
+    assert result["removed_storage_dirs"] >= 1
+    assert not storage_dir.exists()
+    assert "ITEM0001" not in {item["key"] for item in repo.state()["items"]}
+    db_path = Path(library["data_path"]) / "zotero.sqlite"
+    with sqlite3.connect(db_path) as conn:
+      conn.row_factory = sqlite3.Row
+      for table in ["items", "itemData", "itemTags", "itemCreators", "collectionItems", "deletedItems", "itemAttachments", "itemNotes"]:
+          row = conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE itemID IN (1, 2, 3, 4, 5, 6)").fetchone()
+          assert row["count"] == 0
+
+
+def test_move_items_replaces_existing_collection_memberships(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    result = repo.move_items(["ITEM0001"], "COLL0001")
+
+    assert result["moved_count"] == 1
+    item = next(item for item in repo.state()["items"] if item["key"] == "ITEM0001")
+    assert [collection["key"] for collection in item["collections"]] == ["COLL0001"]
+
+
+def test_delete_collection_removes_tree_and_memberships_but_keeps_items(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    result = repo.delete_collection("COLL0001")
+
+    assert result["deleted_count"] == 2
+    state = repo.state()
+    assert not state["collections"]
+    item = next(item for item in state["items"] if item["key"] == "ITEM0001")
+    assert item["collections"] == []
+
+
+def test_item_and_collection_management_blocked_in_read_only_mode(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_read_only_source(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    with pytest.raises(SourceError):
+        repo.delete_items(["ITEM0001"], "trash")
+    with pytest.raises(SourceError):
+        repo.move_items(["ITEM0001"], "COLL0001")
+    with pytest.raises(SourceError):
+        repo.delete_collection("COLL0001")
+
+
+def test_item_management_apis(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    move_response = client.post(
+        f"/api/library/{library['library_id']}/items/move",
+        json={"item_keys": ["ITEM0001"], "target_collection_key": "COLL0001"},
+    )
+    assert move_response.status_code == 200
+    assert move_response.get_json()["moved_count"] == 1
+
+    delete_response = client.post(
+        f"/api/library/{library['library_id']}/items/delete",
+        json={"item_keys": ["ITEM0001"], "mode": "trash"},
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.get_json()["mode"] == "trash"
+
+    collection_response = client.delete(f"/api/library/{library['library_id']}/collections/COLL0002")
+    assert collection_response.status_code == 200
+    assert collection_response.get_json()["deleted_count"] == 1
+
+
+def test_file_attachment_add_rename_and_delete_updates_storage(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+    source_file = tmp_path / "demo.pdf"
+    source_file.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    added = repo.add_file_attachment("ITEM0001", source_file, "demo.pdf", "application/pdf")
+    attachment_key = added["attachment_key"]
+    storage_dir = Path(library["data_path"]) / "storage" / attachment_key
+    assert (storage_dir / "demo.pdf").exists()
+
+    item = next(item for item in repo.state()["items"] if item["key"] == "ITEM0001")
+    attachment = next(value for value in item["attachments"] if value["key"] == attachment_key)
+    assert attachment["display_label"] == "demo.pdf"
+    assert attachment["kind"] == "pdf"
+
+    renamed = repo.rename_attachment(attachment_key, "renamed")
+    assert renamed["title"] == "renamed.pdf"
+    assert not (storage_dir / "demo.pdf").exists()
+    assert (storage_dir / "renamed.pdf").exists()
+    item = next(item for item in repo.state()["items"] if item["key"] == "ITEM0001")
+    attachment = next(value for value in item["attachments"] if value["key"] == attachment_key)
+    assert attachment["path"] == "storage:renamed.pdf"
+    assert attachment["display_label"] == "renamed.pdf"
+
+    deleted = repo.delete_attachments([attachment_key])
+    assert deleted["deleted_count"] == 1
+    assert deleted["removed_storage_dirs"] == 1
+    assert not storage_dir.exists()
+    item = next(item for item in repo.state()["items"] if item["key"] == "ITEM0001")
+    assert attachment_key not in {attachment["key"] for attachment in item["attachments"]}
+
+
+def test_url_attachment_add_and_rename_does_not_create_storage(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    repo = ZoteroRepository(library)
+
+    added = repo.add_url_attachment("ITEM0001", "https://example.com/paper", "项目主页")
+    attachment_key = added["attachment_key"]
+
+    assert not (Path(library["data_path"]) / "storage" / attachment_key).exists()
+    item = next(item for item in repo.state()["items"] if item["key"] == "ITEM0001")
+    attachment = next(value for value in item["attachments"] if value["key"] == attachment_key)
+    assert attachment["kind"] == "link"
+    assert attachment["display_label"] == "项目主页"
+    assert attachment["path"] == "https://example.com/paper"
+
+    repo.rename_attachment(attachment_key, "新标题")
+    item = next(item for item in repo.state()["items"] if item["key"] == "ITEM0001")
+    attachment = next(value for value in item["attachments"] if value["key"] == attachment_key)
+    assert attachment["display_label"] == "新标题"
+    assert attachment["path"] == "https://example.com/paper"
+
+
+def test_attachment_edits_blocked_in_read_only_mode(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_read_only_source(zotero_fixture)
+    repo = ZoteroRepository(library)
+    source_file = tmp_path / "demo.pdf"
+    source_file.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    with pytest.raises(SourceError):
+        repo.add_file_attachment("ITEM0001", source_file, "demo.pdf", "application/pdf")
+    with pytest.raises(SourceError):
+        repo.add_url_attachment("ITEM0001", "https://example.com", "Example")
+    with pytest.raises(SourceError):
+        repo.rename_attachment("ATTACH01", "New")
+    with pytest.raises(SourceError):
+        repo.delete_attachments(["ATTACH01"])
+
+
+def test_attachment_management_apis(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    upload_response = client.post(
+        f"/api/library/{library['library_id']}/items/ITEM0001/attachments/file",
+        data={"file": (BytesIO(b"%PDF-1.4\n%%EOF\n"), "api.pdf")},
+        content_type="multipart/form-data",
+    )
+    assert upload_response.status_code == 200
+    uploaded_key = upload_response.get_json()["attachment_key"]
+
+    url_response = client.post(
+        f"/api/library/{library['library_id']}/items/ITEM0001/attachments/url",
+        json={"url": "https://example.com/api", "title": "API 链接"},
+    )
+    assert url_response.status_code == 200
+
+    rename_response = client.patch(
+        f"/api/library/{library['library_id']}/attachments/{uploaded_key}",
+        json={"title": "api-renamed"},
+    )
+    assert rename_response.status_code == 200
+    assert rename_response.get_json()["title"] == "api-renamed.pdf"
+
+    delete_response = client.delete(
+        f"/api/library/{library['library_id']}/attachments/{uploaded_key}",
+        json={"attachment_keys": [uploaded_key]},
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.get_json()["deleted_count"] == 1

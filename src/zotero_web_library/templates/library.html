@@ -33,13 +33,6 @@
             <p>集合树与标签筛选</p>
           </div>
         </div>
-        <form class="create-collection" data-create-collection-form hidden>
-          <input name="name" placeholder="新建文件夹">
-          <select name="parent_key" data-parent-select>
-            <option value="">根目录</option>
-          </select>
-          <button type="submit">新建</button>
-        </form>
         <nav class="tree-list" data-tree></nav>
         <section class="tag-filter-section">
           <h3>评分</h3>
@@ -75,8 +68,9 @@
           <div class="table-bulkbar">
             <div class="bulk-actions" data-bulk-actions>
               <button class="bulk-action-btn" type="button" data-bulk-action="add-item">添加条目</button>
-              <button class="bulk-action-btn" type="button" data-bulk-action="delete-items">删除</button>
-              <button class="bulk-action-btn" type="button" data-bulk-action="add-attachment">添加附件</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="delete-items">删除条目</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="move-items">移动条目</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="edit-attachments">附件编辑</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="download-papers">文献下载</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="query-rank">期刊&会议等级查询</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="export-citation">引用导出</button>
@@ -118,6 +112,12 @@
       <button type="button" data-save-columns>保存字段设置</button>
     </section>
   </div>
+
+  <div class="floating-panel" data-add-item-modal hidden></div>
+  <div class="floating-panel" data-export-citation-modal hidden></div>
+  <div class="floating-panel" data-delete-items-modal hidden></div>
+  <div class="floating-panel" data-move-items-modal hidden></div>
+  <div class="floating-panel" data-attachment-editor-modal hidden></div>
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

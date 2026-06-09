@@ -43,6 +43,55 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "notifyFeatureInProgress" in app_js
     assert "data-selected-count" in app_js
     assert "data-bulk-action" in app_js
+    assert "删除条目" in library_html
+    assert "data-bulk-action=\"move-items\"" in library_html
+    assert "附件编辑" in library_html
+    assert "添加附件" not in library_html
+    assert "data-bulk-action=\"edit-attachments\"" in library_html
+    assert "data-attachment-editor-modal" in library_html
+    assert "data-delete-items-modal" in library_html
+    assert "data-move-items-modal" in library_html
+    assert "data-delete-items-form" in app_js
+    assert "data-move-items-form" in app_js
+    assert "/items/delete" in app_js
+    assert "/items/move" in app_js
+    assert "keys.length !== 1" in app_js
+    assert "data-add-file-attachment-form" in app_js
+    assert "data-add-url-attachment-form" in app_js
+    assert "data-edit-attachment-name" in app_js
+    assert "data-delete-selected-attachments" in app_js
+    assert "/attachments/file" in app_js
+    assert "/attachments/url" in app_js
+    assert "data-collection-menu" in app_js
+    assert "data-rename-collection" in app_js
+    assert "data-move-collection" in app_js
+    assert "data-delete-collection" in app_js
+    assert "data-create-child-collection" in app_js
+    assert "key: \"__root\", name: \"根目录\"" in app_js
+    assert "在根目录下新建文件夹" in app_js
+    assert "manageable-root" in app_js
+    assert "data-membership-form" not in app_js
+    assert "data-create-collection-form" not in library_html
+    assert "data-add-item-modal" in library_html
+    assert "data-export-citation-modal" in library_html
+    assert "data-import-identifier-form" in app_js
+    assert "data-import-text-form" in app_js
+    assert "/items/import-identifier" in app_js
+    assert "/items/import-text" in app_js
+    assert "/items/export-citations" in app_js
+    assert "data-export-citation-form" in app_js
+    assert "data-export-citation-format" in app_js
+    assert "data-export-citation-error" in app_js
+    assert "BibLaTeX" in app_js
+    assert "CSL JSON" in app_js
+    assert "selectedItemKeys()" in app_js
+    assert "data-import-result-status" in app_js
+    assert "条目已存在，已定位到已有条目" in app_js
+    assert "currentRealCollectionKey" in app_js
+    assert ".add-item-card" in app_css
+    assert ".export-citation-card" in app_css
+    assert ".import-results" in app_css
+    assert ".floating-card .form-action-btn" in app_css
     assert "function renderTitleCell" in app_js
     assert "title-primary" in app_js
     assert "title-secondary" in app_js
@@ -71,8 +120,9 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "本地副本" in library_html
     assert "topbar-meta" in library_html
     assert "添加条目" in library_html
-    assert "删除" in library_html
-    assert "添加附件" in library_html
+    assert "删除条目" in library_html
+    assert "移动条目" in library_html
+    assert "附件编辑" in library_html
     assert "文献下载" in library_html
     assert "期刊&会议等级查询" in library_html
     assert "引用导出" in library_html
@@ -99,6 +149,15 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".row-checkbox" in app_css
     assert ".bulk-actions" in app_css
     assert ".bulk-action-btn" in app_css
+    assert ".collection-menu" in app_css
+    assert ".tree-action-btn" in app_css
+    assert ".tree-row.manageable-root" in app_css
+    assert ".bulk-modal-form" in app_css
+    assert ".attachment-editor-card" in app_css
+    assert ".attachment-add-grid" in app_css
+    assert "input[type=\"file\"]::file-selector-button" in app_css
+    assert ".bulk-modal-actions .form-action-btn" in app_css
+    assert ".attachment-editor-actions .form-action-btn" in app_css
     assert ".table-stats" in app_css
     assert ".topbar-meta" in app_css
     assert "overflow-x: hidden" in app_css
@@ -109,3 +168,17 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "overflow-wrap: anywhere" in app_css
     assert "data-toggle-plain-tags" in library_html
     assert "code_status" not in library_html
+
+
+def test_translator_document_records_v1_boundaries() -> None:
+    root = Path(__file__).resolve().parents[1]
+    doc = (root / "docs" / "zotero-translators.md").read_text(encoding="utf-8")
+    assert "Search translator" in doc
+    assert "Web + Search translator" in doc
+    assert "Import translator" in doc
+    assert "Export translator" in doc
+    assert "不直接执行 Zotero translator JS" in doc
+    assert "BibLaTeX" in doc
+    assert "Zotero RDF" in doc
+    assert "RIS" in doc
+    assert "BibTeX" in doc
