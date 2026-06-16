@@ -124,10 +124,20 @@ function postJSON(url, payload, method = "POST") {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   }).then(async (response) => {
-    const data = await response.json();
+    const data = await parseJSONResponse(response);
     if (!response.ok || data.ok === false) throw new Error(data.error || "请求失败");
     return data;
   });
+}
+
+async function parseJSONResponse(response) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const summary = text.replace(/\s+/g, " ").trim().slice(0, 120);
+    throw new Error(`请求返回了非 JSON 内容（HTTP ${response.status}）：${summary || response.statusText}`);
+  }
 }
 
 function deleteJSON(url, payload = {}) {
@@ -1978,7 +1988,8 @@ function renderColumnPanel() {
 }
 
 async function loadState() {
-  const data = await fetch(`/api/library/${state.libraryId}/state`).then((response) => response.json());
+  const response = await fetch(`/api/library/${state.libraryId}/state`);
+  const data = await parseJSONResponse(response);
   if (!data.ok) throw new Error(data.error || "加载失败");
   state.library = data.library;
   state.items = data.items || [];

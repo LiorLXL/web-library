@@ -31,9 +31,19 @@ function qs(selector) {
 
 async function readerJSON(url, options = {}) {
   const response = await fetch(url, options);
-  const data = await response.json();
+  const data = await parseReaderJSONResponse(response);
   if (!response.ok || data.ok === false) throw new Error(data.error || "请求失败");
   return data;
+}
+
+async function parseReaderJSONResponse(response) {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const summary = text.replace(/\s+/g, " ").trim().slice(0, 120);
+    throw new Error(`请求返回了非 JSON 内容（HTTP ${response.status}）：${summary || response.statusText}`);
+  }
 }
 
 function readerStorageKey(name) {

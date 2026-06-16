@@ -40,6 +40,19 @@ def test_local_copy_copies_sqlite_and_storage(zotero_fixture: Path, monkeypatch:
     assert create_local_copy(zotero_fixture)["library_id"] == record["library_id"]
 
 
+def test_local_copy_data_path_is_portable(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    record = create_local_copy(zotero_fixture)
+    portable_path = Path(record["data_path"])
+    stale_path = tmp_path / "old-location" / record["library_id"]
+    app_store.upsert_library({**record, "data_path": stale_path})
+
+    restored = app_store.get_library(record["library_id"])
+    assert restored is not None
+    assert Path(restored["data_path"]) == portable_path
+    assert Path(app_store.list_libraries()[0]["data_path"]) == portable_path
+
+
 def test_delete_local_copy_removes_only_managed_copy(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     record = create_local_copy(zotero_fixture)

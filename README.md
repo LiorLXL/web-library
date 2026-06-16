@@ -86,10 +86,10 @@ C:\Users\<你自己的用户名>\Zotero
 - 应用自己的元数据，例如快捷标签、列设置、界面偏好等，存放在 `app-data/app.sqlite`。
 
 更详细的字段来源、解析规则和写回约束见：
-[docs/data-mapping.md](/C:/Users/27216/Desktop/project/web-library/docs/data-mapping.md)
+[docs/data-mapping.md](docs/data-mapping.md)
 
 Zotero translators 的调查、可复用边界和添加条目 v1 路线见：
-[docs/zotero-translators.md](/C:/Users/27216/Desktop/project/web-library/docs/zotero-translators.md)
+[docs/zotero-translators.md](docs/zotero-translators.md)
 
 ## 环境要求
 

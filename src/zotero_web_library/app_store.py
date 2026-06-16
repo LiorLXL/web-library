@@ -92,6 +92,7 @@ SUPPORTED_COLUMNS = {
 }
 
 TAG_SHORTCUTS_INITIALIZED_KEY = "tag_shortcuts_initialized"
+LOCAL_COPY_MODE = "local_copy"
 
 
 def ensure_app_store() -> None:
@@ -111,7 +112,7 @@ def connect() -> sqlite3.Connection:
 def list_libraries() -> list[dict[str, Any]]:
     ensure_app_store()
     with connect() as conn:
-        rows = [dict(row) for row in conn.execute("SELECT * FROM libraries ORDER BY updated_at DESC").fetchall()]
+        rows = [_portable_library_row(dict(row)) for row in conn.execute("SELECT * FROM libraries ORDER BY updated_at DESC").fetchall()]
     deduped: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for row in rows:
@@ -126,7 +127,7 @@ def list_libraries() -> list[dict[str, Any]]:
 def list_all_libraries() -> list[dict[str, Any]]:
     ensure_app_store()
     with connect() as conn:
-        return [dict(row) for row in conn.execute("SELECT * FROM libraries ORDER BY updated_at DESC").fetchall()]
+        return [_portable_library_row(dict(row)) for row in conn.execute("SELECT * FROM libraries ORDER BY updated_at DESC").fetchall()]
 
 
 def _source_key(path: str | Path) -> str:
@@ -140,7 +141,20 @@ def get_library(library_id: str) -> dict[str, Any] | None:
     ensure_app_store()
     with connect() as conn:
         row = conn.execute("SELECT * FROM libraries WHERE library_id = ?", (library_id,)).fetchone()
-        return dict(row) if row else None
+        return _portable_library_row(dict(row)) if row else None
+
+
+def _portable_library_row(row: dict[str, Any]) -> dict[str, Any]:
+    if row.get("mode") != LOCAL_COPY_MODE:
+        return row
+    portable_path = libraries_dir() / str(row.get("library_id", ""))
+    if (portable_path / "zotero.sqlite").exists():
+        row["data_path"] = str(portable_path)
+        return row
+    data_path = Path(str(row.get("data_path", "")))
+    if (data_path / "zotero.sqlite").exists():
+        return row
+    return row
 
 
 def delete_library_record(library_id: str) -> None:
