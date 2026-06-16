@@ -4,6 +4,12 @@
 
 项目与 Guangming AI Workbench 分离维护，重点是把本地 Zotero 文库以三栏高密度界面呈现出来，并在不破坏原始数据结构的前提下，提供标签语义解析、结构化字段提取、本地副本编辑等能力。
 
+![image-20260616143947757](assets/image-20260616143947757.png)
+
+![image-20260616144115054](assets/image-20260616144115054.png)
+
+![image-20260616144151252](assets/image-20260616144151252.png)
+
 ## 当前功能
 
 - 三栏 Zotero 风格界面：左侧文件夹树与筛选，中间条目表，右侧条目详情。
@@ -106,6 +112,45 @@ uv run python -m zotero_web_library.web
 http://127.0.0.1:5088
 ```
 
+默认情况下，本地开发会使用 `./app-data/` 作为应用数据目录。可以用环境变量覆盖：
+
+```powershell
+$env:WEB_LIBRARY_DATA_DIR="C:\path\to\app-data"
+$env:WEB_LIBRARY_HOST="127.0.0.1"
+$env:WEB_LIBRARY_PORT="5088"
+$env:WEB_LIBRARY_DEBUG="1"
+uv run python -m zotero_web_library.web
+```
+
+## Docker 启动
+
+首次 clone 仓库后，如果需要构建带完整 demo 数据的 Docker 镜像，请先拉取 Git LFS 文件：
+
+```powershell
+git lfs pull
+```
+
+然后构建并启动：
+
+```powershell
+docker compose up --build
+```
+
+启动后访问：
+
+```text
+http://localhost:5088
+```
+
+Docker 镜像内置 `demo-data/` 作为演示数据模板。容器首次启动时，如果 `/app/app-data/app.sqlite` 不存在，会自动把 `/opt/demo-data/` 复制到 Docker volume 中。后续重启不会覆盖已有数据。
+
+如需重置 Docker demo 数据：
+
+```powershell
+docker compose down -v
+docker compose up --build
+```
+
 ## 测试
 
 ```powershell
@@ -128,9 +173,11 @@ uv run pytest
 
 `app-data/` 已加入 Git 忽略，因为其中可能包含私人 Zotero 数据和复制出的附件文件。
 
+`demo-data/` 是可公开的演示数据模板，会进入 Docker 镜像，并通过 Git LFS 跟踪。
+
 ## 使用注意
 
 - 不要提交 `app-data/`。
-- 不要提交复制出来的 Zotero 数据库或附件文件。
+- 只有确认可公开的演示数据才放入 `demo-data/`。
 - 浏览真实 Zotero 文库时，优先使用只读连接模式。
 - 需要实验性编辑时，使用本地副本模式，不要直接碰源库。

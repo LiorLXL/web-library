@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any
 
@@ -485,8 +486,28 @@ def create_app() -> Flask:
 app = create_app()
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 def main() -> None:
-    app.run(host="127.0.0.1", port=5088, debug=True, use_reloader=False)
+    host = os.environ.get("WEB_LIBRARY_HOST", "127.0.0.1")
+    port = _env_int("WEB_LIBRARY_PORT", 5088)
+    debug = _env_bool("WEB_LIBRARY_DEBUG", True)
+    app.run(host=host, port=port, debug=debug, use_reloader=False)
 
 
 if __name__ == "__main__":

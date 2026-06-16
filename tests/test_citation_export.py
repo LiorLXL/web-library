@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -12,7 +12,7 @@ from zotero_web_library.zotero_adapter import ZoteroRepository
 
 
 def fixture_items(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[dict, list[dict]]:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_read_only_source(zotero_fixture)
     return library, ZoteroRepository(library).items()
 
@@ -85,7 +85,7 @@ def test_export_rejects_empty_unknown_and_missing_selection(
 
 
 def test_export_api_allows_read_only_library(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_read_only_source(zotero_fixture)
     client = create_app().test_client()
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -21,7 +21,7 @@ def test_invalid_zotero_dir_rejected(tmp_path: Path) -> None:
 
 
 def test_read_only_source_records_original_path(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     record = create_read_only_source(zotero_fixture)
     assert record["mode"] == READ_ONLY
     assert Path(record["data_path"]) == zotero_fixture.resolve()
@@ -30,7 +30,7 @@ def test_read_only_source_records_original_path(zotero_fixture: Path, monkeypatc
 
 
 def test_local_copy_copies_sqlite_and_storage(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     record = create_local_copy(zotero_fixture)
     assert record["mode"] == LOCAL_COPY
     assert Path(record["data_path"]) != zotero_fixture.resolve()
@@ -41,7 +41,7 @@ def test_local_copy_copies_sqlite_and_storage(zotero_fixture: Path, monkeypatch:
 
 
 def test_delete_local_copy_removes_only_managed_copy(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     record = create_local_copy(zotero_fixture)
     data_path = Path(record["data_path"])
     assert data_path.exists()

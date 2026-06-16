@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlite3
 from io import BytesIO
@@ -16,7 +16,7 @@ from zotero_web_library.zotero_adapter import ZoteroRepository
 
 
 def test_adapter_reads_items_collections_tags_and_attachments(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_read_only_source(zotero_fixture)
     repo = ZoteroRepository(library)
     state = repo.state()
@@ -45,14 +45,14 @@ def test_adapter_reads_items_collections_tags_and_attachments(zotero_fixture: Pa
 
 
 def test_read_only_blocks_edits(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_read_only_source(zotero_fixture)
     with pytest.raises(SourceError):
         ZoteroRepository(library).create_collection("New")
 
 
 def test_local_copy_allows_collection_and_field_edits(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
     repo.create_collection("New")
@@ -75,7 +75,7 @@ def test_local_copy_allows_collection_and_field_edits(zotero_fixture: Path, monk
 def test_state_exposes_structured_fields_from_extra_and_abstract_note(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_read_only_source(zotero_fixture)
     item = next(item for item in ZoteroRepository(library).state()["items"] if item["key"] == "ITEM0001")
     assert item["structured"] == {
@@ -88,7 +88,7 @@ def test_state_exposes_structured_fields_from_extra_and_abstract_note(
 def test_update_structured_field_preserves_other_blocks_and_legacy_text(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -107,7 +107,7 @@ def test_update_structured_field_preserves_other_blocks_and_legacy_text(
 def test_update_structured_field_appends_missing_block_without_overwriting_field(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -122,7 +122,7 @@ def test_update_structured_field_appends_missing_block_without_overwriting_field
 def test_update_item_field_rejects_unknown_native_field_name(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -131,7 +131,7 @@ def test_update_item_field_rejects_unknown_native_field_name(
 
 
 def test_local_copy_reparents_collection_and_prepares_sync_payloads(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
     repo.create_collection("Parent")
@@ -147,7 +147,7 @@ def test_local_copy_reparents_collection_and_prepares_sync_payloads(zotero_fixtu
 
 
 def test_deleting_shortcut_does_not_remove_item_tag(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
     repo.add_tag("ITEM0001", "多提示词")
@@ -161,7 +161,7 @@ def test_deleting_shortcut_does_not_remove_item_tag(zotero_fixture: Path, monkey
 
 
 def test_tag_shortcuts_seed_from_existing_nested_tags(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     shortcuts = ZoteroRepository(library).state()["tag_shortcuts"]
     shortcut_tags = {item["tag"] for item in shortcuts}
@@ -170,7 +170,7 @@ def test_tag_shortcuts_seed_from_existing_nested_tags(zotero_fixture: Path, monk
 
 
 def test_deleted_shortcut_does_not_reseed_after_reload(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
     repo.state()
@@ -180,7 +180,7 @@ def test_deleted_shortcut_does_not_reseed_after_reload(zotero_fixture: Path, mon
 
 
 def test_tag_writes_use_zotero_tag_name_with_hash_prefix(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
     repo.add_tag("ITEM0001", "多提示词")
@@ -212,7 +212,7 @@ def test_tag_writes_use_zotero_tag_name_with_hash_prefix(zotero_fixture: Path, m
 def test_semantic_tag_parse_and_write_boundaries_match_current_product_scope(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -250,7 +250,7 @@ def test_semantic_tag_parse_and_write_boundaries_match_current_product_scope(
 def test_structured_field_api_updates_supported_keys_only(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     client = create_app().test_client()
 
@@ -273,7 +273,7 @@ def test_structured_field_api_updates_supported_keys_only(
 def test_import_metadata_creates_native_item_and_adds_to_collection(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -301,7 +301,7 @@ def test_import_metadata_creates_native_item_and_adds_to_collection(
 def test_import_metadata_reuses_existing_strong_identifier_without_creating_duplicate(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -329,7 +329,7 @@ def test_import_metadata_reuses_existing_strong_identifier_without_creating_dupl
 def test_import_metadata_reports_conflict_when_multiple_existing_items_match(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     db_path = Path(library["data_path"]) / "zotero.sqlite"
     with sqlite3.connect(db_path) as conn:
@@ -353,7 +353,7 @@ def test_import_metadata_reports_conflict_when_multiple_existing_items_match(
 
 
 def test_import_metadata_blocked_in_read_only_mode(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_read_only_source(zotero_fixture)
     with pytest.raises(SourceError):
         ZoteroRepository(library).import_metadata_items([ImportedItem(item_type="journalArticle", fields={"title": "Nope"})])
@@ -362,7 +362,7 @@ def test_import_metadata_blocked_in_read_only_mode(zotero_fixture: Path, monkeyp
 def test_import_apis_use_shared_metadata_import_flow(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     monkeypatch.setattr(
         web,
@@ -413,7 +413,7 @@ def test_import_apis_use_shared_metadata_import_flow(
 def test_delete_items_to_trash_marks_deleted_without_removing_item(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -428,7 +428,7 @@ def test_delete_items_to_trash_marks_deleted_without_removing_item(
 def test_permanent_delete_items_removes_records_and_attachment_storage(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
     storage_dir = Path(library["data_path"]) / "storage" / "ATTACH01"
@@ -452,7 +452,7 @@ def test_permanent_delete_items_removes_records_and_attachment_storage(
 def test_move_items_replaces_existing_collection_memberships(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -466,7 +466,7 @@ def test_move_items_replaces_existing_collection_memberships(
 def test_delete_collection_removes_tree_and_memberships_but_keeps_items(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -482,7 +482,7 @@ def test_delete_collection_removes_tree_and_memberships_but_keeps_items(
 def test_item_and_collection_management_blocked_in_read_only_mode(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_read_only_source(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -497,7 +497,7 @@ def test_item_and_collection_management_blocked_in_read_only_mode(
 def test_item_management_apis(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     client = create_app().test_client()
 
@@ -523,7 +523,7 @@ def test_item_management_apis(
 def test_file_attachment_add_rename_and_delete_updates_storage(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
     source_file = tmp_path / "demo.pdf"
@@ -559,7 +559,7 @@ def test_file_attachment_add_rename_and_delete_updates_storage(
 def test_pdf_annotation_read_and_create_use_zotero_native_table(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -609,7 +609,7 @@ def test_pdf_annotation_read_and_create_use_zotero_native_table(
 def test_pdf_annotation_rejects_non_pdf_and_read_only(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     local_library = create_local_copy(zotero_fixture)
     with pytest.raises(ValueError, match="仅支持 PDF"):
         ZoteroRepository(local_library).create_pdf_annotation(
@@ -628,7 +628,7 @@ def test_pdf_annotation_rejects_non_pdf_and_read_only(
 def test_clear_pdf_annotations_deletes_intersecting_saved_styles_only(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
     matching = repo.create_pdf_annotation(
@@ -657,7 +657,7 @@ def test_clear_pdf_annotations_deletes_intersecting_saved_styles_only(
 def test_clear_pdf_annotations_rejects_read_only_source(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     readonly_library = create_read_only_source(zotero_fixture)
     with pytest.raises(SourceError):
         ZoteroRepository(readonly_library).clear_pdf_annotations(
@@ -669,7 +669,7 @@ def test_clear_pdf_annotations_rejects_read_only_source(
 def test_deleting_attachment_removes_child_annotations(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -685,7 +685,7 @@ def test_deleting_attachment_removes_child_annotations(
 def test_url_attachment_add_and_rename_does_not_create_storage(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     repo = ZoteroRepository(library)
 
@@ -709,7 +709,7 @@ def test_url_attachment_add_and_rename_does_not_create_storage(
 def test_attachment_edits_blocked_in_read_only_mode(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_read_only_source(zotero_fixture)
     repo = ZoteroRepository(library)
     source_file = tmp_path / "demo.pdf"
@@ -728,7 +728,7 @@ def test_attachment_edits_blocked_in_read_only_mode(
 def test_attachment_management_apis(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("ZOTERO_WEB_LIBRARY_DATA", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     library = create_local_copy(zotero_fixture)
     client = create_app().test_client()
 

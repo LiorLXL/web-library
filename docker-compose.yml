@@ -1,0 +1,16 @@
+services:
+  web-library:
+    image: web-library:latest
+    build: .
+    ports:
+      - "5088:5088"
+    environment:
+      WEB_LIBRARY_DATA_DIR: /app/app-data
+      WEB_LIBRARY_HOST: 0.0.0.0
+      WEB_LIBRARY_PORT: "5088"
+      WEB_LIBRARY_DEBUG: "0"
+    volumes:
+      - web-library-data:/app/app-data
+
+volumes:
+  web-library-data:
