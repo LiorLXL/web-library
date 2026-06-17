@@ -1,0 +1,30 @@
+main:
+  push:
+    - services:
+        - docker
+      stages:
+        - name: git lfs pull
+          script: |
+            git lfs install
+            git lfs pull
+            if grep -q "git-lfs.github.com/spec" demo-data/app.sqlite; then
+              echo "demo-data/app.sqlite is still a Git LFS pointer. Please ensure Git LFS files are available before docker build."
+              exit 1
+            fi
+        - name: docker build
+          script: docker build -t ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest .
+        - name: docker push
+          script: docker push ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest
+
+$:
+  vscode:
+    - runner:
+        cpus: 4
+      services:
+        - docker
+        - name: vscode
+          options:
+            onlyPreview: true
+            launch: docker run -d --network host -e WEB_LIBRARY_HOST=0.0.0.0 -e WEB_LIBRARY_PORT=8686 ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest
+            keepAliveTimeout: 600000
+            daemon: true
