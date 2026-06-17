@@ -3,33 +3,46 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Zotero Web Library</title>
+  <title>网页文库</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body class="landing-page">
   <main class="source-shell">
     <section class="source-hero">
       <div>
-        <p class="eyebrow">Standalone Zotero Web Library</p>
-        <h1>Zotero 网页文库</h1>
-        <p>只读取原始 Zotero 源库；需要编辑时先创建本地副本。不会直接写你的源 <code>zotero.sqlite</code>。</p>
+        <p class="eyebrow">Web Library</p>
+        <h1>网页文库</h1>
+        <p>无缝衔接您的 Zotero 资产，可以本地只读，也可以创建本地副本，还可以直接通过浏览器上传。</p>
       </div>
     </section>
 
     <section class="source-grid">
       <form class="source-card" data-source-form data-mode="read-only">
-        <h2>连接只读模式</h2>
-        <p>直接读取 Zotero 本地目录，禁用任何会修改源库的操作。</p>
-        <input name="path" value="{{ default_source }}" placeholder="C:\Users\你的用户名\Zotero">
-        <input name="name" placeholder="可选名称，例如 我的 Zotero">
-        <button type="submit">只读连接</button>
+        <h2>本地只读模式</h2>
+        <p>读取服务运行环境可访问的目录，禁用任何会修改源库的操作。</p>
+        <div class="path-picker-row">
+          <input id="read-only-path" name="path" value="{{ default_source }}" placeholder="服务可访问的文库目录">
+          <button type="button" class="secondary-btn" data-open-server-path-picker data-path-picker-target="#read-only-path">选择本地路径</button>
+        </div>
+        <input name="name" placeholder="可选名称，例如 我的文库">
+        <button type="submit">连接只读文库</button>
       </form>
       <form class="source-card" data-source-form data-mode="local-copy">
-        <h2>本地副本模式</h2>
-        <p>复制 <code>zotero.sqlite</code> 和 <code>storage/</code>，然后只编辑副本。</p>
-        <input name="path" value="{{ default_source }}" placeholder="C:\Users\你的用户名\Zotero">
-        <input name="name" placeholder="可选名称，例如 Zotero 副本">
-        <button type="submit">创建本地副本</button>
+        <h2>副本编辑模式</h2>
+        <p>从服务路径复制，或上传浏览器所在电脑的文件夹，然后只编辑副本。</p>
+        <div class="path-picker-row copy-path-row">
+          <input id="local-copy-path" name="path" value="{{ default_source }}" placeholder="服务可访问的文库目录">
+          <button type="button" class="secondary-btn" data-open-server-path-picker data-path-picker-target="#local-copy-path">选择本地路径</button>
+          <button type="button" class="secondary-btn" data-upload-folder>上传文件夹</button>
+        </div>
+        <input name="name" placeholder="可选名称，例如 副本：我的文库">
+        <button type="submit">复制本地路径</button>
+        <input type="file" data-upload-folder-input webkitdirectory multiple hidden>
+        <div class="upload-progress" data-upload-progress hidden>
+          <div class="upload-progress-bar"><span data-upload-progress-bar></span></div>
+          <p data-upload-progress-status>等待上传</p>
+        </div>
+        <p class="upload-unsupported" data-folder-upload-unsupported hidden>当前浏览器不支持文件夹上传，请改用服务路径方式。</p>
       </form>
     </section>
 
@@ -38,26 +51,51 @@
       {% if libraries %}
       {% for library in libraries %}
       <div class="library-list-item">
-        <a class="library-list-link" href="{{ url_for('library_page', library_id=library.library_id) }}">
+        <div class="library-list-main">
           <strong>{{ library.name }}</strong>
-          <span>{{ "只读连接" if library.mode == "read_only_connection" else "本地副本" }} · 来源：{{ library.source_path }}</span>
+          <span>{{ "本地只读" if library.mode == "read_only_connection" else "副本编辑" }} · 来源：{{ library.source_path }}</span>
           {% if library.mode == "local_copy" %}
           <span>副本：{{ library.data_path }}</span>
           {% endif %}
-        </a>
-        <button
-          type="button"
-          class="danger-btn"
-          data-delete-source="{{ library.library_id }}"
-          data-confirm="{{ '确认删除这个本地副本？原始 Zotero 目录不会被修改。' if library.mode == 'local_copy' else '确认断开这个只读连接？原始 Zotero 目录不会被修改。' }}"
-        >{{ "删除副本" if library.mode == "local_copy" else "断开" }}</button>
+        </div>
+        <div class="library-list-actions">
+          <a class="library-enter-btn" href="{{ url_for('library_page', library_id=library.library_id) }}">进入文库</a>
+          <button
+            type="button"
+            class="danger-btn"
+            data-delete-source="{{ library.library_id }}"
+            data-confirm="{{ '确认删除这个副本？原始源目录不会被修改。' if library.mode == 'local_copy' else '确认断开这个只读连接？原始源目录不会被修改。' }}"
+          >{{ "删除副本" if library.mode == "local_copy" else "断开" }}</button>
+        </div>
       </div>
       {% endfor %}
       {% else %}
-      <div class="empty-state">还没有文库，先选择 Zotero 数据目录。</div>
+      <div class="empty-state">还没有文库，先选择服务路径或上传本机文件夹。</div>
       {% endif %}
     </section>
   </main>
+  <div class="path-modal" data-server-path-modal hidden>
+    <div class="path-modal-card">
+      <button type="button" class="path-close-btn" data-close-server-path-picker aria-label="关闭">×</button>
+      <div class="path-modal-head">
+        <div>
+          <h2>选择服务路径</h2>
+          <p>这里只显示后端允许浏览的目录。</p>
+        </div>
+      </div>
+      <div class="path-current">
+        <span>当前选择目录</span>
+        <strong data-server-path-current></strong>
+      </div>
+      <div class="path-browser-title">子目录</div>
+      <div class="path-browser" data-server-path-browser></div>
+      <div class="path-modal-actions">
+        <button type="button" class="secondary-btn" data-server-path-up>上一级</button>
+        <button type="button" data-use-server-path>使用当前目录</button>
+      </div>
+      <p class="path-modal-message" data-server-path-message></p>
+    </div>
+  </div>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

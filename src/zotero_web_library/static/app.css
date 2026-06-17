@@ -79,6 +79,12 @@ button, input, select {
   padding: 22px;
 }
 
+.source-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 304px;
+}
+
 .source-card h2, .library-list h2 {
   margin: 0 0 8px;
 }
@@ -91,7 +97,7 @@ button, input, select {
   padding: 12px 14px;
 }
 
-.source-card button, .ghost-btn, .toolbar-actions button, .danger-btn, .plain-toggle {
+.source-card button, .ghost-btn, .toolbar-actions button, .danger-btn, .plain-toggle, .library-enter-btn {
   border: 1px solid var(--line);
   background: white;
   border-radius: 12px;
@@ -100,11 +106,65 @@ button, input, select {
   font-weight: 700;
 }
 
-.source-card button {
+.source-card > button[type="submit"] {
   width: 100%;
-  margin-top: 12px;
+  margin-top: auto;
   background: var(--text);
   color: white;
+}
+
+.path-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.copy-path-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.source-card .path-picker-row input {
+  margin-top: 0;
+}
+
+.source-card .path-picker-row button,
+.source-card .secondary-btn {
+  align-items: center;
+  background: white;
+  color: var(--text);
+  display: inline-flex;
+  justify-content: center;
+  margin-top: 0;
+  min-height: 45px;
+  white-space: nowrap;
+  width: auto;
+}
+
+.upload-progress {
+  margin-top: 12px;
+}
+
+.upload-progress-bar {
+  background: #dbeafe;
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.upload-progress-bar span {
+  background: var(--blue);
+  display: block;
+  height: 100%;
+  transition: width .18s ease;
+  width: 0%;
+}
+
+.upload-progress p,
+.upload-unsupported {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 8px 0 0;
 }
 
 .library-list {
@@ -122,16 +182,35 @@ button, input, select {
   padding: 14px 0;
 }
 
-.library-list-link {
+.library-list-main {
   color: inherit;
   display: grid;
   gap: 5px;
   text-decoration: none;
+  min-width: 0;
 }
 
-.library-list-item span, .library-list-link span {
+.library-list-item span, .library-list-main span {
   color: var(--muted);
   font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.library-list-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+}
+
+.library-enter-btn {
+  color: var(--blue);
+  display: inline-flex;
+  height: 38px;
+  align-items: center;
+  justify-content: center;
+  min-width: 86px;
+  text-decoration: none;
 }
 
 .danger-btn {
@@ -151,6 +230,183 @@ button, input, select {
 .danger-btn:disabled {
   cursor: not-allowed;
   opacity: .55;
+}
+
+.path-modal {
+  align-items: center;
+  background: rgba(15, 23, 42, 0.38);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 50;
+}
+
+.path-modal-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  max-height: min(720px, calc(100vh - 48px));
+  max-width: 720px;
+  overflow: hidden;
+  padding: 20px;
+  position: relative;
+  width: min(100%, 720px);
+}
+
+.path-modal-head,
+.path-modal-actions {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.path-modal-head {
+  padding-right: 48px;
+}
+
+.path-close-btn {
+  align-items: center;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 24px;
+  font-weight: 800;
+  height: 38px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+  position: absolute;
+  right: 18px;
+  top: 18px;
+  width: 38px;
+}
+
+.path-modal-head h2 {
+  margin: 0 0 4px;
+}
+
+.path-modal-head p,
+.path-modal-message,
+.path-current {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.path-current {
+  background: var(--blue-soft);
+  border-radius: 10px;
+  color: #1e3a8a;
+  display: grid;
+  gap: 5px;
+  margin-top: 14px;
+  padding: 10px 12px;
+}
+
+.path-current span,
+.path-browser-title {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.path-current strong {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.path-browser-title {
+  margin-top: 14px;
+}
+
+.path-browser {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  margin: 8px 0 14px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.path-entry {
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 46px;
+  padding: 10px 12px;
+}
+
+.path-entry:last-child {
+  border-bottom: 0;
+}
+
+.path-entry-main {
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.path-entry-main strong,
+.path-entry-main span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.path-entry-main span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.path-entry-enter {
+  align-self: center;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
+  height: 34px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.path-modal-actions {
+  justify-content: flex-end;
+}
+
+.path-modal-actions button {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
+  min-height: 40px;
+  padding: 0 14px;
+}
+
+.path-modal-actions button:last-child {
+  background: var(--text);
+  color: white;
+}
+
+.path-modal-actions button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
 }
 
 .rail {
@@ -1775,5 +2031,46 @@ button, input, select {
   .toolbar-actions {
     flex-wrap: wrap;
     justify-content: flex-start;
+  }
+}
+
+@media (max-width: 820px) {
+  .landing-page {
+    padding: 18px;
+  }
+  .source-grid {
+    grid-template-columns: 1fr;
+  }
+  .source-card {
+    min-height: 0;
+  }
+  .source-card > button[type="submit"] {
+    margin-top: 14px;
+  }
+  .path-picker-row,
+  .copy-path-row {
+    grid-template-columns: 1fr;
+  }
+  .source-card .path-picker-row button,
+  .source-card .secondary-btn {
+    width: 100%;
+  }
+  .library-list-item,
+  .library-list-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .library-enter-btn,
+  .danger-btn {
+    width: 100%;
+  }
+  .path-modal {
+    padding: 12px;
+  }
+  .path-entry {
+    grid-template-columns: 1fr;
+  }
+  .path-entry-enter {
+    width: 100%;
   }
 }

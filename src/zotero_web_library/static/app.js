@@ -1117,7 +1117,7 @@ function setupSourceForms() {
       const payload = Object.fromEntries(new FormData(form).entries());
       const mode = form.dataset.mode;
       const url = mode === "local-copy" ? "/api/sources/local-copy" : "/api/sources/read-only";
-      const button = form.querySelector("button");
+      const button = event.submitter || form.querySelector("button[type=\"submit\"]");
       const oldText = button.textContent;
       button.textContent = "处理中...";
       button.disabled = true;
@@ -1132,6 +1132,8 @@ function setupSourceForms() {
       }
     });
   });
+  setupServerPathPicker();
+  setupFolderUpload();
   document.querySelectorAll("[data-delete-source]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       event.preventDefault();
@@ -1145,6 +1147,224 @@ function setupSourceForms() {
       }
     });
   });
+}
+
+const sourcePathPicker = {
+  modal: null,
+  input: null,
+  currentPath: "",
+  parentPath: "",
+};
+const SERVER_VIRTUAL_ROOT = "__server_root__";
+
+function setupServerPathPicker() {
+  const modal = document.querySelector("[data-server-path-modal]");
+  if (!modal) return;
+  sourcePathPicker.modal = modal;
+  document.querySelectorAll("[data-open-server-path-picker]").forEach((button) => {
+    button.addEventListener("click", () => openServerPathPicker(button));
+  });
+  modal.querySelector("[data-close-server-path-picker]")?.addEventListener("click", closeServerPathPicker);
+  modal.querySelector("[data-server-path-up]")?.addEventListener("click", () => {
+    if (sourcePathPicker.parentPath) loadServerPath(sourcePathPicker.parentPath);
+  });
+  modal.querySelector("[data-use-server-path]")?.addEventListener("click", () => {
+    useServerPath(sourcePathPicker.currentPath);
+  });
+  modal.querySelector("[data-server-path-browser]")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-server-path-open]");
+    if (!button) return;
+    loadServerPath(button.dataset.serverPathOpen || "");
+  });
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) closeServerPathPicker();
+  });
+}
+
+async function openServerPathPicker(button) {
+  const input = document.querySelector(button.dataset.pathPickerTarget || "");
+  if (!input || !sourcePathPicker.modal) return;
+  sourcePathPicker.input = input;
+  sourcePathPicker.modal.hidden = false;
+  const initialPath = input.value.trim();
+  if (initialPath) {
+    try {
+      await loadServerPath(initialPath);
+      return;
+    } catch (error) {
+      setServerPathMessage(error.message);
+    }
+  }
+  await loadServerPathRoots();
+}
+
+function closeServerPathPicker() {
+  if (sourcePathPicker.modal) sourcePathPicker.modal.hidden = true;
+  sourcePathPicker.input = null;
+  sourcePathPicker.currentPath = "";
+  sourcePathPicker.parentPath = "";
+}
+
+function useServerPath(path) {
+  if (!sourcePathPicker.input || !path || path === SERVER_VIRTUAL_ROOT) return;
+  sourcePathPicker.input.value = path;
+  closeServerPathPicker();
+}
+
+async function loadServerPathRoots() {
+  const response = await fetch("/api/server-paths/roots");
+  const data = await parseJSONResponse(response);
+  if (!response.ok || data.ok === false) throw new Error(data.error || "无法读取服务路径根目录");
+  sourcePathPicker.currentPath = SERVER_VIRTUAL_ROOT;
+  sourcePathPicker.parentPath = "";
+  renderServerPathBrowser({
+    title: "服务器根目录",
+    containsSqlite: false,
+    children: data.roots || [],
+    isRootList: true,
+  });
+}
+
+async function loadServerPath(path) {
+  const response = await fetch(`/api/server-paths/list?path=${encodeURIComponent(path)}`);
+  const data = await parseJSONResponse(response);
+  if (!response.ok || data.ok === false) throw new Error(data.error || "无法读取服务目录");
+  sourcePathPicker.currentPath = data.path || "";
+  sourcePathPicker.parentPath = data.parent || "";
+  renderServerPathBrowser({
+    title: data.label || data.path || "",
+    containsSqlite: Boolean(data.contains_sqlite),
+    children: data.children || [],
+    isRootList: Boolean(data.is_virtual_root),
+  });
+}
+
+function renderServerPathBrowser({ title, containsSqlite, children, isRootList }) {
+  const modal = sourcePathPicker.modal;
+  if (!modal) return;
+  modal.querySelector("[data-server-path-current]").textContent = title;
+  modal.querySelector("[data-server-path-up]").disabled = !sourcePathPicker.parentPath;
+  modal.querySelector("[data-use-server-path]").disabled = isRootList || !sourcePathPicker.currentPath || !containsSqlite;
+  setServerPathMessage(containsSqlite ? "当前选择目录包含 zotero.sqlite，可以使用。" : "当前选择目录不含 zotero.sqlite。请进入下方包含 zotero.sqlite 的子目录。");
+  const browser = modal.querySelector("[data-server-path-browser]");
+  if (!browser) return;
+  if (!children.length) {
+    browser.innerHTML = `<div class="empty-state">没有可浏览的子目录。</div>`;
+    return;
+  }
+  browser.innerHTML = children.map((child) => `
+    <div class="path-entry">
+      <div class="path-entry-main">
+        <strong>${escapeHtml(child.label || child.name || child.path)}</strong>
+        <span>${child.contains_sqlite ? "包含 zotero.sqlite" : escapeHtml(child.path)}</span>
+      </div>
+      <button type="button" class="path-entry-enter" data-server-path-open="${escapeHtml(child.path)}">进入子目录</button>
+    </div>
+  `).join("");
+}
+
+function setServerPathMessage(message) {
+  const node = sourcePathPicker.modal?.querySelector("[data-server-path-message]");
+  if (node) node.textContent = message || "";
+}
+
+function setupFolderUpload() {
+  const probe = document.createElement("input");
+  const supported = "webkitdirectory" in probe;
+  document.querySelectorAll("[data-source-form][data-mode=\"local-copy\"]").forEach((form) => {
+    const button = form.querySelector("[data-upload-folder]");
+    const input = form.querySelector("[data-upload-folder-input]");
+    const unsupported = form.querySelector("[data-folder-upload-unsupported]");
+    if (!button || !input) return;
+    if (!supported) {
+      button.disabled = true;
+      unsupported.hidden = false;
+      return;
+    }
+    button.addEventListener("click", () => {
+      input.value = "";
+      input.click();
+    });
+    input.addEventListener("change", async () => {
+      if (!input.files || !input.files.length) return;
+      await uploadFolderCopy(form, Array.from(input.files));
+    });
+  });
+}
+
+async function uploadFolderCopy(form, files) {
+  const uploadButton = form.querySelector("[data-upload-folder]");
+  const submitButton = form.querySelector("button[type=\"submit\"]");
+  const controls = [uploadButton, submitButton].filter(Boolean);
+  controls.forEach((button) => { button.disabled = true; });
+  setUploadProgress(form, 0, "准备上传...");
+  try {
+    const data = await sendFolderUpload(form, files);
+    window.location.href = `/library/${data.library.library_id}`;
+  } catch (error) {
+    setUploadProgress(form, 0, error.message || "上传失败");
+    window.alert(error.message || "上传失败");
+  } finally {
+    controls.forEach((button) => { button.disabled = false; });
+  }
+}
+
+function sendFolderUpload(form, files) {
+  return new Promise((resolve, reject) => {
+    const formData = new FormData();
+    const name = String(new FormData(form).get("name") || "").trim();
+    if (name) formData.append("name", name);
+    files.forEach((file) => {
+      formData.append("files", file, file.webkitRelativePath || file.name);
+    });
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/sources/upload-folder");
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        setUploadProgress(form, 0, "正在上传...");
+        return;
+      }
+      const percent = Math.round((event.loaded / event.total) * 100);
+      setUploadProgress(form, percent, `正在上传 ${percent}% · ${formatBytes(event.loaded)} / ${formatBytes(event.total)}`);
+    };
+    xhr.onload = () => {
+      let data = null;
+      const responseText = xhr.responseText || "";
+      try {
+        data = JSON.parse(responseText || "{}");
+      } catch (error) {
+        const summary = responseText.replace(/\s+/g, " ").trim().slice(0, 120);
+        reject(new Error(`上传接口返回了非 JSON 内容（HTTP ${xhr.status}）：${summary || xhr.statusText || "无响应正文"}`));
+        return;
+      }
+      if (xhr.status >= 400 || data.ok === false) {
+        reject(new Error(data.error || `上传失败（HTTP ${xhr.status}）`));
+        return;
+      }
+      setUploadProgress(form, 100, "上传完成，正在进入文库...");
+      resolve(data);
+    };
+    xhr.onerror = () => reject(new Error("上传中断，请重试。"));
+    xhr.send(formData);
+  });
+}
+
+function setUploadProgress(form, percent, status) {
+  const wrapper = form.querySelector("[data-upload-progress]");
+  const bar = form.querySelector("[data-upload-progress-bar]");
+  const text = form.querySelector("[data-upload-progress-status]");
+  if (!wrapper || !bar || !text) return;
+  wrapper.hidden = false;
+  bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+  text.textContent = status || "";
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
 function sortedCollections() {

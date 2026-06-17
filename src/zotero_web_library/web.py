@@ -7,14 +7,34 @@ from pathlib import Path
 from typing import Any
 
 from flask import Flask, Response, jsonify, render_template, request, send_file, send_from_directory
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from . import app_store
 from .citation_export import CitationExportError, export_citations, export_filename
 from .metadata_import import MetadataImportError, parse_import_text, resolve_identifier
 from .semantic_tags import normalize_hash_tag, stable_tag_color
-from .sources import SourceError, create_local_copy, create_read_only_source, delete_source
+from .sources import (
+    SourceError,
+    create_local_copy,
+    create_local_copy_from_uploads,
+    create_read_only_source,
+    default_service_source_path,
+    delete_source,
+    list_server_directory,
+    server_path_roots,
+)
 from .sync import mark_conflicts_for_changed_keys, prepare_sync_payloads
 from .zotero_adapter import ZoteroRepository
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def create_app() -> Flask:
@@ -22,7 +42,24 @@ def create_app() -> Flask:
     mimetypes.add_type("application/javascript", ".mjs")
     static_dir = Path(__file__).resolve().parent / "static"
     app = Flask(__name__, template_folder="templates", static_folder=None)
+    app.config.update(
+        MAX_CONTENT_LENGTH=_env_int("WEB_LIBRARY_MAX_UPLOAD_BYTES", 8 * 1024 * 1024 * 1024),
+        MAX_FORM_MEMORY_SIZE=_env_int("WEB_LIBRARY_MAX_FORM_MEMORY_BYTES", 64 * 1024 * 1024),
+        MAX_FORM_PARTS=_env_int("WEB_LIBRARY_MAX_FORM_PARTS", 100_000),
+    )
     app_store.ensure_app_store()
+
+    @app.errorhandler(RequestEntityTooLarge)
+    def request_entity_too_large(exc):
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "上传内容超过当前服务限制。默认支持最大 8GB、最多 100000 个文件；"
+                    "如仍然触发，请改用 Docker 目录挂载方式，或设置 WEB_LIBRARY_MAX_UPLOAD_BYTES / WEB_LIBRARY_MAX_FORM_PARTS。"
+                ),
+            }
+        ), 413
 
     @app.get("/static/<path:filename>", endpoint="static")
     def static_files(filename: str):
@@ -44,7 +81,7 @@ def create_app() -> Flask:
     @app.get("/")
     def index():
         libraries = app_store.list_libraries()
-        default_source = str(Path.home() / "Zotero")
+        default_source = default_service_source_path()
         return render_template("index.html", libraries=libraries, default_source=default_source)
 
     @app.get("/library/<library_id>")
@@ -74,6 +111,26 @@ def create_app() -> Flask:
         try:
             record = create_local_copy(str(payload.get("path") or ""), name=str(payload.get("name") or "").strip() or None)
             return jsonify({"ok": True, "library": record})
+        except (SourceError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/sources/upload-folder")
+    def api_upload_folder_source():
+        try:
+            uploads = request.files.getlist("files")
+            record = create_local_copy_from_uploads(uploads, name=str(request.form.get("name") or "").strip() or None)
+            return jsonify({"ok": True, "library": record})
+        except (SourceError, OSError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/server-paths/roots")
+    def api_server_path_roots():
+        return jsonify({"ok": True, "roots": server_path_roots()})
+
+    @app.get("/api/server-paths/list")
+    def api_server_path_list():
+        try:
+            return jsonify({"ok": True, **list_server_directory(str(request.args.get("path") or ""))})
         except (SourceError, OSError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
@@ -491,16 +548,6 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
 
 
 def main() -> None:

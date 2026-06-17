@@ -44,6 +44,8 @@
 - 支持左侧文件夹树内管理：根目录新建文件夹、真实文件夹重命名、移动、新建子文件夹、删除文件夹。
 - 支持只读连接真实 Zotero 数据目录。
 - 支持建立可编辑的本地副本，所有写操作只落到副本。
+- 首页源管理支持服务路径选择器：默认进入 demo 文库，可沿虚拟服务器根目录浏览后端/容器可访问的目录。
+- 支持浏览器上传本机文库文件夹创建可编辑副本，适合 Docker、局域网或云端预览场景。
 
 ## 最近界面能力
 
@@ -58,10 +60,12 @@
 - “附件编辑”按钮已接入单条目附件管理；网页链接附件 v1 只保存链接，不抓取网页快照。
 - “文献研读”按钮已接入单条目 PDF 阅读；右侧智能体对话面板是下一版占位。
 - 弹窗、文件夹行内编辑、附件编辑等表单按钮已统一尺寸和视觉样式。
+- 源管理页已改为“网页文库”入口，区分本地只读模式、副本编辑模式和浏览器上传文件夹。
+- 服务路径选择器只浏览后端允许的目录，显示当前选择目录、子目录和是否包含 `zotero.sqlite`。
 
 ## 数据源模式
 
-### 只读连接
+### 本地只读模式
 
 直接读取指定的 Zotero 数据目录，例如：
 
@@ -71,9 +75,18 @@ C:\Users\<你自己的用户名>\Zotero
 
 这种模式不会写入原始 `zotero.sqlite`、`storage/` 或 Zotero 目录中的任何文件。
 
-### 本地副本
+路径输入框旁的“选择本地路径”指服务运行环境本地路径。Docker 中就是容器里的路径，本地开发时就是当前电脑上的路径。
+
+### 副本编辑模式
 
 程序会把 `zotero.sqlite` 和 `storage/` 复制到应用自己的数据目录里，后续编辑都只作用在这个副本上。
+
+副本可以通过两种方式创建：
+
+- 从服务路径复制：选择后端/容器可访问的目录，例如 Docker 中的 `/opt/demo-data/libraries/<demo-id>`。
+- 上传本地文件夹：在浏览器中选择当前电脑上的文库文件夹，上传到服务端后创建副本。
+
+同一个源路径可以创建多个副本，但副本文库名称不能重复。不填写名称时会自动生成不冲突的名称。
 
 项目明确不支持直接写用户真实 Zotero 源库。Zotero 的本地 SQLite 可以读取，但直接修改原始库风险太高。
 
@@ -119,8 +132,11 @@ $env:WEB_LIBRARY_DATA_DIR="C:\path\to\app-data"
 $env:WEB_LIBRARY_HOST="127.0.0.1"
 $env:WEB_LIBRARY_PORT="8686"
 $env:WEB_LIBRARY_DEBUG="1"
+$env:WEB_LIBRARY_SERVER_ROOTS="C:\"
 uv run python -m zotero_web_library.web
 ```
+
+`WEB_LIBRARY_SERVER_ROOTS` 可选，用于限制“选择本地路径”弹窗中的虚拟服务器根入口；不设置时会自动使用常见入口，例如 Docker 中的 `/opt`、`/app`，Windows 本地的可用盘符。
 
 ## Docker 启动
 
@@ -143,6 +159,21 @@ http://localhost:8686
 ```
 
 Docker 镜像内置 `demo-data/` 作为演示数据模板。容器首次启动时，如果 `/app/app-data/app.sqlite` 不存在，会自动把 `/opt/demo-data/` 复制到 Docker volume 中。后续重启不会覆盖已有数据。
+
+Docker 中的服务路径选择器默认会进入 `/opt/demo-data/libraries/<demo-id>`。如果要让容器读取 Windows 上的真实文库目录，建议用目录挂载方式把它挂进容器，再使用“从服务路径复制”：
+
+```powershell
+docker run -d --name web-library -p 8686:8686 -e WEB_LIBRARY_HOST=0.0.0.0 -e WEB_LIBRARY_PORT=8686 -v web-library-data:/app/app-data -v C:\Users\<你自己的用户名>\Zotero:/host-zotero:ro web-library:latest
+```
+
+然后在页面中选择 `/host-zotero`。
+
+浏览器上传文件夹也可以创建副本，但真实 Zotero 目录通常很大。默认上传上限为 8GB、最多 100000 个文件，可用下面的环境变量调整：
+
+```powershell
+$env:WEB_LIBRARY_MAX_UPLOAD_BYTES="8589934592"
+$env:WEB_LIBRARY_MAX_FORM_PARTS="100000"
+```
 
 如需重置 Docker demo 数据：
 

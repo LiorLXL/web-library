@@ -116,6 +116,9 @@ def list_libraries() -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for row in rows:
+        if row.get("mode") == LOCAL_COPY_MODE:
+            deduped.append(row)
+            continue
         key = (row.get("mode", ""), _source_key(row.get("source_path", "")))
         if key in seen:
             continue

@@ -5,6 +5,42 @@ from pathlib import Path
 from zotero_web_library.web import create_app
 
 
+def test_source_index_contains_service_path_and_upload_contracts() -> None:
+    root = Path(__file__).resolve().parents[1]
+    index_html = (root / "src" / "zotero_web_library" / "templates" / "index.html").read_text(encoding="utf-8")
+    app_js = (root / "src" / "zotero_web_library" / "static" / "app.js").read_text(encoding="utf-8")
+    app_css = (root / "src" / "zotero_web_library" / "static" / "app.css").read_text(encoding="utf-8")
+
+    assert "<h1>网页文库</h1>" in index_html
+    assert "无缝衔接您的 Zotero 资产" in index_html
+    assert "本地只读模式" in index_html
+    assert "副本编辑模式" in index_html
+    assert "选择本地路径" in index_html
+    assert "复制本地路径" in index_html
+    assert "上传文件夹" in index_html
+    assert "进入文库" in index_html
+    assert "当前选择目录" in index_html
+    assert "子目录" in index_html
+    assert "data-upload-progress" in index_html
+    assert "data-server-path-modal" in index_html
+    assert "Standalone Zotero Web Library" not in index_html
+    assert "Zotero 网页文库" not in index_html
+    assert "连接只读模式" not in index_html
+    assert "本地副本模式" not in index_html
+    assert "class=\"library-list-link\"" not in index_html
+    assert "/api/server-paths/roots" in app_js
+    assert "/api/server-paths/list" in app_js
+    assert "/api/sources/upload-folder" in app_js
+    assert "SERVER_VIRTUAL_ROOT" in app_js
+    assert "进入子目录" in app_js
+    assert "data-server-path-use" not in app_js
+    assert "webkitdirectory" in app_js
+    assert "XMLHttpRequest" in app_js
+    assert ".upload-progress-bar" in app_css
+    assert ".library-enter-btn" in app_css
+    assert ".path-entry-enter" in app_css
+
+
 def test_frontend_contains_refined_interaction_hooks() -> None:
     root = Path(__file__).resolve().parents[1]
     app_js = (root / "src" / "zotero_web_library" / "static" / "app.js").read_text(encoding="utf-8")
@@ -132,7 +168,6 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-note-toggle" in app_js
     assert "function notePreview" in app_js
     assert "没有笔记" in app_js
-    assert "路" not in app_js
     assert "data-manage-shortcuts" not in library_html
     assert "data-add-tag-form" not in library_html
     assert "data-shortcut-form" not in library_html
