@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     WEB_LIBRARY_DATA_DIR=/app/app-data \
     WEB_LIBRARY_HOST=0.0.0.0 \
-    WEB_LIBRARY_PORT=5088 \
+    WEB_LIBRARY_PORT=8686 \
     WEB_LIBRARY_DEBUG=0
 
 WORKDIR /app
@@ -24,7 +24,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-EXPOSE 5088
+EXPOSE 8686
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["python", "-m", "zotero_web_library.web"]

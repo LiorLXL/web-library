@@ -505,7 +505,7 @@ def _env_int(name: str, default: int) -> int:
 
 def main() -> None:
     host = os.environ.get("WEB_LIBRARY_HOST", "127.0.0.1")
-    port = _env_int("WEB_LIBRARY_PORT", 5088)
+    port = _env_int("WEB_LIBRARY_PORT", 8686)
     debug = _env_bool("WEB_LIBRARY_DEBUG", True)
     app.run(host=host, port=port, debug=debug, use_reloader=False)
 

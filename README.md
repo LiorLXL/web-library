@@ -109,7 +109,7 @@ uv run python -m zotero_web_library.web
 启动后访问：
 
 ```text
-http://127.0.0.1:5088
+http://127.0.0.1:8686
 ```
 
 默认情况下，本地开发会使用 `./app-data/` 作为应用数据目录。可以用环境变量覆盖：
@@ -117,7 +117,7 @@ http://127.0.0.1:5088
 ```powershell
 $env:WEB_LIBRARY_DATA_DIR="C:\path\to\app-data"
 $env:WEB_LIBRARY_HOST="127.0.0.1"
-$env:WEB_LIBRARY_PORT="5088"
+$env:WEB_LIBRARY_PORT="8686"
 $env:WEB_LIBRARY_DEBUG="1"
 uv run python -m zotero_web_library.web
 ```
@@ -139,7 +139,7 @@ docker compose up --build
 启动后访问：
 
 ```text
-http://localhost:5088
+http://localhost:8686
 ```
 
 Docker 镜像内置 `demo-data/` 作为演示数据模板。容器首次启动时，如果 `/app/app-data/app.sqlite` 不存在，会自动把 `/opt/demo-data/` 复制到 Docker volume 中。后续重启不会覆盖已有数据。
