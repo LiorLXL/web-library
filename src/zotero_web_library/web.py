@@ -8128,7 +8128,7 @@ def create_app() -> Flask:
     @app.delete("/api/sources/<library_id>")
     def api_delete_source(library_id: str):
         try:
-            library_or_404(library_id)
+            library = library_or_404(library_id)
             if library.get("mode") == "local_copy" and app_store.unsynced_count(library_id) and not request.args.get("confirm"):
                 return jsonify({"ok": False, "requires_confirmation": True, "error": "本地副本有未同步更改，确认后才会删除。"}), 409
             deleted = delete_source(library_id)

@@ -101,6 +101,25 @@ def test_delete_local_copy_removes_only_managed_copy(zotero_fixture: Path, monke
     assert (zotero_fixture / "zotero.sqlite").exists()
 
 
+def test_delete_source_api_handles_local_copy_and_read_only(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    local_copy = create_local_copy(zotero_fixture)
+    read_only = create_read_only_source(zotero_fixture, name="只读测试")
+    client = create_app().test_client()
+
+    local_copy_response = client.delete(f"/api/sources/{local_copy['library_id']}")
+    assert local_copy_response.status_code == 200
+    assert local_copy_response.is_json
+    assert local_copy_response.get_json()["ok"] is True
+    assert Path(local_copy["data_path"]).exists() is False
+
+    read_only_response = client.delete(f"/api/sources/{read_only['library_id']}")
+    assert read_only_response.status_code == 200
+    assert read_only_response.is_json
+    assert read_only_response.get_json()["ok"] is True
+    assert zotero_fixture.exists()
+
+
 def test_upload_folder_creates_local_copy(zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
     client = create_app().test_client()
