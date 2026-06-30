@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import http.client
 import io
 import json
 import mimetypes
@@ -10,12 +11,15 @@ import re
 import sqlite3
 import tempfile
 import threading
+import time
 import zipfile
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib import error as urllib_error
+from urllib.parse import quote, urlencode, urlsplit
+from urllib import request as urllib_request
 
 from flask import Flask, Response, jsonify, render_template, request, send_file, send_from_directory
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -92,6 +96,11 @@ RETRIEVAL_BATCH_CONTEXT_SCHEMA = "web-library.retrieval-batch-context/v1"
 RETRIEVAL_CONFIG_BUNDLE_REDACTED_VALUE = "__REDACTED__"
 API_CONFIG_PREFERENCE_KEY = "api_config"
 API_CONFIG_SECRET_KEEP_VALUE = "__KEEP_SECRET__"
+MINERU_API_KEY_ENV = "MINERU_API_KEY"
+MINERU_BASE_URL_ENV = "MINERU_BASE_URL"
+MINERU_DEFAULT_BASE_URL = "https://mineru.net/api/v4/file-urls/batch"
+MINERU_REQUEST_TIMEOUT_SECONDS = 180
+MINERU_PARSE_POLL_INTERVAL_SECONDS = 3
 RETRIEVAL_BATCH_VALIDATION_MIN_COMPLETED_QUERIES = 3
 AI_CANDIDATE_EVALUATION_BATCH_SIZE = 20
 SENSITIVE_CONFIG_KEY_RE = re.compile(
@@ -158,6 +167,15 @@ def api_config_tokens_for_library(library_id: str) -> dict[str, str]:
     }
 
 
+def api_config_mineru_for_library(library_id: str) -> dict[str, str]:
+    config = api_config_for_library(library_id)
+    mineru = config.get("mineru") if isinstance(config.get("mineru"), dict) else {}
+    return {
+        "base_url": clean_secret(mineru.get("base_url") or mineru.get("url")),
+        "api_key": clean_secret(mineru.get("api_key") or mineru.get("key")),
+    }
+
+
 def effective_code_source_token(library_id: str, key: str, env_name: str) -> str:
     configured = api_config_tokens_for_library(library_id).get(key, "")
     return configured or clean_secret(os.environ.get(env_name))
@@ -183,8 +201,17 @@ def normalized_library_api_config(payload: dict[str, Any], existing: dict[str, A
     existing = existing if isinstance(existing, dict) else {}
     existing_model = existing.get("model") if isinstance(existing.get("model"), dict) else {}
     existing_sources = existing.get("code_sources") if isinstance(existing.get("code_sources"), dict) else {}
-    raw_model = payload.get("model") if isinstance(payload.get("model"), dict) else payload
-    raw_sources = payload.get("code_sources") if isinstance(payload.get("code_sources"), dict) else payload
+    existing_mineru = existing.get("mineru") if isinstance(existing.get("mineru"), dict) else {}
+    has_model_payload = isinstance(payload.get("model"), dict) or any(
+        key in payload for key in ("model", "model_name", "base_url", "request_url", "url", "api_key", "key")
+    )
+    has_source_payload = isinstance(payload.get("code_sources"), dict) or any(
+        key in payload for key in ("github_token", "github", "huggingface_token", "huggingface", "zenodo_token", "zenodo")
+    )
+    has_mineru_payload = isinstance(payload.get("mineru"), dict)
+    raw_model = payload.get("model") if isinstance(payload.get("model"), dict) else (payload if has_model_payload else existing_model)
+    raw_sources = payload.get("code_sources") if isinstance(payload.get("code_sources"), dict) else (payload if has_source_payload else existing_sources)
+    raw_mineru = payload.get("mineru") if isinstance(payload.get("mineru"), dict) else (payload if has_mineru_payload else existing_mineru)
 
     def next_secret(field: str, current: str = "") -> str:
         value = clean_secret(raw_model.get(field) if field in raw_model else raw_sources.get(field))
@@ -192,8 +219,15 @@ def normalized_library_api_config(payload: dict[str, Any], existing: dict[str, A
             return clean_secret(current)
         return value
 
+    def next_mineru_secret(field: str, current: str = "") -> str:
+        value = clean_secret(raw_mineru.get(field))
+        if value == API_CONFIG_SECRET_KEEP_VALUE:
+            return clean_secret(current)
+        return value
+
     model_name = clean_secret(raw_model.get("model") or raw_model.get("model_name"))
     base_url = clean_secret(raw_model.get("base_url") or raw_model.get("request_url") or raw_model.get("url"))
+    mineru_base_url = clean_secret(raw_mineru.get("base_url") or raw_mineru.get("url"))
     return {
         "model": {
             "model": model_name,
@@ -205,16 +239,40 @@ def normalized_library_api_config(payload: dict[str, Any], existing: dict[str, A
             "huggingface_token": next_secret("huggingface_token", existing_sources.get("huggingface_token")),
             "zenodo_token": next_secret("zenodo_token", existing_sources.get("zenodo_token")),
         },
+        "mineru": {
+            "base_url": mineru_base_url,
+            "api_key": next_mineru_secret("api_key", existing_mineru.get("api_key")),
+        },
     }
+
+
+def normalized_mineru_api_config(payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    existing = existing if isinstance(existing, dict) else {}
+    existing_mineru = existing.get("mineru") if isinstance(existing.get("mineru"), dict) else {}
+    raw_mineru = payload.get("mineru") if isinstance(payload.get("mineru"), dict) else payload
+    api_key = clean_secret(raw_mineru.get("api_key") or raw_mineru.get("key") or raw_mineru.get("mineru_api_key"))
+    if api_key == API_CONFIG_SECRET_KEEP_VALUE:
+        api_key = clean_secret(existing_mineru.get("api_key"))
+    mineru = {
+        "base_url": clean_secret(raw_mineru.get("base_url") or raw_mineru.get("url") or raw_mineru.get("mineru_base_url")),
+        "api_key": api_key,
+    }
+    config = dict(existing)
+    config["mineru"] = mineru
+    return config
 
 
 def library_api_config_response(library_id: str, *, include_secrets: bool = False) -> dict[str, Any]:
     saved_model = api_config_model_for_library(library_id)
     saved_tokens = api_config_tokens_for_library(library_id)
+    saved_mineru = api_config_mineru_for_library(library_id)
     model_name = saved_model.get("model") or clean_secret(os.environ.get(AI_PIXEL_MODEL_ENV)) or AI_PIXEL_DEFAULT_MODEL
     base_url = saved_model.get("base_url") or clean_secret(os.environ.get(AI_PIXEL_BASE_URL_ENV)) or AI_PIXEL_DEFAULT_BASE_URL
     saved_api_key = saved_model.get("api_key", "")
     effective_api_key = saved_api_key or clean_secret(os.environ.get(AI_PIXEL_API_KEY_ENV))
+    mineru_base_url = saved_mineru.get("base_url") or clean_secret(os.environ.get(MINERU_BASE_URL_ENV)) or MINERU_DEFAULT_BASE_URL
+    saved_mineru_api_key = saved_mineru.get("api_key", "")
+    effective_mineru_api_key = saved_mineru_api_key or clean_secret(os.environ.get(MINERU_API_KEY_ENV))
     code_sources = {
         "github": ("github_token", "GITHUB_TOKEN"),
         "huggingface": ("huggingface_token", "HUGGINGFACE_TOKEN"),
@@ -245,6 +303,440 @@ def library_api_config_response(library_id: str, *, include_secrets: bool = Fals
             "base_url_source": "preference" if saved_model.get("base_url") else ("environment" if clean_secret(os.environ.get(AI_PIXEL_BASE_URL_ENV)) else "default"),
         },
         "code_sources": code_payload,
+        "mineru": {
+            "base_url": mineru_base_url,
+            "api_key": saved_mineru_api_key if include_secrets else "",
+            "masked_api_key": masked_secret(saved_mineru_api_key if saved_mineru_api_key else effective_mineru_api_key),
+            "configured": bool(effective_mineru_api_key),
+            "source": secret_config_source(saved_mineru_api_key, MINERU_API_KEY_ENV),
+            "base_url_source": "preference"
+            if saved_mineru.get("base_url")
+            else ("environment" if clean_secret(os.environ.get(MINERU_BASE_URL_ENV)) else "default"),
+        },
+    }
+
+
+def effective_mineru_config_for_library(library_id: str) -> dict[str, str]:
+    saved = api_config_mineru_for_library(library_id)
+    return {
+        "base_url": saved.get("base_url") or clean_secret(os.environ.get(MINERU_BASE_URL_ENV)) or MINERU_DEFAULT_BASE_URL,
+        "api_key": saved.get("api_key") or clean_secret(os.environ.get(MINERU_API_KEY_ENV)),
+    }
+
+
+def mineru_results_dir(library: dict[str, Any]) -> Path:
+    return Path(str(library["data_path"])) / "mineru-results"
+
+
+def safe_result_filename(value: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip(".-")
+    return clean or "result"
+
+
+def safe_extract_path(root: Path, relative_name: str) -> Path | None:
+    parts = [part for part in Path(str(relative_name).replace("\\", "/")).parts if part not in {"", ".", ".."}]
+    if not parts:
+        return None
+    target = root.joinpath(*parts).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return target
+
+
+def mineru_download_bytes(url: str) -> bytes:
+    request_obj = urllib_request.Request(url, method="GET", headers={"Accept": "*/*"})
+    try:
+        with urllib_request.urlopen(request_obj, timeout=MINERU_REQUEST_TIMEOUT_SECONDS) as response:
+            return response.read()
+    except urllib_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"MinerU 结果下载失败：HTTP {exc.code} {detail[:300]}") from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"MinerU 结果下载失败：{exc.reason}") from exc
+    except OSError as exc:
+        raise RuntimeError("MinerU 结果下载失败：连接被中止，请检查网络、代理或防火墙。") from exc
+
+
+def mineru_result_urls(payload: Any, target_keys: set[str]) -> list[str]:
+    urls: list[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_name = str(key).lower()
+            if key_name in target_keys and isinstance(value, str) and value.startswith(("http://", "https://")):
+                urls.append(value)
+            urls.extend(mineru_result_urls(value, target_keys))
+    elif isinstance(payload, list):
+        for item in payload:
+            urls.extend(mineru_result_urls(item, target_keys))
+    return list(dict.fromkeys(urls))
+
+
+def write_mineru_downloaded_outputs(target_dir: Path, stem: str, result_payload: dict[str, Any]) -> dict[str, Any]:
+    output_dir = target_dir / stem
+    paths: dict[str, Any] = {}
+    extracted_paths: list[str] = []
+    zip_urls = mineru_result_urls(result_payload, {"full_zip_url", "zip_url", "result_zip_url"})
+    for index, url in enumerate(zip_urls, start=1):
+        archive_bytes = mineru_download_bytes(url)
+        archive_path = target_dir / f"{stem}-mineru-{index}.zip"
+        archive_path.write_bytes(archive_bytes)
+        paths.setdefault("zip_paths", []).append(str(archive_path))
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(archive_bytes))
+        except zipfile.BadZipFile:
+            continue
+        with archive:
+            for member in archive.infolist():
+                if member.is_dir():
+                    continue
+                suffix = Path(member.filename).suffix.lower()
+                if suffix not in {".md", ".markdown", ".png", ".jpg", ".jpeg"}:
+                    continue
+                target = safe_extract_path(output_dir, member.filename)
+                if target is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(member))
+                extracted_paths.append(str(target))
+    md_urls = mineru_result_urls(result_payload, {"md_url", "markdown_url"})
+    for index, url in enumerate(md_urls, start=1):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path = output_dir / f"downloaded-{index}.md"
+        markdown_path.write_bytes(mineru_download_bytes(url))
+        extracted_paths.append(str(markdown_path))
+    image_urls = mineru_result_urls(result_payload, {"image_url", "img_url", "png_url"})
+    for index, url in enumerate(image_urls, start=1):
+        suffix = Path(urlsplit(url).path).suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg"}:
+            suffix = ".png"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image_path = output_dir / f"image-{index}{suffix}"
+        image_path.write_bytes(mineru_download_bytes(url))
+        extracted_paths.append(str(image_path))
+    if extracted_paths:
+        paths["output_dir"] = str(output_dir)
+        paths["extracted_paths"] = extracted_paths
+        markdown_paths = [path for path in extracted_paths if Path(path).suffix.lower() in {".md", ".markdown"}]
+        image_paths = [path for path in extracted_paths if Path(path).suffix.lower() in {".png", ".jpg", ".jpeg"}]
+        if markdown_paths:
+            paths["markdown_path"] = markdown_paths[0]
+            paths["markdown_paths"] = markdown_paths
+        if image_paths:
+            paths["image_paths"] = image_paths
+    return paths
+
+
+def write_mineru_parse_result(library: dict[str, Any], attachment_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    target_dir = mineru_results_dir(library)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{now_iso().replace(':', '').replace('-', '').replace('.', '')}-{safe_result_filename(attachment_key)}"
+    json_path = target_dir / f"{stem}.json"
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    markdown = ""
+    result_payload = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+    data = result_payload.get("data") if isinstance(result_payload.get("data"), dict) else {}
+    for key in ("markdown", "md", "content"):
+        if isinstance(data.get(key), str) and data.get(key):
+            markdown = data[key]
+            break
+    if not markdown:
+        for key in ("markdown", "md", "md_content", "content"):
+            if isinstance(result_payload.get(key), str) and result_payload.get(key):
+                markdown = result_payload[key]
+                break
+    if not markdown:
+        nested_markdowns = mineru_nested_values(result_payload, {"markdown", "md", "md_content"})
+        markdown = next((value for value in nested_markdowns if value), "")
+    paths = {"json_path": str(json_path)}
+    paths.update(write_mineru_downloaded_outputs(target_dir, stem, result_payload))
+    if markdown:
+        markdown_path = target_dir / f"{stem}.md"
+        markdown_path.write_text(markdown, encoding="utf-8")
+        paths["markdown_path"] = str(markdown_path)
+    return paths
+
+
+def mineru_request_url(configured_url: str) -> str:
+    url = (clean_secret(configured_url) or MINERU_DEFAULT_BASE_URL).rstrip("/")
+    if url.endswith("/api/v4/extract/task"):
+        return url[: -len("/api/v4/extract/task")] + "/api/v4/file-urls/batch"
+    if url.endswith("/api/v4"):
+        return url + "/file-urls/batch"
+    if url.endswith("/api/v4/file-urls/batch") or url.endswith("/file_parse"):
+        return url
+    if "/api/v4/" not in url:
+        return url + "/file_parse"
+    return url
+
+
+def mineru_response_code_ok(payload: dict[str, Any]) -> bool:
+    return payload.get("code") in (None, 0, "0", 200, "200")
+
+
+def mineru_response_message(payload: dict[str, Any]) -> str:
+    for key in ("err_msg", "error_msg", "msg", "message", "error"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return "未知错误"
+
+
+def mineru_nested_values(payload: Any, target_keys: set[str]) -> list[str]:
+    values: list[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if str(key).lower() in target_keys and value is not None:
+                values.append(str(value))
+            values.extend(mineru_nested_values(value, target_keys))
+    elif isinstance(payload, list):
+        for item in payload:
+            values.extend(mineru_nested_values(item, target_keys))
+    return values
+
+
+def mineru_parse_state(payload: dict[str, Any]) -> str:
+    states = [state.strip().lower() for state in mineru_nested_values(payload, {"state", "status"})]
+    if any(state in {"failed", "fail", "error"} for state in states):
+        return "failed"
+    if any(state in {"done", "success", "succeeded", "finished", "completed"} for state in states):
+        return "done"
+    if any(state in {"running", "pending", "processing", "queueing", "queued"} for state in states):
+        return "running"
+    return ""
+
+
+def mineru_json_request(url: str, api_key: str, payload: dict[str, Any] | None = None, method: str = "POST") -> dict[str, Any]:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request_obj = urllib_request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            **({"Content-Type": "application/json"} if data is not None else {}),
+        },
+    )
+    try:
+        with urllib_request.urlopen(request_obj, timeout=MINERU_REQUEST_TIMEOUT_SECONDS) as response:
+            response_text = response.read().decode("utf-8", errors="replace")
+    except urllib_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"MinerU API 请求失败：HTTP {exc.code} {detail[:300]}") from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"MinerU API 请求失败：{exc.reason}") from exc
+    except OSError as exc:
+        raise RuntimeError("MinerU API 请求失败：连接被中止，请确认 MinerU 请求地址并检查代理/防火墙。") from exc
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"MinerU API 返回非 JSON 内容：{response_text[:300]}") from exc
+    return parsed if isinstance(parsed, dict) else {"data": parsed}
+
+
+def put_presigned_file(upload_url: str, file_bytes: bytes) -> None:
+    parsed = urlsplit(upload_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError("MinerU 文件上传失败：上传地址无效。")
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    connection = connection_cls(parsed.netloc, timeout=MINERU_REQUEST_TIMEOUT_SECONDS)
+    try:
+        connection.putrequest("PUT", path, skip_accept_encoding=True)
+        connection.putheader("Host", parsed.netloc)
+        connection.putheader("Content-Length", str(len(file_bytes)))
+        connection.endheaders(file_bytes)
+        response = connection.getresponse()
+        detail = response.read().decode("utf-8", errors="replace").strip()
+    except OSError as exc:
+        raise RuntimeError("MinerU 文件上传失败：连接被中止，请检查网络、代理或防火墙。") from exc
+    finally:
+        connection.close()
+    if response.status >= 400:
+        raise RuntimeError(f"MinerU 文件上传失败：HTTP {response.status} {detail[:300]}")
+
+
+def call_mineru_official_batch_parse(pdf_path: Path, api_key: str, url: str) -> dict[str, Any]:
+    data_id = new_hash_for_payload(str(pdf_path), now_iso())[:16]
+    created = mineru_json_request(
+        url,
+        api_key,
+        {
+            "enable_formula": True,
+            "enable_table": True,
+            "language": "ch",
+            "files": [{"name": pdf_path.name, "is_ocr": True, "data_id": data_id}],
+        },
+    )
+    if not mineru_response_code_ok(created):
+        raise RuntimeError(f"MinerU API 请求失败：{mineru_response_message(created)}")
+    created_data = created.get("data") if isinstance(created.get("data"), dict) else {}
+    batch_id = str(created_data.get("batch_id") or created_data.get("batchId") or "")
+    file_urls = created_data.get("file_urls") or created_data.get("fileUrls") or []
+    upload_url = file_urls[0] if isinstance(file_urls, list) and file_urls else ""
+    if not batch_id or not upload_url:
+        raise RuntimeError(f"MinerU API 返回缺少 batch_id 或上传地址：{json.dumps(created, ensure_ascii=False)[:300]}")
+
+    put_presigned_file(str(upload_url), pdf_path.read_bytes())
+
+    results_url = url.replace("/api/v4/file-urls/batch", f"/api/v4/extract-results/batch/{quote(batch_id, safe='')}")
+    last_result: dict[str, Any] = {}
+    attempts = max(1, MINERU_REQUEST_TIMEOUT_SECONDS // MINERU_PARSE_POLL_INTERVAL_SECONDS)
+    for _ in range(attempts):
+        last_result = mineru_json_request(results_url, api_key, None, method="GET")
+        if not mineru_response_code_ok(last_result):
+            raise RuntimeError(f"MinerU API 请求失败：{mineru_response_message(last_result)}")
+        state = mineru_parse_state(last_result)
+        if state == "failed":
+            raise RuntimeError(f"MinerU 解析失败：{mineru_response_message(last_result)}")
+        if state == "done":
+            break
+        time.sleep(MINERU_PARSE_POLL_INTERVAL_SECONDS)
+    else:
+        raise RuntimeError("MinerU 解析超时：已上传 PDF，但等待解析结果超时。")
+
+    return {
+        "schema": "mineru.official-batch-result/v1",
+        "batch_id": batch_id,
+        "data_id": data_id,
+        "create_response": created,
+        "result_response": last_result,
+    }
+
+
+def call_mineru_file_parse(pdf_path: Path, api_key: str, url: str) -> dict[str, Any]:
+    boundary = f"----WebLibraryMinerU{new_hash_for_payload(str(pdf_path), now_iso())[:16]}"
+    parts: list[bytes] = []
+    for name, value in {
+        "parse_method": "auto",
+        "return_md": "true",
+        "return_content_list": "true",
+        "return_images": "false",
+        "return_middle_json": "true",
+    }.items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+        )
+    parts.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="files"; filename="{pdf_path.name}"\r\n'
+            "Content-Type: application/pdf\r\n\r\n"
+        ).encode("utf-8")
+        + pdf_path.read_bytes()
+        + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    request_obj = urllib_request.Request(
+        url,
+        data=b"".join(parts),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib_request.urlopen(request_obj, timeout=MINERU_REQUEST_TIMEOUT_SECONDS) as response:
+            response_text = response.read().decode("utf-8", errors="replace")
+    except urllib_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"MinerU API 请求失败：HTTP {exc.code} {detail[:300]}") from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"MinerU API 请求失败：{exc.reason}") from exc
+    except OSError as exc:
+        raise RuntimeError("MinerU API 请求失败：连接被中止，请确认自部署 MinerU 地址支持 /file_parse。") from exc
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"MinerU API 返回非 JSON 内容：{response_text[:300]}") from exc
+    return parsed if isinstance(parsed, dict) else {"data": parsed}
+
+
+def call_mineru_parse_pdf(pdf_path: Path, config: dict[str, str]) -> dict[str, Any]:
+    api_key = clean_secret(config.get("api_key"))
+    base_url = mineru_request_url(clean_secret(config.get("base_url")))
+    if not api_key:
+        raise ValueError("MinerU API Key 未配置，请先在 API 配置页填写。")
+    if not pdf_path.exists():
+        raise ValueError("PDF 文件不存在。")
+
+    if base_url.endswith("/api/v4/file-urls/batch"):
+        return call_mineru_official_batch_parse(pdf_path, api_key, base_url)
+    return call_mineru_file_parse(pdf_path, api_key, base_url)
+
+
+def new_hash_for_payload(*values: str) -> str:
+    digest = hashlib.sha256()
+    for value in values:
+        digest.update(str(value or "").encode("utf-8"))
+    return digest.hexdigest()
+
+
+def mineru_parse_selected_pdfs(library: dict[str, Any], item_keys: list[str]) -> dict[str, Any]:
+    if library.get("mode") != "local_copy":
+        raise SourceError("只读源库不能执行 PDF 解析，请先创建可编辑本地副本。")
+    keys = [str(key or "").strip() for key in item_keys if str(key or "").strip()]
+    if not keys:
+        raise ValueError("item_keys must contain at least one item")
+    repo = ZoteroRepository(library)
+    config = effective_mineru_config_for_library(str(library["library_id"]))
+    results: list[dict[str, Any]] = []
+    parsed_count = 0
+    failed_count = 0
+    pdf_count = 0
+    for item_key in keys:
+        try:
+            attachments = repo.pdf_attachments_for_item(item_key)
+        except (ValueError, OSError) as exc:
+            results.append({"item_key": item_key, "status": "failed", "error": str(exc), "attachments": []})
+            failed_count += 1
+            continue
+        item_results: list[dict[str, Any]] = []
+        if not attachments:
+            results.append({"item_key": item_key, "status": "skipped", "error": "没有可解析的 PDF 附件。", "attachments": []})
+            continue
+        for attachment in attachments:
+            pdf_count += 1
+            attachment_key = str(attachment.get("key") or "")
+            try:
+                parsed = call_mineru_parse_pdf(Path(str(attachment.get("resolved_path") or "")), config)
+                paths = write_mineru_parse_result(
+                    library,
+                    attachment_key,
+                    {
+                        "schema": "web-library.mineru-parse-result/v1",
+                        "library_id": library["library_id"],
+                        "item_key": item_key,
+                        "attachment": attachment,
+                        "parsed_at": now_iso(),
+                        "mineru": {"base_url": config.get("base_url", "")},
+                        "result": parsed,
+                    },
+                )
+                item_results.append({"attachment_key": attachment_key, "status": "parsed", **paths})
+                parsed_count += 1
+            except Exception as exc:  # noqa: BLE001 - external APIs can fail in many ways
+                item_results.append({"attachment_key": attachment_key, "status": "failed", "error": str(exc)})
+                failed_count += 1
+        status = "parsed" if item_results and all(item.get("status") == "parsed" for item in item_results) else "partial"
+        results.append({"item_key": item_key, "status": status, "attachments": item_results})
+    return {
+        "item_keys": keys,
+        "pdf_count": pdf_count,
+        "parsed_count": parsed_count,
+        "failed_count": failed_count,
+        "result_dir": str(mineru_results_dir(library)),
+        "results": results,
     }
 
 
@@ -8166,6 +8658,18 @@ def create_app() -> Flask:
         except (SourceError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.post("/api/library/<library_id>/api-config/mineru")
+    def api_save_library_mineru_config(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            library_or_404(library_id)
+            existing = api_config_for_library(library_id)
+            config = normalized_mineru_api_config(payload, existing)
+            app_store.set_preference(library_id, API_CONFIG_PREFERENCE_KEY, config)
+            return jsonify({"ok": True, "config": library_api_config_response(library_id, include_secrets=False)})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.post("/api/library/<library_id>/api-config/check")
     def api_check_library_api_config(library_id: str):
         payload = request.get_json(silent=True) or {}
@@ -9619,6 +10123,18 @@ def create_app() -> Flask:
             attachments = ZoteroRepository(library_or_404(library_id)).pdf_attachments_for_item(item_key)
             return jsonify({"ok": True, "attachments": attachments})
         except (SourceError, ValueError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/items/parse-pdfs")
+    def api_parse_selected_pdfs(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        item_keys = payload.get("item_keys") or []
+        if not isinstance(item_keys, list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            summary = mineru_parse_selected_pdfs(library_or_404(library_id), [str(key) for key in item_keys])
+            return jsonify({"ok": True, **summary})
+        except (SourceError, ValueError, RuntimeError, OSError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.get("/api/library/<library_id>/semantic-rules")

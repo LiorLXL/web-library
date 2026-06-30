@@ -76,6 +76,7 @@
               <button class="bulk-action-btn" type="button" data-bulk-action="move-items">移动条目</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="edit-attachments">附件编辑</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="read-paper">文献研读</button>
+              <button class="bulk-action-btn" type="button" data-bulk-action="parse-pdfs">PDF 解析</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="download-papers">文献下载</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="query-rank">期刊&会议等级查询</button>
               <button class="bulk-action-btn" type="button" data-bulk-action="export-citation">引用导出</button>
@@ -124,6 +125,7 @@
   <div class="floating-panel" data-move-items-modal hidden></div>
   <div class="floating-panel" data-attachment-editor-modal hidden></div>
   <div class="floating-panel" data-reader-pdf-picker-modal hidden></div>
+  <div class="floating-panel" data-pdf-parse-modal hidden></div>
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

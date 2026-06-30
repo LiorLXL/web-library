@@ -70,6 +70,7 @@ const state = {
   apiConfigBusy: false,
   apiConfigMessage: "",
   apiConfigShowSecrets: false,
+  apiConfigShowMineruSecret: false,
   apiConfigCheckResults: {},
   apiConfigChecking: "",
   items: [],
@@ -182,6 +183,9 @@ const state = {
   citationExportFormat: "bibtex",
   citationExportMessage: "",
   citationExportBusy: false,
+  pdfParseMessage: "",
+  pdfParseBusy: false,
+  pdfParseResult: null,
   deleteItemsMode: "trash",
   deleteItemsMessage: "",
   deleteItemsBusy: false,
@@ -275,6 +279,11 @@ function apiConfigTokenValue(service) {
   return state.apiConfigShowSecrets ? String(entry.token || "") : "";
 }
 
+function apiConfigMineruKeyValue() {
+  const entry = state.apiConfig?.mineru || {};
+  return state.apiConfigShowMineruSecret ? String(entry.api_key || "") : "";
+}
+
 function apiConfigSecretPayload(formData, field, configured, source) {
   const value = String(formData.get(field) || "").trim();
   if (!state.apiConfigShowSecrets && !value && configured && source === "preference") {
@@ -302,9 +311,13 @@ function renderApiConfigPage() {
   const github = config.code_sources?.github || {};
   const huggingface = config.code_sources?.huggingface || {};
   const zenodo = config.code_sources?.zenodo || {};
+  const mineru = config.mineru || {};
   const apiKeyValue = state.apiConfigShowSecrets ? String(model.api_key || "") : "";
   const apiKeyPlaceholder = model.configured
     ? `${apiConfigSourceText(model.source)}已配置 ${model.masked_api_key || ""}`.trim()
+    : "未配置";
+  const mineruKeyPlaceholder = mineru.configured
+    ? `${apiConfigSourceText(mineru.source)}已配置 ${mineru.masked_api_key || ""}`.trim()
     : "未配置";
   const serviceRows = [
     ["github", "GitHub Token", "github_token", github, "公开仓库搜索；可选，未填也能搜公开资源"],
@@ -342,6 +355,38 @@ function renderApiConfigPage() {
         </div>
         ${state.apiConfigMessage ? `<p class="api-config-message">${escapeHtml(state.apiConfigMessage)}</p>` : ""}
         ${renderApiConfigCheck("model")}
+      </form>
+    </section>
+
+    <section class="api-config-card">
+      <div class="api-config-head">
+        <div>
+          <h2>MinerU PDF 解析</h2>
+          <p>用于批量解析已勾选条目的 PDF。解析结果会保存到本地副本文库目录的 mineru-results/。</p>
+        </div>
+        <span class="api-status ${mineru.configured ? "ok" : "failed"}">${mineru.configured ? "已配置" : "未配置"}</span>
+      </div>
+      <form class="api-config-form" data-mineru-config-form>
+        <div class="api-source-row">
+          <div>
+            <strong>MinerU API</strong>
+            <span>填写 API Key 后，文库页可使用“PDF 解析”批量调用 MinerU。</span>
+            <em>状态：${mineru.configured ? "已配置" : "未配置"}；来源：${escapeHtml(apiConfigSourceText(mineru.source))}${mineru.masked_api_key ? `；${escapeHtml(mineru.masked_api_key)}` : ""}</em>
+          </div>
+          <input name="mineru_api_key" type="${state.apiConfigShowMineruSecret ? "text" : "password"}" value="${escapeHtml(apiConfigMineruKeyValue())}" placeholder="${escapeHtml(mineruKeyPlaceholder)}">
+        </div>
+        <div class="api-source-row">
+          <div>
+            <strong>MinerU 请求地址</strong>
+            <span>默认使用 MinerU API 地址；如果部署了兼容接口，可以在这里覆盖。</span>
+            <em>来源：${escapeHtml(apiConfigSourceText(mineru.base_url_source))}</em>
+          </div>
+          <input name="mineru_base_url" value="${escapeHtml(mineru.base_url || "")}" placeholder="https://mineru.net/api/v4/file-urls/batch">
+        </div>
+        <div class="api-config-actions">
+          <button type="button" class="form-action-btn" data-save-mineru-config ${state.apiConfigBusy ? "disabled" : ""}>${state.apiConfigBusy ? "保存中..." : "保存 MinerU 配置"}</button>
+          <button type="button" class="ghost-btn" data-toggle-mineru-config-secret>${state.apiConfigShowMineruSecret ? "隐藏 key" : "显示 key"}</button>
+        </div>
       </form>
     </section>
 
@@ -402,6 +447,32 @@ async function saveApiConfig(event) {
     state.apiConfig = data.config || {};
     state.apiConfigShowSecrets = false;
     state.apiConfigMessage = "配置已保存。";
+  } catch (error) {
+    state.apiConfigMessage = error.message;
+  } finally {
+    state.apiConfigBusy = false;
+    renderApiConfigPage();
+  }
+}
+
+async function saveMineruConfig(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const mineru = state.apiConfig?.mineru || {};
+  const payload = {
+    mineru: {
+      base_url: String(formData.get("mineru_base_url") || "").trim(),
+      api_key: apiConfigSecretPayload(formData, "mineru_api_key", mineru.configured, mineru.source),
+    },
+  };
+  try {
+    state.apiConfigBusy = true;
+    state.apiConfigMessage = "";
+    const data = await postJSON(`/api/library/${state.libraryId}/api-config`, payload);
+    state.apiConfig = data.config || {};
+    state.apiConfigShowMineruSecret = false;
+    state.apiConfigMessage = "MinerU 配置已保存。";
   } catch (error) {
     state.apiConfigMessage = error.message;
   } finally {
@@ -567,6 +638,9 @@ function bulkActionState(action) {
       return item ? { enabled: true, title: "编辑当前条目的附件" } : { enabled: false, title: "请点击任意条目后操作" };
     case "read-paper":
       return item && pdfCount ? { enabled: true, title: "打开当前条目的 PDF" } : { enabled: false, title: "请点击有可读PDF的条目后操作" };
+    case "parse-pdfs":
+      if (!editable) return { enabled: false, title: localCopyRequired };
+      return checkedCount ? { enabled: true, title: "用 MinerU 解析已勾选条目的 PDF" } : { enabled: false, title: checkedRequired };
     case "export-citation":
       return checkedCount ? { enabled: true, title: "导出已勾选条目引用" } : { enabled: false, title: checkedRequired };
     case "download-papers":
@@ -595,6 +669,7 @@ function notifyFeatureInProgress(action) {
     ["move-items", "移动条目"],
     ["edit-attachments", "附件编辑"],
     ["read-paper", "文献研读"],
+    ["parse-pdfs", "PDF 解析"],
     ["download-papers", "文献下载"],
     ["query-rank", "期刊&会议等级查询"],
     ["export-citation", "引用导出"],
@@ -5363,6 +5438,85 @@ async function submitCitationExport(event) {
   }
 }
 
+function renderPdfParseModal() {
+  const panel = document.querySelector("[data-pdf-parse-modal]");
+  if (!panel) return;
+  const selectedCount = selectedItemKeys().length;
+  const result = state.pdfParseResult || null;
+  const resultRows = (result?.results || []).map((item) => {
+    const attachmentRows = (item.attachments || []).map((attachment) => {
+      const path = attachment.markdown_path || attachment.json_path || "";
+      const status = attachment.status === "parsed" ? "已解析" : "失败";
+      return `<li><strong>${escapeHtml(attachment.attachment_key || "-")}</strong> ${escapeHtml(status)} ${path ? `<small>${escapeHtml(path)}</small>` : ""}${attachment.error ? `<small>${escapeHtml(attachment.error)}</small>` : ""}</li>`;
+    }).join("");
+    return `<div class="import-result-row">
+      <strong>${escapeHtml(item.item_key || "-")}</strong>
+      <span>${escapeHtml(item.status || "")}</span>
+      ${item.error ? `<small>${escapeHtml(item.error)}</small>` : ""}
+      ${attachmentRows ? `<ul>${attachmentRows}</ul>` : ""}
+    </div>`;
+  }).join("");
+  panel.innerHTML = `
+    <section class="floating-card export-citation-card" data-pdf-parse-card>
+      <div class="pane-head">
+        <div>
+          <h2>PDF 解析</h2>
+          <p>已选择 ${selectedCount} 条文献，将解析其中可打开的 PDF 附件。</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-pdf-parse>×</button>
+      </div>
+      <div class="bulk-modal-form">
+        <p class="muted">需要先在 API 配置页填写 MinerU API Key。解析结果会保存到本地副本文库的 mineru-results/ 目录。</p>
+        <div class="bulk-modal-actions">
+          <button type="button" class="form-action-btn" data-submit-pdf-parse ${state.pdfParseBusy || !selectedCount ? "disabled" : ""}>${state.pdfParseBusy ? "解析中..." : "开始解析"}</button>
+          <button type="button" class="ghost-btn" data-close-pdf-parse>取消</button>
+        </div>
+      </div>
+      ${state.pdfParseMessage ? `<p class="import-message">${escapeHtml(state.pdfParseMessage)}</p>` : ""}
+      ${result ? `
+        <div class="import-results">
+          <p>PDF ${Number(result.parsed_count || 0)} 个解析成功，${Number(result.failed_count || 0)} 个失败。结果目录：${escapeHtml(result.result_dir || "")}</p>
+          ${resultRows}
+        </div>
+      ` : ""}
+    </section>
+  `;
+  panel.querySelectorAll("[data-close-pdf-parse]").forEach((button) => button.addEventListener("click", closePdfParseModal));
+  panel.querySelector("[data-submit-pdf-parse]")?.addEventListener("click", submitPdfParse);
+}
+
+function openPdfParseModal() {
+  if (!bulkActionState("parse-pdfs").enabled) return;
+  state.pdfParseMessage = "";
+  state.pdfParseResult = null;
+  document.querySelector("[data-pdf-parse-modal]").hidden = false;
+  renderPdfParseModal();
+}
+
+function closePdfParseModal() {
+  const panel = document.querySelector("[data-pdf-parse-modal]");
+  if (panel) panel.hidden = true;
+}
+
+async function submitPdfParse() {
+  const keys = selectedItemKeys();
+  if (!keys.length) return;
+  try {
+    state.pdfParseBusy = true;
+    state.pdfParseMessage = "";
+    state.pdfParseResult = null;
+    renderPdfParseModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/items/parse-pdfs`, { item_keys: keys });
+    state.pdfParseResult = data;
+    state.pdfParseMessage = "PDF 解析完成。";
+  } catch (error) {
+    state.pdfParseMessage = error.message;
+  } finally {
+    state.pdfParseBusy = false;
+    renderPdfParseModal();
+  }
+}
+
 function renderDeleteItemsModal() {
   const panel = document.querySelector("[data-delete-items-modal]");
   if (!panel) return;
@@ -7060,16 +7214,24 @@ function setupApiConfigPage() {
   const host = document.querySelector("[data-api-config-panel]");
   host?.addEventListener("submit", (event) => {
     if (event.target.matches("[data-api-config-form]")) saveApiConfig(event);
+    else if (event.target.matches("[data-mineru-config-form]")) saveMineruConfig(event);
   });
   host?.addEventListener("click", (event) => {
     const button = event.target.closest("button");
     if (!button || !host.contains(button)) return;
     if (button.matches("[data-save-api-config]")) {
-      const form = button.closest("[data-api-config-form]");
+      const form = button.closest("[data-api-config-form]") || host.querySelector("[data-api-config-form]");
       if (form) saveApiConfig({ preventDefault: () => {}, currentTarget: form });
+    } else if (button.matches("[data-save-mineru-config]")) {
+      const form = button.closest("[data-mineru-config-form]");
+      if (form) saveMineruConfig({ preventDefault: () => {}, currentTarget: form });
     } else if (button.matches("[data-toggle-api-config-secrets]")) {
       state.apiConfigShowSecrets = !state.apiConfigShowSecrets;
       loadApiConfig({ includeSecrets: state.apiConfigShowSecrets });
+    } else if (button.matches("[data-toggle-mineru-config-secret]")) {
+      state.apiConfigShowMineruSecret = !state.apiConfigShowMineruSecret;
+      if (state.apiConfigShowMineruSecret) loadApiConfig({ includeSecrets: true });
+      else renderApiConfigPage();
     } else if (button.matches("[data-check-api-config]")) {
       checkApiConfig(button.dataset.checkApiConfig);
     }
@@ -7102,6 +7264,7 @@ function setupLibraryPage() {
     else if (action === "move-items") openMoveItemsModal();
     else if (action === "edit-attachments") openAttachmentEditorModal();
     else if (action === "read-paper") openReadPaper();
+    else if (action === "parse-pdfs") openPdfParseModal();
     else if (action === "export-citation") openCitationExportModal();
     else notifyFeatureInProgress(action);
   }));
