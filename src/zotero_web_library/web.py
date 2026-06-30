@@ -93,6 +93,7 @@ RETRIEVAL_CONFIG_BUNDLE_REDACTED_VALUE = "__REDACTED__"
 API_CONFIG_PREFERENCE_KEY = "api_config"
 API_CONFIG_SECRET_KEEP_VALUE = "__KEEP_SECRET__"
 RETRIEVAL_BATCH_VALIDATION_MIN_COMPLETED_QUERIES = 3
+AI_CANDIDATE_EVALUATION_BATCH_SIZE = 20
 SENSITIVE_CONFIG_KEY_RE = re.compile(
     r"(authorization|api[-_ ]?key|token|secret|password|credential|bearer)",
     re.I,
@@ -5268,6 +5269,11 @@ def retrieval_candidate_ai_messages(query: str, metadata: list[dict[str, Any]]) 
     ]
 
 
+def chunked_ai_candidate_metadata(metadata: list[dict[str, Any]], size: int = AI_CANDIDATE_EVALUATION_BATCH_SIZE) -> list[list[dict[str, Any]]]:
+    chunk_size = max(1, int(size or AI_CANDIDATE_EVALUATION_BATCH_SIZE))
+    return [metadata[index : index + chunk_size] for index in range(0, len(metadata), chunk_size)]
+
+
 def clamp_score(value: Any, default: float = 0.0) -> float:
     try:
         number = float(value)
@@ -5466,13 +5472,20 @@ def evaluate_retrieval_candidates_with_ai(
         metadata = [candidate_metadata_for_ai(candidate, index) for index, candidate in enumerate(candidates, start=1)]
         id_map = {item["candidate_id"]: candidate for item, candidate in zip(metadata, candidates, strict=False)}
         try:
-            messages = retrieval_candidate_ai_messages(query, metadata)
-            model_response = ai_pixel_chat_json(messages, post_json=ai_post_json) if callable(ai_post_json) else ai_pixel_chat_json(messages)
-            raw_evaluations = model_response.get("evaluations") or model_response.get("candidates") or []
-            applied = apply_ai_evaluations_to_candidates(candidates, raw_evaluations, id_map)
+            accepted_total = 0
+            rejected_total = 0
+            chunks = chunked_ai_candidate_metadata(metadata)
+            for chunk in chunks:
+                messages = retrieval_candidate_ai_messages(query, chunk)
+                model_response = ai_pixel_chat_json(messages, post_json=ai_post_json) if callable(ai_post_json) else ai_pixel_chat_json(messages)
+                raw_evaluations = model_response.get("evaluations") or model_response.get("candidates") or []
+                applied = apply_ai_evaluations_to_candidates(candidates, raw_evaluations, id_map)
+                accepted_total += applied["accepted"]
+                rejected_total += applied["rejected"]
             summary["status"] = "evaluated"
-            summary["accepted_evaluation_count"] = applied["accepted"]
-            summary["rejected_evaluation_count"] = applied["rejected"]
+            summary["evaluation_batch_count"] = len(chunks)
+            summary["accepted_evaluation_count"] = accepted_total
+            summary["rejected_evaluation_count"] = rejected_total
         except Exception as exc:  # noqa: BLE001 - search must still return usable candidates.
             summary["status"] = "error"
             summary["error"] = str(exc or exc.__class__.__name__)

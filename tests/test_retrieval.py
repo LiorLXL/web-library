@@ -2560,6 +2560,64 @@ def test_search_retrieval_uses_source_specific_limits() -> None:
     assert result["source_stats"]["code"]["count"] == 0
 
 
+def test_search_retrieval_caches_same_query_and_returns_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    retrieval_providers.reset_retrieval_search_cache()
+    monkeypatch.setenv("WEB_LIBRARY_RETRIEVAL_SEARCH_CACHE_SECONDS", "60")
+    calls: list[tuple[str, int]] = []
+
+    class CacheProvider:
+        name = "cache"
+
+        def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+            calls.append((query, limit))
+            return [
+                RetrievedCandidate(
+                    source="cache",
+                    external_id="cache-1",
+                    item=ImportedItem(
+                        item_type="journalArticle",
+                        fields={"title": "Cached Retrieval Result", "date": "2026"},
+                        creators=[ImportedCreator(first_name="Ada", last_name="Lovelace")],
+                        identifiers={"doi": "10.4242/cache"},
+                    ),
+                    confidence=0.8,
+                )
+            ]
+
+    registry = {"cache": CacheProvider()}
+    first = search_retrieval("cache query", sources=["cache"], limit=3, registry=registry)
+    first["candidates"][0]["title"] = "Mutated by caller"
+    second = search_retrieval("cache query", sources=["cache"], limit=3, registry=registry)
+
+    assert calls == [("cache query", 3)]
+    assert second["cached"] is True
+    assert second["source_stats"]["cache"]["cached"] is True
+    assert second["candidates"][0]["title"] == "Cached Retrieval Result"
+    retrieval_providers.reset_retrieval_search_cache()
+
+
+def test_code_and_data_providers_use_shorter_http_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_get_json(url: str, timeout: int = 15, headers: dict[str, str] | None = None, **kwargs: object) -> dict:
+        calls.append({"url": url, "timeout": timeout, "headers": headers or {}})
+        if "api.github.com" in url:
+            return {"items": []}
+        if "huggingface.co" in url:
+            return []
+        if "zenodo.org" in url:
+            return {"hits": {"hits": []}}
+        return {}
+
+    monkeypatch.setattr(retrieval_providers, "_http_get_json", fake_get_json)
+
+    GitHubProvider().search("speculative decoding", limit=1)
+    HuggingFaceProvider().search("speculative decoding", limit=1)
+    ZenodoProvider().search("speculative decoding", limit=1)
+
+    assert [call["timeout"] for call in calls] == [8, 8, 8, 8]
+
+
 def test_search_retrieval_dedupes_exact_title_year_candidates_without_identifiers() -> None:
     local_candidate = RetrievedCandidate(
         source="localfile",
@@ -2810,6 +2868,78 @@ def test_ai_candidate_evaluation_sends_metadata_only_and_rejects_unknown_ids(
     assert candidates[0]["ai_evaluation"]["auto_select"] is True
     assert candidates[1]["ai_evaluation"]["status"] == "fallback"
     assert candidates[1]["ai_evaluation"]["auto_select"] is False
+
+
+def test_ai_candidate_evaluation_batches_large_candidate_sets(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_read_only_source(zotero_fixture)
+    app_store.set_preference(
+        library["library_id"],
+        web.API_CONFIG_PREFERENCE_KEY,
+        {"model": {"model": "gpt-5.5", "base_url": "https://ai-pixel.online", "api_key": "secret"}, "code_sources": {}},
+    )
+    candidates = [
+        {
+            "source": "crossref",
+            "title": f"Speculative Decoding Candidate {index}",
+            "abstract": "Speculative decoding speeds up model inference.",
+            "identifiers": {"doi": f"10.1000/spec-{index}"},
+            "item_type": "journalArticle",
+            "landing_url": f"https://doi.org/10.1000/spec-{index}",
+            "item": {
+                "item_type": "journalArticle",
+                "fields": {"title": f"Speculative Decoding Candidate {index}", "DOI": f"10.1000/spec-{index}"},
+                "creators": [{"first_name": "Ada", "last_name": "Lovelace"}],
+                "identifiers": {"doi": f"10.1000/spec-{index}"},
+            },
+        }
+        for index in range(45)
+    ]
+    batch_sizes: list[int] = []
+
+    def fake_post_json(url: str, headers: dict[str, str], payload: dict[str, object], timeout: int) -> dict:
+        task = json.loads(payload["messages"][1]["content"])  # type: ignore[index]
+        metadata = task["candidates"]
+        batch_sizes.append(len(metadata))
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "evaluations": [
+                                    {
+                                        "candidate_id": item["candidate_id"],
+                                        "decision": "recommend",
+                                        "relevance_score": 0.9,
+                                        "quality_score": 0.85,
+                                        "risk_level": "low",
+                                        "reason": "Relevant metadata.",
+                                        "missing_fields": [],
+                                    }
+                                    for item in metadata
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    summary = web.evaluate_retrieval_candidates_with_ai(
+        library["library_id"],
+        "speculative decoding",
+        candidates,
+        ai_post_json=fake_post_json,
+    )
+
+    assert batch_sizes == [20, 20, 5]
+    assert summary["evaluation_batch_count"] == 3
+    assert summary["accepted_evaluation_count"] == 45
+    assert summary["auto_selected_count"] == 45
+    assert all(candidate["ai_evaluation"]["decision"] == "recommend" for candidate in candidates)
 
 
 def test_retrieval_search_api_adds_ai_evaluation_and_strict_auto_select(

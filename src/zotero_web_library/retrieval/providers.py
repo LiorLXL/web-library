@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import contextlib
 import contextvars
 import json
@@ -62,8 +63,12 @@ MAX_HTTP_JSON_PAGES = 10
 HTTP_JSON_ENV_REF_RE = re.compile(r"\$\{ENV:([A-Za-z_][A-Za-z0-9_]*)\}")
 DEFAULT_PREPRINT_SERVER_SEARCH_DAYS = 365
 MAX_PREPRINT_SERVER_SEARCH_DAYS = 3650
+RETRIEVAL_SEARCH_CACHE_SECONDS_ENV = "WEB_LIBRARY_RETRIEVAL_SEARCH_CACHE_SECONDS"
+RETRIEVAL_SEARCH_CACHE_MAX_ENTRIES = 128
 _SOURCE_RATE_LIMIT_LOCK = threading.Lock()
 _SOURCE_NEXT_ALLOWED_AT: dict[str, float] = {}
+_RETRIEVAL_SEARCH_CACHE_LOCK = threading.Lock()
+_RETRIEVAL_SEARCH_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _AI_PIXEL_CONFIG: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar("ai_pixel_config", default={})
 
 
@@ -92,6 +97,10 @@ def env_float(name: str, default: float, *, minimum: float = 0.0, maximum: float
     except (TypeError, ValueError):
         value = default
     return max(minimum, min(value, maximum))
+
+
+def retrieval_search_cache_seconds() -> int:
+    return env_int(RETRIEVAL_SEARCH_CACHE_SECONDS_ENV, 90, minimum=0, maximum=600)
 
 
 def http_retry_count(value: int | None = None) -> int:
@@ -542,6 +551,66 @@ def source_setup_guide(
 def reset_source_rate_limit_state() -> None:
     with _SOURCE_RATE_LIMIT_LOCK:
         _SOURCE_NEXT_ALLOWED_AT.clear()
+
+
+def reset_retrieval_search_cache() -> None:
+    with _RETRIEVAL_SEARCH_CACHE_LOCK:
+        _RETRIEVAL_SEARCH_CACHE.clear()
+
+
+def retrieval_search_cache_key(
+    query: str,
+    source_names: list[str],
+    limits: dict[str, int],
+    include_raw: bool,
+    registry: dict[str, MetadataProvider],
+) -> tuple[Any, ...]:
+    provider_signature = tuple(
+        (
+            source,
+            registry[source].__class__.__module__,
+            registry[source].__class__.__qualname__,
+        )
+        for source in source_names
+        if source in registry
+    )
+    return (
+        query.casefold(),
+        tuple(source_names),
+        tuple((source, limits.get(source, 0)) for source in source_names),
+        bool(include_raw),
+        provider_signature,
+    )
+
+
+def get_retrieval_search_cache(key: tuple[Any, ...], now: float | None = None) -> dict[str, Any] | None:
+    timestamp = time.monotonic() if now is None else now
+    with _RETRIEVAL_SEARCH_CACHE_LOCK:
+        item = _RETRIEVAL_SEARCH_CACHE.get(key)
+        if not item:
+            return None
+        expires_at, payload = item
+        if expires_at <= timestamp:
+            _RETRIEVAL_SEARCH_CACHE.pop(key, None)
+            return None
+        cached = copy.deepcopy(payload)
+    for stats in (cached.get("source_stats") or {}).values():
+        if isinstance(stats, dict):
+            stats["cached"] = True
+    cached["cached"] = True
+    return cached
+
+
+def set_retrieval_search_cache(key: tuple[Any, ...], payload: dict[str, Any], now: float | None = None) -> None:
+    ttl = retrieval_search_cache_seconds()
+    if ttl <= 0:
+        return
+    timestamp = time.monotonic() if now is None else now
+    with _RETRIEVAL_SEARCH_CACHE_LOCK:
+        if len(_RETRIEVAL_SEARCH_CACHE) >= RETRIEVAL_SEARCH_CACHE_MAX_ENTRIES:
+            oldest_key = min(_RETRIEVAL_SEARCH_CACHE, key=lambda cache_key: _RETRIEVAL_SEARCH_CACHE[cache_key][0])
+            _RETRIEVAL_SEARCH_CACHE.pop(oldest_key, None)
+        _RETRIEVAL_SEARCH_CACHE[key] = (timestamp + ttl, copy.deepcopy(payload))
 
 
 def wait_for_source_rate_limit(
@@ -1467,7 +1536,7 @@ class GitHubProvider:
     name = "github"
     api_key_env = "GITHUB_TOKEN"
     optional_api_key = True
-    timeout_seconds = 15
+    timeout_seconds = 8
     rate_limit_seconds = 1.0
     rate_limit_note = "GitHub public repository search works without a token; configure a token to improve rate limits."
 
@@ -1498,7 +1567,7 @@ class GitHubProvider:
         token = self.token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        return _http_get_json(url, headers=headers)
+        return _http_get_json(url, timeout=provider_timeout_seconds(self), headers=headers)
 
 
 def github_candidate(repo: dict[str, Any]) -> RetrievedCandidate:
@@ -1579,7 +1648,7 @@ class HuggingFaceProvider:
     name = "huggingface"
     api_key_env = "HUGGINGFACE_TOKEN"
     optional_api_key = True
-    timeout_seconds = 15
+    timeout_seconds = 8
     rate_limit_seconds = 0.5
     rate_limit_note = "HuggingFace Hub public search works without a token; configure a token for private or higher-rate access."
 
@@ -1616,7 +1685,7 @@ class HuggingFaceProvider:
         token = self.token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        return _http_get_json(url, headers=headers)
+        return _http_get_json(url, timeout=provider_timeout_seconds(self), headers=headers)
 
 
 def huggingface_candidate(record: dict[str, Any], *, kind: str) -> RetrievedCandidate:
@@ -1692,7 +1761,7 @@ class ZenodoProvider:
     name = "zenodo"
     api_key_env = "ZENODO_ACCESS_TOKEN"
     optional_api_key = True
-    timeout_seconds = 15
+    timeout_seconds = 8
     rate_limit_seconds = 0.5
     rate_limit_note = "Zenodo public records search works without a token; configure a token for higher-rate access."
 
@@ -1722,7 +1791,7 @@ class ZenodoProvider:
     def fetch_json(self, url: str) -> Any:
         if self.get_json:
             return self.get_json(url)
-        return _http_get_json(url)
+        return _http_get_json(url, timeout=provider_timeout_seconds(self))
 
 
 def zenodo_candidate(record: dict[str, Any]) -> RetrievedCandidate:
@@ -4679,10 +4748,16 @@ def search_retrieval(
         except (TypeError, ValueError):
             return per_source_limit
 
+    resolved_limits = {source: limit_for_source(source) for source in source_names}
+    cache_key = retrieval_search_cache_key(clean_query, source_names, resolved_limits, include_raw, provider_registry)
+    cached_result = get_retrieval_search_cache(cache_key)
+    if cached_result is not None:
+        return cached_result
+
     results: dict[str, SourceSearchResult] = {}
     with ThreadPoolExecutor(max_workers=max(1, len(source_names))) as executor:
         futures = {
-            executor.submit(run_provider_search, source, provider_registry[source], clean_query, limit_for_source(source)): source
+            executor.submit(run_provider_search, source, provider_registry[source], clean_query, resolved_limits[source]): source
             for source in source_names
         }
         for future in as_completed(futures):
@@ -4699,9 +4774,11 @@ def search_retrieval(
         payload = candidate.as_dict(include_raw=include_raw)
         payload["rank"] = index
         candidate_payloads.append(payload)
-    return {
+    payload = {
         "query": clean_query,
         "sources": source_names,
         "candidates": candidate_payloads,
         "source_stats": {result.source: result.stats_dict() for result in ordered_results},
     }
+    set_retrieval_search_cache(cache_key, payload)
+    return payload
