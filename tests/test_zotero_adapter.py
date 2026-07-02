@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+import json
 import sqlite3
+import zipfile
 from io import BytesIO
 from pathlib import Path
 
@@ -784,3 +786,303 @@ def test_attachment_management_apis(
     )
     assert delete_response.status_code == 200
     assert delete_response.get_json()["deleted_count"] == 1
+
+
+def test_api_config_saves_mineru_credentials(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/api-config",
+        json={"mineru": {"base_url": "https://mineru.example/file_parse", "api_key": "mineru-secret-key"}},
+    )
+
+    assert response.status_code == 200
+    config = response.get_json()["config"]
+    assert config["mineru"]["configured"] is True
+    assert config["mineru"]["api_key"] == ""
+    assert config["mineru"]["base_url"] == "https://mineru.example/file_parse"
+    assert "secret" not in config["mineru"]["masked_api_key"]
+
+    secret_response = client.get(f"/api/library/{library['library_id']}/api-config?include_secrets=1")
+    assert secret_response.status_code == 200
+    assert secret_response.get_json()["config"]["mineru"]["api_key"] == "mineru-secret-key"
+
+
+def test_mineru_config_endpoint_saves_key_for_parse(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    save_response = client.post(
+        f"/api/library/{library['library_id']}/api-config/mineru",
+        json={"base_url": "https://mineru.example/file_parse", "api_key": "mineru-secret-key"},
+    )
+    assert save_response.status_code == 200
+    assert save_response.get_json()["config"]["mineru"]["configured"] is True
+
+    calls: list[dict[str, str]] = []
+
+    def fake_parse(pdf_path: Path, config: dict[str, str]) -> dict[str, object]:
+        calls.append(config)
+        return {"data": {"markdown": "# Parsed via endpoint"}}
+
+    monkeypatch.setattr(web, "call_mineru_parse_pdf", fake_parse)
+    parse_response = client.post(
+        f"/api/library/{library['library_id']}/items/parse-pdfs",
+        json={"item_keys": ["ITEM0001"]},
+    )
+    assert parse_response.status_code == 200
+    assert calls and calls[0]["api_key"] == "mineru-secret-key"
+
+
+def test_api_config_partial_mineru_save_preserves_model_credentials(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    first = client.post(
+        f"/api/library/{library['library_id']}/api-config",
+        json={
+            "model": {"model": "demo-model", "base_url": "https://model.example", "api_key": "model-secret"},
+            "code_sources": {"github_token": "github-secret"},
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        f"/api/library/{library['library_id']}/api-config",
+        json={"mineru": {"base_url": "https://mineru.example/file_parse", "api_key": "mineru-secret-key"}},
+    )
+    assert second.status_code == 200
+
+    secret_response = client.get(f"/api/library/{library['library_id']}/api-config?include_secrets=1")
+    config = secret_response.get_json()["config"]
+    assert config["model"]["model"] == "demo-model"
+    assert config["model"]["base_url"] == "https://model.example"
+    assert config["model"]["api_key"] == "model-secret"
+    assert config["code_sources"]["github"]["token"] == "github-secret"
+    assert config["mineru"]["api_key"] == "mineru-secret-key"
+
+
+def test_parse_selected_pdfs_uses_mineru_and_writes_results(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    app_store.set_preference(
+        library["library_id"],
+        web.API_CONFIG_PREFERENCE_KEY,
+        {"mineru": {"base_url": "https://mineru.example/file_parse", "api_key": "mineru-secret-key"}},
+    )
+
+    calls: list[Path] = []
+
+    def fake_parse(pdf_path: Path, config: dict[str, str]) -> dict[str, object]:
+        calls.append(pdf_path)
+        assert config["api_key"] == "mineru-secret-key"
+        return {"data": {"markdown": "# Parsed PDF", "json": {"ok": True}}}
+
+    monkeypatch.setattr(web, "call_mineru_parse_pdf", fake_parse)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/items/parse-pdfs",
+        json={"item_keys": ["ITEM0001"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["pdf_count"] == 1
+    assert payload["parsed_count"] == 1
+    assert payload["failed_count"] == 0
+    assert calls and calls[0].name == "paper.pdf"
+    result_dir = Path(payload["result_dir"])
+    assert result_dir.exists()
+    assert list(result_dir.glob("*.json"))
+    assert list(result_dir.glob("*.md"))[0].read_text(encoding="utf-8") == "# Parsed PDF"
+
+
+def test_mineru_official_api_uses_upload_url_flow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    calls: list[object] = []
+    uploads: list[tuple[str, bytes]] = []
+
+    class FakeResponse:
+        def __init__(self, body: bytes = b"{}") -> None:
+            self.body = body
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self.body
+
+    def fake_urlopen(request_obj: object, timeout: int) -> FakeResponse:
+        calls.append(request_obj)
+        full_url = request_obj.full_url
+        if full_url.endswith("/api/v4/file-urls/batch"):
+            payload = json.loads(request_obj.data.decode("utf-8"))
+            assert payload["files"][0]["name"] == "paper.pdf"
+            return FakeResponse(
+                b'{"code":0,"data":{"batch_id":"batch-1","file_urls":["https://upload.example/paper.pdf"]}}'
+            )
+        if full_url.endswith("/api/v4/extract-results/batch/batch-1"):
+            return FakeResponse(b'{"code":0,"data":{"extract_result":[{"state":"done","md_content":"# Parsed"}]}}')
+        raise AssertionError(full_url)
+
+    def fake_put_presigned_file(upload_url: str, file_bytes: bytes) -> None:
+        uploads.append((upload_url, file_bytes))
+
+    monkeypatch.setattr(web.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(web, "put_presigned_file", fake_put_presigned_file)
+    monkeypatch.setattr(web, "MINERU_PARSE_POLL_INTERVAL_SECONDS", 1)
+
+    result = web.call_mineru_parse_pdf(
+        pdf_path,
+        {"api_key": "mineru-secret-key", "base_url": "https://mineru.net/api/v4/extract/task"},
+    )
+
+    assert result["batch_id"] == "batch-1"
+    assert len(calls) == 2
+    assert uploads == [("https://upload.example/paper.pdf", b"%PDF-1.4\n%%EOF\n")]
+
+
+def test_mineru_parse_result_downloads_zip_outputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    library = {"data_path": str(tmp_path)}
+    archive_buffer = BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w") as archive:
+        archive.writestr("paper.md", "# Parsed From Zip")
+        archive.writestr("images/page-1.png", b"\x89PNG\r\n\x1a\n")
+        archive.writestr("../escape.md", "bad")
+        archive.writestr("ignored.txt", "ignore")
+
+    def fake_download(url: str) -> bytes:
+        assert url == "https://download.example/result.zip"
+        return archive_buffer.getvalue()
+
+    monkeypatch.setattr(web, "mineru_download_bytes", fake_download)
+
+    paths = web.write_mineru_parse_result(
+        library,
+        "ATTACH01",
+        {
+            "result": {
+                "data": {
+                    "extract_result": [
+                        {"state": "done", "full_zip_url": "https://download.example/result.zip"}
+                    ]
+                }
+            }
+        },
+    )
+
+    assert Path(paths["json_path"]).exists()
+    assert Path(paths["output_dir"]).exists()
+    assert Path(paths["markdown_path"]).read_text(encoding="utf-8") == "# Parsed From Zip"
+    assert any(Path(path).name == "page-1.png" for path in paths["image_paths"])
+    assert not (Path(paths["output_dir"]).parent / "escape.md").exists()
+
+
+def test_mineru_file_parse_uses_files_field(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    captured_body = b""
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"data":{"markdown":"# Parsed"}}'
+
+    def fake_urlopen(request_obj: object, timeout: int) -> FakeResponse:
+        nonlocal captured_body
+        assert request_obj.full_url == "https://mineru.example/file_parse"
+        captured_body = request_obj.data
+        return FakeResponse()
+
+    monkeypatch.setattr(web.urllib_request, "urlopen", fake_urlopen)
+
+    result = web.call_mineru_parse_pdf(
+        pdf_path,
+        {"api_key": "mineru-secret-key", "base_url": "https://mineru.example/file_parse"},
+    )
+
+    assert result["data"]["markdown"] == "# Parsed"
+    assert b'name="files"; filename="paper.pdf"' in captured_body
+    assert b'name="file"; filename=' not in captured_body
+
+
+def test_presigned_upload_omits_content_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {"headers": []}
+
+    class FakeUploadResponse:
+        status = 200
+
+        def read(self) -> bytes:
+            return b""
+
+    class FakeConnection:
+        def __init__(self, netloc: str, timeout: int) -> None:
+            captured["netloc"] = netloc
+            captured["timeout"] = timeout
+
+        def putrequest(self, method: str, path: str, skip_accept_encoding: bool = False) -> None:
+            captured["method"] = method
+            captured["path"] = path
+            captured["skip_accept_encoding"] = skip_accept_encoding
+
+        def putheader(self, name: str, value: str) -> None:
+            captured["headers"].append((name, value))
+
+        def endheaders(self, body: bytes) -> None:
+            captured["body"] = body
+
+        def getresponse(self) -> FakeUploadResponse:
+            return FakeUploadResponse()
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(web.http.client, "HTTPSConnection", FakeConnection)
+
+    web.put_presigned_file("https://mineru.oss-cn-shanghai.aliyuncs.com/a.pdf?Signature=abc", b"PDF")
+
+    headers = dict(captured["headers"])
+    assert captured["method"] == "PUT"
+    assert captured["path"] == "/a.pdf?Signature=abc"
+    assert headers["Host"] == "mineru.oss-cn-shanghai.aliyuncs.com"
+    assert headers["Content-Length"] == "3"
+    assert "Content-Type" not in headers
+    assert captured["body"] == b"PDF"
+
+
+def test_parse_selected_pdfs_requires_local_copy(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_read_only_source(zotero_fixture)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/items/parse-pdfs",
+        json={"item_keys": ["ITEM0001"]},
+    )
+
+    assert response.status_code == 400
+    assert "本地副本" in response.get_json()["error"]

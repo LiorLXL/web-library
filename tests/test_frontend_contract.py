@@ -123,6 +123,12 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "GitHub Token" in app_js
     assert "HuggingFace Token" in app_js
     assert "Zenodo Token" in app_js
+    assert "MinerU PDF 解析" in app_js
+    assert "name=\"mineru_api_key\"" in app_js
+    assert "name=\"mineru_base_url\"" in app_js
+    assert "data-mineru-config-form" in app_js
+    assert "data-save-mineru-config" in app_js
+    assert "data-toggle-mineru-config-secret" in app_js
     assert "data-attachment-editor-modal" in library_html
     assert "data-reader-pdf-picker-modal" in library_html
     assert "data-delete-items-modal" in library_html
