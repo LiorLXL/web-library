@@ -110,6 +110,7 @@ MINERU_BASE_URL_ENV = "MINERU_BASE_URL"
 MINERU_DEFAULT_BASE_URL = "https://mineru.net/api/v4/file-urls/batch"
 MINERU_REQUEST_TIMEOUT_SECONDS = 180
 MINERU_PARSE_POLL_INTERVAL_SECONDS = 3
+CODEX_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 RETRIEVAL_BATCH_VALIDATION_MIN_COMPLETED_QUERIES = 3
 AI_CANDIDATE_EVALUATION_BATCH_SIZE = 5
 AI_CANDIDATE_EVALUATION_TIMEOUT_SECONDS = 90
@@ -190,6 +191,22 @@ def api_config_mineru_for_library(library_id: str) -> dict[str, str]:
     }
 
 
+def default_codex_config(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload if isinstance(payload, dict) else {}
+    return {
+        "model": clean_secret(payload.get("model")),
+        "base_url": clean_secret(payload.get("base_url")) or CODEX_DEFAULT_BASE_URL,
+        "api_key": clean_secret(payload.get("api_key")),
+        "reasoning_effort_default": clean_secret(payload.get("reasoning_effort_default")) or "medium",
+    }
+
+
+def api_config_codex_for_library(library_id: str) -> dict[str, Any]:
+    config = api_config_for_library(library_id)
+    codex = config.get("codex") if isinstance(config.get("codex"), dict) else {}
+    return default_codex_config(codex)
+
+
 def effective_code_source_token(library_id: str, key: str, env_name: str) -> str:
     configured = api_config_tokens_for_library(library_id).get(key, "")
     return configured or clean_secret(os.environ.get(env_name))
@@ -216,6 +233,8 @@ def normalized_library_api_config(payload: dict[str, Any], existing: dict[str, A
     existing_model = existing.get("model") if isinstance(existing.get("model"), dict) else {}
     existing_sources = existing.get("code_sources") if isinstance(existing.get("code_sources"), dict) else {}
     existing_mineru = existing.get("mineru") if isinstance(existing.get("mineru"), dict) else {}
+    has_existing_codex = isinstance(existing.get("codex"), dict)
+    existing_codex = default_codex_config(existing.get("codex"))
     has_model_payload = isinstance(payload.get("model"), dict) or any(
         key in payload for key in ("model", "model_name", "base_url", "request_url", "url", "api_key", "key")
     )
@@ -223,9 +242,11 @@ def normalized_library_api_config(payload: dict[str, Any], existing: dict[str, A
         key in payload for key in ("github_token", "github", "huggingface_token", "huggingface", "zenodo_token", "zenodo")
     )
     has_mineru_payload = isinstance(payload.get("mineru"), dict)
+    has_codex_payload = isinstance(payload.get("codex"), dict)
     raw_model = payload.get("model") if isinstance(payload.get("model"), dict) else (payload if has_model_payload else existing_model)
     raw_sources = payload.get("code_sources") if isinstance(payload.get("code_sources"), dict) else (payload if has_source_payload else existing_sources)
     raw_mineru = payload.get("mineru") if isinstance(payload.get("mineru"), dict) else (payload if has_mineru_payload else existing_mineru)
+    raw_codex = payload.get("codex") if has_codex_payload else existing_codex
 
     def next_secret(field: str, current: str = "") -> str:
         value = clean_secret(raw_model.get(field) if field in raw_model else raw_sources.get(field))
@@ -239,10 +260,16 @@ def normalized_library_api_config(payload: dict[str, Any], existing: dict[str, A
             return clean_secret(current)
         return value
 
+    def next_codex_secret(field: str, current: str = "") -> str:
+        value = clean_secret(raw_codex.get(field))
+        if value == API_CONFIG_SECRET_KEEP_VALUE:
+            return clean_secret(current)
+        return value
+
     model_name = clean_secret(raw_model.get("model") or raw_model.get("model_name"))
     base_url = clean_secret(raw_model.get("base_url") or raw_model.get("request_url") or raw_model.get("url"))
     mineru_base_url = clean_secret(raw_mineru.get("base_url") or raw_mineru.get("url"))
-    return {
+    config = {
         "model": {
             "model": model_name,
             "base_url": base_url,
@@ -258,6 +285,16 @@ def normalized_library_api_config(payload: dict[str, Any], existing: dict[str, A
             "api_key": next_mineru_secret("api_key", existing_mineru.get("api_key")),
         },
     }
+    if has_codex_payload or has_existing_codex:
+        config["codex"] = {
+            "model": clean_secret(raw_codex.get("model")) if "model" in raw_codex else existing_codex.get("model", ""),
+            "base_url": clean_secret(raw_codex.get("base_url")) if "base_url" in raw_codex else existing_codex.get("base_url", CODEX_DEFAULT_BASE_URL),
+            "api_key": next_codex_secret("api_key", existing_codex.get("api_key")),
+            "reasoning_effort_default": clean_secret(raw_codex.get("reasoning_effort_default"))
+            if "reasoning_effort_default" in raw_codex
+            else existing_codex.get("reasoning_effort_default", "medium"),
+        }
+    return config
 
 
 def normalized_mineru_api_config(payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -280,6 +317,7 @@ def library_api_config_response(library_id: str, *, include_secrets: bool = Fals
     saved_model = api_config_model_for_library(library_id)
     saved_tokens = api_config_tokens_for_library(library_id)
     saved_mineru = api_config_mineru_for_library(library_id)
+    saved_codex = api_config_codex_for_library(library_id)
     model_name = saved_model.get("model") or clean_secret(os.environ.get(AI_PIXEL_MODEL_ENV)) or AI_PIXEL_DEFAULT_MODEL
     base_url = saved_model.get("base_url") or clean_secret(os.environ.get(AI_PIXEL_BASE_URL_ENV)) or AI_PIXEL_DEFAULT_BASE_URL
     saved_api_key = saved_model.get("api_key", "")
@@ -304,6 +342,7 @@ def library_api_config_response(library_id: str, *, include_secrets: bool = Fals
             "token": saved_value if include_secrets else "",
             "masked": masked_secret(saved_value if saved_value else effective_value),
         }
+    saved_codex_api_key = clean_secret(saved_codex.get("api_key"))
     return {
         "model": {
             "model": model_name,
@@ -317,6 +356,15 @@ def library_api_config_response(library_id: str, *, include_secrets: bool = Fals
             "base_url_source": "preference" if saved_model.get("base_url") else ("environment" if clean_secret(os.environ.get(AI_PIXEL_BASE_URL_ENV)) else "default"),
         },
         "code_sources": code_payload,
+        "codex": {
+            "model": clean_secret(saved_codex.get("model")),
+            "base_url": clean_secret(saved_codex.get("base_url")) or CODEX_DEFAULT_BASE_URL,
+            "reasoning_effort_default": clean_secret(saved_codex.get("reasoning_effort_default")) or "medium",
+            "api_key": saved_codex_api_key if include_secrets else "",
+            "masked_api_key": masked_secret(saved_codex_api_key),
+            "configured": bool(saved_codex_api_key),
+            "source": "preference" if saved_codex_api_key else "none",
+        },
         "mineru": {
             "base_url": mineru_base_url,
             "api_key": saved_mineru_api_key if include_secrets else "",

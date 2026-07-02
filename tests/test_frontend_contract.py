@@ -138,6 +138,21 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "模型名称" in app_js
     assert "请求地址" in app_js
     assert "API Key" in app_js
+    assert "Codex 模型配置" in app_js
+    assert "data-codex-config-form" in app_js
+    assert "data-save-codex-config" in app_js
+    assert "data-toggle-codex-config-secret" in app_js
+    assert "保存 Codex 设置" in app_js
+    assert "Reasoning Effort" in app_js
+    assert "openai-codex" in app_js
+    assert "模型档案" not in app_js
+    assert "新增档案" not in app_js
+    assert "删除当前档案" not in app_js
+    assert "Runtime Kind" not in app_js
+    assert "Selected Agent" not in app_js
+    assert "Reasoning Summary" not in app_js
+    assert "Tool Policy" not in app_js
+    assert "启用流式输出" not in app_js
     assert "GitHub Token" in app_js
     assert "HuggingFace Token" in app_js
     assert "Zenodo Token" in app_js
@@ -147,6 +162,7 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-mineru-config-form" in app_js
     assert "data-save-mineru-config" in app_js
     assert "data-toggle-mineru-config-secret" in app_js
+    assert ".api-config-field-grid" in app_css
     assert "data-attachment-editor-modal" in library_html
     assert "data-reader-pdf-picker-modal" in library_html
     assert "data-delete-items-modal" in library_html

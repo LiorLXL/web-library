@@ -4312,9 +4312,11 @@ button, input, select {
 }
 
 .api-config-form input,
+.api-config-form select,
 .api-source-row input {
   border: 1px solid var(--line);
   border-radius: 10px;
+  background: #fff;
   font: inherit;
   min-height: 42px;
   padding: 0 12px;
@@ -4351,6 +4353,12 @@ button, input, select {
   color: var(--muted);
   font-size: 13px;
   margin: 0;
+}
+
+.api-config-field-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .retrieval-ai-row {
@@ -4778,6 +4786,7 @@ button, input, select {
   .retrieval-source-config-status {
     justify-self: flex-start;
   }
+  .api-config-field-grid,
   .api-source-row {
     grid-template-columns: 1fr;
   }

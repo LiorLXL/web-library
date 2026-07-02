@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "flask>=3.0.0",
+    "openai>=1.0.0",
+    "openai-codex @ git+https://github.com/openai/codex.git@main#subdirectory=sdk/python",
 ]
 
 [dependency-groups]
@@ -15,6 +17,10 @@ dev = [
 
 [tool.uv]
 package = true
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+prerelease = "allow"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

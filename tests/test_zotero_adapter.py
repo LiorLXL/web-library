@@ -872,6 +872,77 @@ def test_api_config_partial_mineru_save_preserves_model_credentials(
     assert config["mineru"]["api_key"] == "mineru-secret-key"
 
 
+def test_api_config_saves_flat_codex_config_and_masks_api_key(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/api-config",
+        json={
+            "codex": {
+                "base_url": "https://api.openai.com/v1",
+                "model": "codex-mini-latest",
+                "reasoning_effort_default": "medium",
+                "api_key": "sk-codex-secret",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    config = response.get_json()["config"]
+    assert config["codex"]["configured"] is True
+    assert config["codex"]["model"] == "codex-mini-latest"
+    assert config["codex"]["api_key"] == ""
+    assert config["codex"]["masked_api_key"]
+
+    secret_response = client.get(f"/api/library/{library['library_id']}/api-config?include_secrets=1")
+    codex = secret_response.get_json()["config"]["codex"]
+    assert codex["base_url"] == "https://api.openai.com/v1"
+    assert codex["reasoning_effort_default"] == "medium"
+    assert codex["api_key"] == "sk-codex-secret"
+
+
+def test_api_config_partial_codex_save_preserves_other_credentials(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    first = client.post(
+        f"/api/library/{library['library_id']}/api-config",
+        json={
+            "model": {"model": "demo-model", "base_url": "https://model.example", "api_key": "model-secret"},
+            "code_sources": {"github_token": "github-secret"},
+            "mineru": {"base_url": "https://mineru.example/file_parse", "api_key": "mineru-secret-key"},
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        f"/api/library/{library['library_id']}/api-config",
+        json={
+            "codex": {
+                "model": "codex-mini-latest",
+                "base_url": "https://api.openai.com/v1",
+                "reasoning_effort_default": "high",
+                "api_key": "sk-codex-secret",
+            }
+        },
+    )
+    assert second.status_code == 200
+
+    secret_response = client.get(f"/api/library/{library['library_id']}/api-config?include_secrets=1")
+    config = secret_response.get_json()["config"]
+    assert config["model"]["api_key"] == "model-secret"
+    assert config["code_sources"]["github"]["token"] == "github-secret"
+    assert config["mineru"]["api_key"] == "mineru-secret-key"
+    assert config["codex"]["api_key"] == "sk-codex-secret"
+
+
 def test_parse_selected_pdfs_uses_mineru_and_writes_results(
     zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

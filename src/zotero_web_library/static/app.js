@@ -71,8 +71,10 @@ const state = {
   apiConfigMessage: "",
   apiConfigShowSecrets: false,
   apiConfigShowMineruSecret: false,
+  apiConfigShowCodexSecrets: false,
   apiConfigCheckResults: {},
   apiConfigChecking: "",
+  apiConfigCodexMessage: "",
   items: [],
   collections: [],
   tagShortcuts: [],
@@ -294,12 +296,59 @@ function apiConfigMineruKeyValue() {
   return state.apiConfigShowMineruSecret ? String(entry.api_key || "") : "";
 }
 
+function apiConfigShouldIncludeSecrets() {
+  return state.apiConfigShowSecrets || state.apiConfigShowMineruSecret || state.apiConfigShowCodexSecrets;
+}
+
 function apiConfigSecretPayload(formData, field, configured, source) {
   const value = String(formData.get(field) || "").trim();
   if (!state.apiConfigShowSecrets && !value && configured && source === "preference") {
     return API_CONFIG_SECRET_KEEP_VALUE;
   }
   return value;
+}
+
+function defaultCodexConfig(codex = {}) {
+  return {
+    model: String(codex.model || ""),
+    base_url: String(codex.base_url || "https://api.openai.com/v1"),
+    api_key: String(codex.api_key || ""),
+    masked_api_key: String(codex.masked_api_key || ""),
+    reasoning_effort_default: String(codex.reasoning_effort_default || "medium"),
+    configured: Boolean(codex.configured),
+    source: String(codex.source || (codex.configured ? "preference" : "none")),
+  };
+}
+
+function ensureCodexConfigState() {
+  if (!state.apiConfig) state.apiConfig = {};
+  const codex = defaultCodexConfig(state.apiConfig.codex || {});
+  state.apiConfig.codex = codex;
+  return codex;
+}
+
+function syncCodexDraftFromForm(form = document.querySelector("[data-codex-config-form]")) {
+  if (!form) return;
+  const codex = ensureCodexConfigState();
+  const formData = new FormData(form);
+  codex.model = String(formData.get("codex_model") || "").trim();
+  codex.base_url = String(formData.get("codex_base_url") || "").trim() || "https://api.openai.com/v1";
+  codex.reasoning_effort_default = String(formData.get("codex_reasoning_effort_default") || "").trim() || "medium";
+  const apiKey = String(formData.get("codex_api_key") || "").trim();
+  if (state.apiConfigShowCodexSecrets || apiKey) codex.api_key = apiKey;
+  state.apiConfig.codex = codex;
+}
+
+function serializeCodexConfigPayload() {
+  syncCodexDraftFromForm();
+  const codex = ensureCodexConfigState();
+  const apiKey = String(codex.api_key || "").trim();
+  return {
+    model: codex.model,
+    base_url: codex.base_url,
+    reasoning_effort_default: codex.reasoning_effort_default,
+    api_key: apiKey || (codex.configured && codex.source === "preference" ? API_CONFIG_SECRET_KEEP_VALUE : ""),
+  };
 }
 
 function renderApiConfigCheck(service) {
@@ -322,6 +371,11 @@ function renderApiConfigPage() {
   const huggingface = config.code_sources?.huggingface || {};
   const zenodo = config.code_sources?.zenodo || {};
   const mineru = config.mineru || {};
+  const codex = ensureCodexConfigState();
+  const codexApiKeyValue = state.apiConfigShowCodexSecrets ? String(codex.api_key || "") : "";
+  const codexApiKeyPlaceholder = codex.configured
+    ? `${apiConfigSourceText(codex.source)}已配置 ${codex.masked_api_key || ""}`.trim()
+    : "未配置";
   const apiKeyValue = state.apiConfigShowSecrets ? String(model.api_key || "") : "";
   const apiKeyPlaceholder = model.configured
     ? `${apiConfigSourceText(model.source)}已配置 ${model.masked_api_key || ""}`.trim()
@@ -397,6 +451,45 @@ function renderApiConfigPage() {
           <button type="button" class="form-action-btn" data-save-mineru-config ${state.apiConfigBusy ? "disabled" : ""}>${state.apiConfigBusy ? "保存中..." : "保存 MinerU 配置"}</button>
           <button type="button" class="ghost-btn" data-toggle-mineru-config-secret>${state.apiConfigShowMineruSecret ? "隐藏 key" : "显示 key"}</button>
         </div>
+      </form>
+    </section>
+
+    <section class="api-config-card">
+      <div class="api-config-head">
+        <div>
+          <h2>Codex 模型配置</h2>
+          <p>用于后续接入 Codex 检索工作流。配置和 MinerU、模型 API 一样，统一保存在当前文库的 <code>api_config</code> 里。</p>
+        </div>
+        <span class="api-status ${codex.configured ? "ok" : "failed"}">${codex.configured ? "已配置" : "未配置"}</span>
+      </div>
+      <form class="api-config-form" data-codex-config-form>
+        <div class="api-config-field-grid">
+          <label>
+            <span>模型名</span>
+            <input name="codex_model" value="${escapeHtml(codex.model || "")}" placeholder="codex-mini-latest">
+          </label>
+          <label>
+            <span>API 请求地址</span>
+            <input name="codex_base_url" value="${escapeHtml(codex.base_url || "")}" placeholder="https://api.openai.com/v1">
+          </label>
+          <label>
+            <span>API Key</span>
+            <input name="codex_api_key" type="${state.apiConfigShowCodexSecrets ? "text" : "password"}" value="${escapeHtml(codexApiKeyValue)}" placeholder="${escapeHtml(codexApiKeyPlaceholder)}">
+            <em>来源：${escapeHtml(apiConfigSourceText(codex.source))}</em>
+          </label>
+          <label>
+            <span>Reasoning Effort</span>
+            <select name="codex_reasoning_effort_default">
+              ${["low", "medium", "high"].map((value) => `<option value="${value}" ${codex.reasoning_effort_default === value ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <div class="api-config-actions">
+          <button type="button" class="form-action-btn" data-save-codex-config ${state.apiConfigBusy ? "disabled" : ""}>${state.apiConfigBusy ? "保存中..." : "保存 Codex 设置"}</button>
+          <button type="button" class="ghost-btn" data-toggle-codex-config-secret>${state.apiConfigShowCodexSecrets ? "隐藏 key" : "显示 key"}</button>
+        </div>
+        <p class="api-config-message">当前只保留 Codex 基础模型配置，真实智能体工作流后续再接入。</p>
+        ${state.apiConfigCodexMessage ? `<p class="api-config-message">${escapeHtml(state.apiConfigCodexMessage)}</p>` : ""}
       </form>
     </section>
 
@@ -485,6 +578,27 @@ async function saveMineruConfig(event) {
     state.apiConfigMessage = "MinerU 配置已保存。";
   } catch (error) {
     state.apiConfigMessage = error.message;
+  } finally {
+    state.apiConfigBusy = false;
+    renderApiConfigPage();
+  }
+}
+
+async function saveCodexConfig(event) {
+  event.preventDefault();
+  try {
+    state.apiConfigBusy = true;
+    state.apiConfigCodexMessage = "";
+    syncCodexDraftFromForm(event.currentTarget);
+    renderApiConfigPage();
+    const data = await postJSON(`/api/library/${state.libraryId}/api-config`, {
+      codex: serializeCodexConfigPayload(),
+    });
+    state.apiConfig = data.config || {};
+    state.apiConfigShowCodexSecrets = false;
+    state.apiConfigCodexMessage = "Codex 智能体设置已保存。";
+  } catch (error) {
+    state.apiConfigCodexMessage = error.message;
   } finally {
     state.apiConfigBusy = false;
     renderApiConfigPage();
@@ -7726,6 +7840,13 @@ function setupApiConfigPage() {
   host?.addEventListener("submit", (event) => {
     if (event.target.matches("[data-api-config-form]")) saveApiConfig(event);
     else if (event.target.matches("[data-mineru-config-form]")) saveMineruConfig(event);
+    else if (event.target.matches("[data-codex-config-form]")) saveCodexConfig(event);
+  });
+  host?.addEventListener("input", (event) => {
+    if (event.target.closest("[data-codex-config-form]")) syncCodexDraftFromForm();
+  });
+  host?.addEventListener("change", (event) => {
+    if (event.target.closest("[data-codex-config-form]")) syncCodexDraftFromForm();
   });
   host?.addEventListener("click", (event) => {
     const button = event.target.closest("button");
@@ -7736,13 +7857,18 @@ function setupApiConfigPage() {
     } else if (button.matches("[data-save-mineru-config]")) {
       const form = button.closest("[data-mineru-config-form]");
       if (form) saveMineruConfig({ preventDefault: () => {}, currentTarget: form });
+    } else if (button.matches("[data-save-codex-config]")) {
+      const form = button.closest("[data-codex-config-form]");
+      if (form) saveCodexConfig({ preventDefault: () => {}, currentTarget: form });
     } else if (button.matches("[data-toggle-api-config-secrets]")) {
       state.apiConfigShowSecrets = !state.apiConfigShowSecrets;
-      loadApiConfig({ includeSecrets: state.apiConfigShowSecrets });
+      loadApiConfig({ includeSecrets: apiConfigShouldIncludeSecrets() });
     } else if (button.matches("[data-toggle-mineru-config-secret]")) {
       state.apiConfigShowMineruSecret = !state.apiConfigShowMineruSecret;
-      if (state.apiConfigShowMineruSecret) loadApiConfig({ includeSecrets: true });
-      else renderApiConfigPage();
+      loadApiConfig({ includeSecrets: apiConfigShouldIncludeSecrets() });
+    } else if (button.matches("[data-toggle-codex-config-secret]")) {
+      state.apiConfigShowCodexSecrets = !state.apiConfigShowCodexSecrets;
+      loadApiConfig({ includeSecrets: apiConfigShouldIncludeSecrets() });
     } else if (button.matches("[data-check-api-config]")) {
       checkApiConfig(button.dataset.checkApiConfig);
     }
