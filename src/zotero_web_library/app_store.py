@@ -141,6 +141,30 @@ CREATE TABLE IF NOT EXISTS retrieval_batch_items (
   started_at TEXT NOT NULL DEFAULT '',
   finished_at TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS retrieval_guided_jobs (
+  job_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  topic TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  time_range_json TEXT NOT NULL DEFAULT '{}',
+  material_types_json TEXT NOT NULL DEFAULT '[]',
+  sources_json TEXT NOT NULL DEFAULT '[]',
+  options_json TEXT NOT NULL DEFAULT '{}',
+  plan_json TEXT NOT NULL DEFAULT '{}',
+  coverage_json TEXT NOT NULL DEFAULT '{}',
+  source_stats_json TEXT NOT NULL DEFAULT '{}',
+  run_ids_json TEXT NOT NULL DEFAULT '[]',
+  progress_json TEXT NOT NULL DEFAULT '{}',
+  use_ai_planning INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  operator TEXT NOT NULL DEFAULT 'cjh',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  finished_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -258,6 +282,7 @@ def delete_library_record(library_id: str) -> None:
         conn.execute("DELETE FROM retrieval_batch_context WHERE library_id = ?", (library_id,))
         conn.execute("DELETE FROM retrieval_batch_jobs WHERE library_id = ?", (library_id,))
         conn.execute("DELETE FROM retrieval_batch_items WHERE library_id = ?", (library_id,))
+        conn.execute("DELETE FROM retrieval_guided_jobs WHERE library_id = ?", (library_id,))
         conn.commit()
 
 
@@ -729,6 +754,215 @@ def _decode_json_field(value: Any, fallback: Any) -> Any:
         return json.loads(str(value or ""))
     except json.JSONDecodeError:
         return fallback
+
+
+def _guided_job_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    json_defaults = {
+        "time_range_json": {},
+        "material_types_json": [],
+        "sources_json": [],
+        "options_json": {},
+        "plan_json": {},
+        "coverage_json": {},
+        "source_stats_json": {},
+        "run_ids_json": [],
+        "progress_json": {},
+    }
+    for key, fallback in json_defaults.items():
+        item[key.replace("_json", "")] = _decode_json_field(item.pop(key, ""), fallback)
+    item["use_ai_planning"] = bool(item.get("use_ai_planning"))
+    progress = item.get("progress") if isinstance(item.get("progress"), dict) else {}
+    total = int(progress.get("total_queries") or 0)
+    completed = int(progress.get("completed_queries") or 0)
+    item["candidate_count"] = int(progress.get("candidate_count") or 0)
+    item["progress_ratio"] = round(completed / total, 3) if total else 0
+    return item
+
+
+def create_retrieval_guided_job(
+    library_id: str,
+    *,
+    topic: str,
+    mode: str,
+    time_range: dict[str, Any],
+    material_types: list[str],
+    sources: list[str],
+    options: dict[str, Any],
+    use_ai_planning: bool,
+    operator: str = "cjh",
+) -> dict[str, Any]:
+    ensure_app_store()
+    clean_topic = str(topic or "").strip()
+    if not clean_topic:
+        raise ValueError("guided search topic cannot be empty")
+    clean_mode = str(mode or "fast").strip().lower()
+    timestamp = now_iso()
+    job_id = f"guided-{new_key(12).lower()}"
+    progress = {"stage": "queued", "total_queries": 0, "completed_queries": 0, "failed_queries": 0, "candidate_count": 0}
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO retrieval_guided_jobs
+              (job_id, library_id, status, topic, mode, time_range_json, material_types_json, sources_json,
+               options_json, plan_json, coverage_json, source_stats_json, run_ids_json, progress_json,
+               use_ai_planning, error, operator, created_at, updated_at)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, '{}', '{}', '{}', '[]', ?, ?, '', ?, ?, ?)
+            """,
+            (
+                job_id,
+                library_id,
+                clean_topic,
+                clean_mode,
+                json.dumps(time_range or {}, ensure_ascii=False),
+                json.dumps(material_types or [], ensure_ascii=False),
+                json.dumps(sources or [], ensure_ascii=False),
+                json.dumps(options or {}, ensure_ascii=False),
+                json.dumps(progress, ensure_ascii=False),
+                1 if use_ai_planning else 0,
+                operator,
+                timestamp,
+                timestamp,
+            ),
+        )
+        conn.commit()
+    return retrieval_guided_job(library_id, job_id)
+
+
+def retrieval_guided_job(library_id: str, job_id: str) -> dict[str, Any]:
+    ensure_app_store()
+    clean_job_id = str(job_id or "").strip()
+    if not clean_job_id:
+        raise ValueError("guided search job does not exist")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM retrieval_guided_jobs WHERE library_id = ? AND job_id = ?",
+            (library_id, clean_job_id),
+        ).fetchone()
+    if not row:
+        raise ValueError("guided search job does not exist")
+    return _guided_job_from_row(row)
+
+
+def recent_retrieval_guided_jobs(library_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    ensure_app_store()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM retrieval_guided_jobs
+            WHERE library_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (library_id, max(1, min(int(limit or 20), 100))),
+        ).fetchall()
+    return [_guided_job_from_row(row) for row in rows]
+
+
+def latest_retrieval_guided_job(library_id: str) -> dict[str, Any] | None:
+    jobs = recent_retrieval_guided_jobs(library_id, limit=1)
+    return jobs[0] if jobs else None
+
+
+def update_retrieval_guided_job(
+    library_id: str,
+    job_id: str,
+    *,
+    status: str | None = None,
+    plan: dict[str, Any] | None = None,
+    coverage: dict[str, Any] | None = None,
+    source_stats: dict[str, Any] | None = None,
+    run_ids: list[str] | None = None,
+    progress: dict[str, Any] | None = None,
+    error: str | None = None,
+    started: bool = False,
+    finished: bool = False,
+) -> dict[str, Any]:
+    ensure_app_store()
+    retrieval_guided_job(library_id, job_id)
+    timestamp = now_iso()
+    assignments = ["updated_at = ?"]
+    values: list[Any] = [timestamp]
+    if status is not None:
+        assignments.append("status = ?")
+        values.append(str(status))
+    if plan is not None:
+        assignments.append("plan_json = ?")
+        values.append(json.dumps(plan, ensure_ascii=False))
+    if coverage is not None:
+        assignments.append("coverage_json = ?")
+        values.append(json.dumps(coverage, ensure_ascii=False))
+    if source_stats is not None:
+        assignments.append("source_stats_json = ?")
+        values.append(json.dumps(source_stats, ensure_ascii=False))
+    if run_ids is not None:
+        assignments.append("run_ids_json = ?")
+        values.append(json.dumps(run_ids, ensure_ascii=False))
+    if progress is not None:
+        assignments.append("progress_json = ?")
+        values.append(json.dumps(progress, ensure_ascii=False))
+    if error is not None:
+        assignments.append("error = ?")
+        values.append(str(error or ""))
+    if started:
+        assignments.append("started_at = CASE WHEN started_at = '' THEN ? ELSE started_at END")
+        values.append(timestamp)
+    if finished:
+        assignments.append("finished_at = ?")
+        values.append(timestamp)
+    values.extend([library_id, job_id])
+    with connect() as conn:
+        conn.execute(
+            f"""
+            UPDATE retrieval_guided_jobs
+            SET {", ".join(assignments)}
+            WHERE library_id = ? AND job_id = ?
+            """,
+            values,
+        )
+        conn.commit()
+    return retrieval_guided_job(library_id, job_id)
+
+
+def cancel_retrieval_guided_job(library_id: str, job_id: str, reason: str = "Guided search canceled.") -> dict[str, Any]:
+    job = retrieval_guided_job(library_id, job_id)
+    if job.get("status") not in {"queued", "running", "pausing"}:
+        return job
+    return update_retrieval_guided_job(
+        library_id,
+        job_id,
+        status="canceled",
+        error=reason,
+        progress={**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "canceled"},
+        finished=True,
+    )
+
+
+def pause_retrieval_guided_job(library_id: str, job_id: str, reason: str = "Guided search paused.") -> dict[str, Any]:
+    job = retrieval_guided_job(library_id, job_id)
+    if job.get("status") not in {"queued", "running"}:
+        raise ValueError("guided search job cannot be paused")
+    return update_retrieval_guided_job(
+        library_id,
+        job_id,
+        status="paused",
+        error=reason,
+        progress={**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "paused"},
+    )
+
+
+def resume_retrieval_guided_job(library_id: str, job_id: str) -> dict[str, Any]:
+    job = retrieval_guided_job(library_id, job_id)
+    if job.get("status") != "paused":
+        raise ValueError("guided search job is not paused")
+    return update_retrieval_guided_job(
+        library_id,
+        job_id,
+        status="queued",
+        error="",
+        progress={**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "queued"},
+    )
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:

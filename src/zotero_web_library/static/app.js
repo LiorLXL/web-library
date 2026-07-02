@@ -102,6 +102,13 @@ const state = {
   retrievalSelectedKeys: new Set(),
   retrievalStats: null,
   retrievalSearchJobId: "",
+  retrievalGuidedJobId: "",
+  retrievalGuidedJob: null,
+  retrievalGuidedMode: "quality",
+  retrievalGuidedTimePreset: "10y",
+  retrievalGuidedMaterialTypes: new Set(["paper", "code", "data"]),
+  retrievalGuidedCoverage: null,
+  retrievalGuidedBusy: false,
   retrievalAiEvaluationSummary: null,
   retrievalAiEvaluationBusy: false,
   retrievalAiEvaluationStopRequested: false,
@@ -219,6 +226,7 @@ const state = {
 
 let retrievalBatchRefreshTimer = null;
 let retrievalSearchPollTimer = null;
+let retrievalGuidedPollTimer = null;
 let retrievalAiEvaluationAbortController = null;
 let retrievalAiScoringPollTimer = null;
 let retrievalQueryPlanPollTimer = null;
@@ -2660,6 +2668,102 @@ function renderSimpleAiQueryPlan() {
   </section>`;
 }
 
+function guidedModeLabel(mode) {
+  return {
+    fast: "快速",
+    quality: "高质量",
+    coverage: "全覆盖",
+  }[String(mode || "")] || "高质量";
+}
+
+function guidedTimeLabel(preset) {
+  return {
+    "3y": "近 3 年",
+    "5y": "近 5 年",
+    "10y": "近 10 年",
+    all: "不限",
+  }[String(preset || "")] || "近 10 年";
+}
+
+function guidedMaterialLabel(value) {
+  return {
+    paper: "论文",
+    code: "代码",
+    data: "数据",
+  }[String(value || "")] || value;
+}
+
+function renderGuidedSearchControls(aiConfigured) {
+  const activeMode = state.retrievalGuidedMode || "quality";
+  const timePreset = state.retrievalGuidedTimePreset || (activeMode === "fast" ? "5y" : activeMode === "coverage" ? "all" : "10y");
+  const materials = state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : new Set(["paper", "code", "data"]);
+  const modeButtons = [
+    ["fast", "快速"],
+    ["quality", "高质量"],
+    ["coverage", "全覆盖"],
+  ].map(([mode, label]) => `<button type="button" class="${activeMode === mode ? "active" : ""}" data-guided-search-mode="${mode}">${label}</button>`).join("");
+  const materialChecks = ["paper", "code", "data"].map((name) => `
+    <label class="guided-material-option">
+      <input type="checkbox" name="material_types" value="${name}" data-guided-material-type ${materials.has(name) ? "checked" : ""}>
+      <span>${guidedMaterialLabel(name)}</span>
+    </label>`).join("");
+  return `
+    <div class="guided-search-controls">
+      <div class="guided-control-row">
+        <div class="guided-segment" aria-label="检索模式">${modeButtons}</div>
+        <label class="guided-select">
+          <span>时间</span>
+          <select name="time_preset" data-guided-time-preset>
+            ${["3y", "5y", "10y", "all"].map((value) => `<option value="${value}" ${timePreset === value ? "selected" : ""}>${guidedTimeLabel(value)}</option>`).join("")}
+          </select>
+        </label>
+      </div>
+      <div class="guided-control-row compact">
+        <div class="guided-materials">${materialChecks}</div>
+        <span class="simple-composer-status">${escapeHtml(aiConfigured ? "AI 可辅助规划" : "未配置模型，使用规则规划")}</span>
+      </div>
+    </div>`;
+}
+
+function renderGuidedSearchStatus() {
+  const job = state.retrievalGuidedJob;
+  const coverage = state.retrievalGuidedCoverage || job?.coverage || null;
+  if (!job && !coverage) return "";
+  const progress = job?.progress || {};
+  const status = String(job?.status || "");
+  const total = Number(progress.total_queries || 0);
+  const completed = Number(progress.completed_queries || 0);
+  const failed = Number(progress.failed_queries || 0);
+  const ratio = total ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 0;
+  const active = retrievalBackgroundJobIsActive(job);
+  const missing = Array.isArray(coverage?.missing) ? coverage.missing : [];
+  const missingHtml = missing.slice(0, 5).map((item) => `<span>${escapeHtml(item.reason || item.area || "")}</span>`).join("");
+  const materials = coverage?.material_counts || {};
+  return `
+    <section class="guided-status-panel">
+      <div class="guided-status-head">
+        <div>
+          <strong>${escapeHtml(job ? `${guidedModeLabel(job.mode)}检索` : "覆盖报告")}</strong>
+          <span>${escapeHtml(progress.current_query || coverage?.message || "任务进度和覆盖情况")}</span>
+        </div>
+        <div class="simple-result-tools">
+          ${active ? `<button type="button" class="mini-icon retrieval-report-btn" data-pause-guided-search>暂停</button>` : ""}
+          ${status === "paused" ? `<button type="button" class="mini-icon retrieval-report-btn" data-resume-guided-search>继续</button>` : ""}
+          ${active || status === "paused" ? `<button type="button" class="mini-icon retrieval-report-btn danger" data-cancel-guided-search>停止</button>` : ""}
+        </div>
+      </div>
+      ${total ? `<div class="guided-progress"><span style="width:${ratio}%"></span></div>` : ""}
+      <div class="guided-coverage-grid">
+        <span>Query ${completed}/${total || 0}${failed ? `，失败 ${failed}` : ""}</span>
+        <span>候选 ${Number(progress.candidate_count || state.retrievalCandidates.length || 0)}</span>
+        <span>论文 ${Number(materials.paper || 0)}</span>
+        <span>代码 ${Number(materials.code || 0)}</span>
+        <span>数据 ${Number(materials.data || 0)}</span>
+      </div>
+      ${missingHtml ? `<div class="guided-missing">${missingHtml}</div>` : ""}
+    </section>`;
+}
+
 function renderSimpleRetrievalMain() {
   const selectedCount = selectedRetrievalCandidates().length;
   const candidateCount = state.retrievalCandidates.length;
@@ -2673,31 +2777,34 @@ function renderSimpleRetrievalMain() {
     ? `已选 ${selectedSourceNames.length} 个源${selectedSourcePreview ? `：${selectedSourcePreview}${selectedSourceNames.length > 4 ? " ..." : ""}` : ""}`
     : "未选择数据源";
   const aiConfigured = state.retrievalModelStatus?.configured === true;
-  const aiPlanButtonText = state.retrievalQueryPlanBusy ? "拆解中..." : "AI 深度检索";
   const hasAiScoring = ["ai_model", "mixed_ai_rules"].includes(aiSummarySource);
   const aiScoreButtonText = state.retrievalAiEvaluationBusy
     ? "AI 排序中..."
     : hasAiScoring ? "重新 AI 排序" : "AI 推荐排序";
+  const guidedActive = retrievalBackgroundJobIsActive(state.retrievalGuidedJob);
   return `
     <section class="simple-retrieval-workbench">
       <form class="add-item-form simple-search-form simple-search-composer retrieval-search-form" data-retrieval-search-form>
         <section class="simple-retrieval-guide" aria-label="三步使用流程" hidden></section>
         <div class="simple-composer-head">
           <div>
-            <strong>检索</strong>
+            <strong>引导式检索</strong>
           </div>
-          <span class="simple-composer-status">${escapeHtml(aiConfigured ? "AI 已配置" : "模型未配置")}</span>
+          <span class="simple-composer-status">${escapeHtml(guidedModeLabel(state.retrievalGuidedMode))}</span>
         </div>
         <label class="simple-query-box simple-composer-query">
           <span>主题 / 关键词</span>
           <input name="query" data-retrieval-query-input value="${escapeHtml(state.retrievalQuery)}" placeholder="例如 speculative decoding LLM inference acceleration">
         </label>
+        ${renderGuidedSearchControls(aiConfigured)}
         <div class="simple-composer-actions">
-          <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "检索中..." : "快速检索"}</button>
-          <button type="button" class="form-action-btn secondary-action" data-simple-ai-query-plan ${state.retrievalQueryPlanBusy ? "disabled" : ""}>${aiPlanButtonText}</button>
+          <button type="submit" class="form-action-btn" ${guidedActive || state.addItemBusy ? "disabled" : ""}>${guidedActive ? "检索中..." : "开始检索"}</button>
           <span>${escapeHtml(selectedSourceSummary)}</span>
         </div>
-        ${renderSimpleAiQueryPlan()}
+        <details class="simple-plan-settings">
+          <summary>高级：查看拆解计划</summary>
+          ${renderSimpleAiQueryPlan()}
+        </details>
         <details class="simple-source-drawer">
           <summary>
             <strong>数据源</strong>
@@ -2720,7 +2827,7 @@ function renderSimpleRetrievalMain() {
         <div class="simple-results-head">
           <div>
           <strong>候选结果</strong>
-          <span>勾选后点击导入所选。</span>
+          <span>检索过程中会陆续出现候选。</span>
           </div>
           ${candidateCount ? `<div class="simple-result-tools">
             <button type="button" class="mini-icon retrieval-report-btn" data-score-retrieval-candidates-ai ${state.retrievalAiEvaluationBusy || !aiConfigured ? "disabled" : ""}>${aiScoreButtonText}</button>
@@ -2730,6 +2837,7 @@ function renderSimpleRetrievalMain() {
             <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="none">清空选择</button>
           </div>` : ""}
         </div>
+        ${renderGuidedSearchStatus()}
         ${renderRetrievalStats()}
         ${renderRetrievalAiSummary()}
         ${candidateHtml || `<div class="simple-result-placeholder">直接检索或计划检索完成后，这里会显示候选条目和推荐判断。</div>`}
@@ -3122,6 +3230,8 @@ function bindRetrievalPageEvents(host) {
         state.simplePlanBatchJobId = "";
         state.simplePlanBatchLoadedJobId = "";
       }
+    } else if (event.target.matches("[data-guided-time-preset]")) {
+      state.retrievalGuidedTimePreset = String(event.target.value || "10y");
     } else if (event.target.matches("[data-simple-batch-limit]")) {
       state.retrievalSimpleBatchLimit = currentSimpleBatchLimitFromInput(event.target.value);
     } else if (event.target.matches("[data-simple-source-limit]")) {
@@ -3150,6 +3260,13 @@ function bindRetrievalPageEvents(host) {
     if (event.target.matches("[data-retrieval-query-plan-ai]")) {
       state.retrievalQueryPlanUseAi = Boolean(event.target.checked);
       state.retrievalQueryPlan = null;
+      renderRetrievalPage();
+    } else if (event.target.matches("[data-guided-material-type]")) {
+      const value = String(event.target.value || "").trim();
+      const next = new Set(state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : ["paper", "code", "data"]);
+      if (event.target.checked) next.add(value);
+      else next.delete(value);
+      state.retrievalGuidedMaterialTypes = next.size ? next : new Set(["paper", "code", "data"]);
       renderRetrievalPage();
     } else if (event.target.matches("[data-retrieval-source-intake-sample-url]")) {
       state.retrievalSourceIntakeSampleUrl = Boolean(event.target.checked);
@@ -3197,8 +3314,17 @@ function bindRetrievalPageEvents(host) {
       draftRetrievalBatchQueries({ limit: 5 });
     }
     else if (button.matches("[data-simple-plan-batch]")) submitSimpleRetrievalPlanBatch();
+    else if (button.matches("[data-guided-search-mode]")) {
+      const mode = String(button.dataset.guidedSearchMode || "quality");
+      state.retrievalGuidedMode = ["fast", "quality", "coverage"].includes(mode) ? mode : "quality";
+      state.retrievalGuidedTimePreset = state.retrievalGuidedMode === "fast" ? "5y" : state.retrievalGuidedMode === "coverage" ? "all" : "10y";
+      renderRetrievalPage();
+    }
     else if (button.matches("[data-score-retrieval-candidates-ai]")) scoreRetrievalCandidatesWithAi();
     else if (button.matches("[data-stop-retrieval-ai-scoring]")) stopRetrievalAiScoring();
+    else if (button.matches("[data-pause-guided-search]")) pauseGuidedSearch();
+    else if (button.matches("[data-resume-guided-search]")) resumeGuidedSearch();
+    else if (button.matches("[data-cancel-guided-search]")) cancelGuidedSearch();
     else if (button.matches("[data-simple-batch-mode]")) {
       state.retrievalBatchMode = button.dataset.simpleBatchMode === "full" ? "full" : "quick";
       state.retrievalSimpleSourceLimits = {};
@@ -3365,9 +3491,13 @@ async function submitRetrievalSearch(event) {
   }
   try {
     state.addItemBusy = true;
-    state.addItemMessage = "快速检索已提交后台，切换页面也会继续运行。";
+    state.retrievalGuidedBusy = true;
+    state.addItemMessage = "引导式检索已提交后台，切换页面也会继续运行。";
     state.addItemResults = [];
     state.retrievalSearchJobId = "";
+    state.retrievalGuidedJobId = "";
+    state.retrievalGuidedJob = null;
+    state.retrievalGuidedCoverage = null;
     state.retrievalAiScoringJobId = "";
     state.retrievalAiEvaluationBusy = false;
     state.retrievalAiEvaluationStopRequested = false;
@@ -3387,10 +3517,22 @@ async function submitRetrievalSearch(event) {
       clearTimeout(retrievalSearchPollTimer);
       retrievalSearchPollTimer = null;
     }
+    if (retrievalGuidedPollTimer) {
+      clearTimeout(retrievalGuidedPollTimer);
+      retrievalGuidedPollTimer = null;
+    }
     renderAddItemModal();
-    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/search/jobs`, { query, sources, limit: 10, use_ai_evaluation: false });
-    applyRetrievalSearchJob(result.job || null);
-    scheduleRetrievalSearchPoll(state.retrievalSearchJobId);
+    const materialTypes = [...(state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : new Set(["paper", "code", "data"]))];
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-jobs`, {
+      topic: query,
+      mode: state.retrievalGuidedMode || "quality",
+      time_range: { preset: state.retrievalGuidedTimePreset || "10y" },
+      material_types: materialTypes,
+      sources,
+      use_ai_planning: true,
+    });
+    applyRetrievalGuidedJob(result.job || null);
+    scheduleRetrievalGuidedPoll(state.retrievalGuidedJobId);
     renderAddItemModal();
   } catch (error) {
     state.addItemMessage = error.message;
@@ -3400,7 +3542,10 @@ async function submitRetrievalSearch(event) {
     state.retrievalAiEvaluationSummary = null;
     state.retrievalRunId = "";
   } finally {
-    if (!state.retrievalSearchJobId) state.addItemBusy = false;
+    if (!state.retrievalGuidedJobId) {
+      state.addItemBusy = false;
+      state.retrievalGuidedBusy = false;
+    }
     renderAddItemModal();
   }
 }
@@ -3496,6 +3641,171 @@ async function loadLatestRetrievalSearchJob(options = {}) {
     if (applied && retrievalBackgroundJobIsActive(job)) scheduleRetrievalSearchPoll(job.job_id);
   } catch (error) {
     if (!options.silent) state.addItemMessage = error.message;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalGuidedJob(job) {
+  if (!job) return false;
+  const jobTopic = String(job.topic || "");
+  if (jobTopic && state.retrievalQuery && jobTopic !== state.retrievalQuery && state.retrievalCandidates.length) return false;
+  state.retrievalGuidedJob = job;
+  state.retrievalGuidedJobId = String(job.job_id || state.retrievalGuidedJobId || "");
+  state.retrievalGuidedMode = String(job.mode || state.retrievalGuidedMode || "quality");
+  if (job.time_range?.preset) state.retrievalGuidedTimePreset = String(job.time_range.preset);
+  if (Array.isArray(job.material_types) && job.material_types.length) state.retrievalGuidedMaterialTypes = new Set(job.material_types);
+  state.retrievalGuidedCoverage = job.coverage || state.retrievalGuidedCoverage || null;
+  state.retrievalGuidedBusy = retrievalBackgroundJobIsActive(job);
+  state.addItemBusy = state.retrievalGuidedBusy;
+  const progress = job.progress || {};
+  const status = String(job.status || "");
+  const completed = Number(progress.completed_queries || 0);
+  const total = Number(progress.total_queries || 0);
+  const candidates = Number(progress.candidate_count || state.retrievalCandidates.length || 0);
+  if (status === "queued") {
+    state.addItemMessage = "引导式检索已进入后台队列。";
+  } else if (status === "running") {
+    state.addItemMessage = `引导式检索中：Query ${completed}/${total || "?"}，已发现 ${candidates} 条候选。`;
+  } else if (status === "paused") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = `引导式检索已暂停：Query ${completed}/${total || "?"}。`;
+  } else if (status === "canceled") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = "引导式检索已停止。";
+  } else if (status === "failed") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = `引导式检索失败：${job.error || "后台任务异常"}`;
+  } else if (status === "partial") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = `引导式检索部分完成：已发现 ${candidates} 条候选，部分 query 失败。`;
+  } else if (status === "completed") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = `引导式检索完成：已发现 ${candidates} 条候选。`;
+  }
+  return true;
+}
+
+async function loadRetrievalGuidedCandidates(jobId, options = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!state.libraryId || !cleanJobId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(cleanJobId)}/candidates?limit=300&use_ai_evaluation=0`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载引导式检索候选失败。");
+    state.retrievalCandidates = normalizeRetrievalCandidates(data.candidates || []);
+    const candidateKeys = new Set(state.retrievalCandidates.map((candidate) => candidate.client_key).filter(Boolean));
+    state.retrievalSelectedKeys = new Set([...state.retrievalSelectedKeys].filter((key) => candidateKeys.has(key)));
+    state.retrievalStats = data.source_stats || {};
+    state.retrievalGuidedCoverage = data.coverage || null;
+    state.retrievalAiEvaluationSummary = data.ai_evaluation_summary || state.retrievalAiEvaluationSummary;
+    state.retrievalRunId = "";
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+  }
+}
+
+async function loadRetrievalGuidedJob(jobId, options = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!state.libraryId || !cleanJobId) return;
+  if (!state.retrievalGuidedJobId || cleanJobId !== state.retrievalGuidedJobId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(cleanJobId)}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载引导式检索任务失败。");
+    const applied = applyRetrievalGuidedJob(data.job || null);
+    if (!applied) {
+      if (retrievalGuidedPollTimer) clearTimeout(retrievalGuidedPollTimer);
+      retrievalGuidedPollTimer = null;
+      return;
+    }
+    await loadRetrievalGuidedCandidates(cleanJobId, { silent: true });
+    if (retrievalBackgroundJobIsActive(data.job)) {
+      scheduleRetrievalGuidedPoll(cleanJobId);
+    } else if (retrievalGuidedPollTimer) {
+      clearTimeout(retrievalGuidedPollTimer);
+      retrievalGuidedPollTimer = null;
+      loadRetrievalRuns({ silent: true });
+      loadRetrievalSummary({ silent: true });
+    }
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function scheduleRetrievalGuidedPoll(jobId) {
+  const cleanJobId = String(jobId || "").trim();
+  if (retrievalGuidedPollTimer) clearTimeout(retrievalGuidedPollTimer);
+  retrievalGuidedPollTimer = null;
+  if (!cleanJobId) return;
+  retrievalGuidedPollTimer = setTimeout(() => {
+    loadRetrievalGuidedJob(cleanJobId, { silent: true });
+  }, 1400);
+}
+
+async function loadLatestRetrievalGuidedJob(options = {}) {
+  if (!state.libraryId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/latest`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载最近引导式检索任务失败。");
+    const job = data.job || null;
+    if (!job) return;
+    const shouldRestore = retrievalBackgroundJobIsActive(job) || !state.retrievalCandidates.length || String(job.topic || "") === String(state.retrievalQuery || "");
+    const applied = shouldRestore ? applyRetrievalGuidedJob(job) : false;
+    if (applied) {
+      await loadRetrievalGuidedCandidates(job.job_id, { silent: true });
+      if (retrievalBackgroundJobIsActive(job)) scheduleRetrievalGuidedPoll(job.job_id);
+    }
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+async function pauseGuidedSearch() {
+  if (!state.retrievalGuidedJobId) return;
+  try {
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(state.retrievalGuidedJobId)}/pause`, {});
+    applyRetrievalGuidedJob(result.job || null);
+  } catch (error) {
+    state.addItemMessage = `暂停失败：${error.message}`;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+async function resumeGuidedSearch() {
+  if (!state.retrievalGuidedJobId) return;
+  try {
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(state.retrievalGuidedJobId)}/resume`, {});
+    applyRetrievalGuidedJob(result.job || null);
+    scheduleRetrievalGuidedPoll(state.retrievalGuidedJobId);
+  } catch (error) {
+    state.addItemMessage = `继续失败：${error.message}`;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+async function cancelGuidedSearch() {
+  if (!state.retrievalGuidedJobId) return;
+  try {
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(state.retrievalGuidedJobId)}/cancel`, {});
+    applyRetrievalGuidedJob(result.job || null);
+    await loadRetrievalGuidedCandidates(state.retrievalGuidedJobId, { silent: true });
+  } catch (error) {
+    state.addItemMessage = `停止失败：${error.message}`;
   } finally {
     renderAddItemModal();
   }
@@ -7704,6 +8014,7 @@ async function loadRetrievalWorkspaceData() {
   await loadRetrievalBatchJobs({ silent: true });
   await loadLatestRetrievalQueryPlanJob({ silent: true });
   await loadLatestRetrievalAiScoringJob({ silent: true });
+  await loadLatestRetrievalGuidedJob({ silent: true });
 }
 
 function setupRetrievalPage() {

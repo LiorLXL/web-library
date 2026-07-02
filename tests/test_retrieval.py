@@ -2599,6 +2599,64 @@ def test_search_retrieval_uses_source_specific_limits() -> None:
     assert result["source_stats"]["code"]["count"] == 0
 
 
+def test_search_retrieval_applies_options_and_authority_signals() -> None:
+    class OptionsProvider:
+        name = "mixed"
+
+        def search(self, query: str, limit: int = 10, options=None) -> list[RetrievedCandidate]:
+            assert options.start_year == 2020
+            assert options.material_types == ["paper"]
+            return [
+                RetrievedCandidate(
+                    source="mixed",
+                    external_id="old-paper",
+                    item=ImportedItem(
+                        item_type="journalArticle",
+                        fields={"title": "Old Paper", "date": "2018"},
+                        identifiers={"doi": "10.1000/old"},
+                    ),
+                    confidence=0.8,
+                ),
+                RetrievedCandidate(
+                    source="mixed",
+                    external_id="code",
+                    item=ImportedItem(
+                        item_type="computerProgram",
+                        fields={"title": "Robot Code", "date": "2025"},
+                    ),
+                    raw={"stars": 500},
+                    confidence=0.7,
+                ),
+                RetrievedCandidate(
+                    source="mixed",
+                    external_id="paper",
+                    item=ImportedItem(
+                        item_type="journalArticle",
+                        fields={"title": "Robot Paper", "date": "2024", "publicationTitle": "Nature Machine Intelligence"},
+                        identifiers={"doi": "10.1000/new"},
+                    ),
+                    raw={"citation_count": 80},
+                    confidence=0.9,
+                ),
+            ]
+
+    result = search_retrieval(
+        "robot",
+        sources=["mixed"],
+        registry={"mixed": OptionsProvider()},
+        options={"start_year": 2020, "material_types": ["paper"], "sort_mode": "authority", "strategy_mode": "quality"},
+    )
+
+    assert [candidate["title"] for candidate in result["candidates"]] == ["Robot Paper"]
+    candidate = result["candidates"][0]
+    assert candidate["authority_signals"]["citation_count"] == 80
+    assert candidate["authority_signals"]["venue_authority"] == "high"
+    assert candidate["quality_score"] >= 75
+    assert "authority" in candidate["coverage_tags"]
+    assert result["source_stats"]["mixed"]["filtering"]["removed_by_year"] == 1
+    assert result["source_stats"]["mixed"]["filtering"]["removed_by_material_type"] == 1
+
+
 def test_search_retrieval_caches_same_query_and_returns_copy(monkeypatch: pytest.MonkeyPatch) -> None:
     retrieval_providers.reset_retrieval_search_cache()
     monkeypatch.setenv("WEB_LIBRARY_RETRIEVAL_SEARCH_CACHE_SECONDS", "60")
@@ -2841,6 +2899,85 @@ def test_retrieval_search_job_runs_inline_and_can_be_restored(
     latest = client.get(f"/api/library/{library['library_id']}/retrieval/search/jobs/latest").get_json()["job"]
     assert latest["job_id"] == job["job_id"]
     assert latest["status"] == "completed"
+
+
+def test_guided_search_job_runs_inline_and_restores_candidates(
+    zotero_fixture: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("WEB_LIBRARY_RETRIEVAL_GUIDED_INLINE", "1")
+    library = create_read_only_source(zotero_fixture)
+    captured_options: list[dict[str, object]] = []
+
+    def fake_plan(library_id: str, **kwargs):
+        return {
+            "queries": [
+                {"query": "robot science paper", "query_text": "robot science paper", "intent": "paper", "sources": ["crossref"]},
+                {"query": "robot benchmark dataset", "query_text": "robot benchmark dataset", "intent": "data", "sources": ["crossref"]},
+            ],
+            "message": "fake plan",
+        }
+
+    def fake_search(query: str, **kwargs):
+        options = kwargs.get("options")
+        captured_options.append(options.as_dict() if hasattr(options, "as_dict") else dict(options or {}))
+        item_type = "dataset" if "dataset" in query else "journalArticle"
+        return {
+            "query": query,
+            "sources": kwargs["sources"],
+            "candidates": [
+                {
+                    "source": "crossref",
+                    "external_id": query,
+                    "item_type": item_type,
+                    "title": f"Candidate for {query}",
+                    "year": "2024",
+                    "identifiers": {"doi": f"10.1000/{len(captured_options)}"},
+                    "item": {"item_type": item_type, "fields": {"title": f"Candidate for {query}", "date": "2024"}, "creators": [], "identifiers": {}},
+                    "confidence": 0.9,
+                    "quality_score": 88,
+                    "coverage_tags": ["data" if item_type == "dataset" else "paper", "authority"],
+                    "authority_signals": {"citation_count": 50},
+                    "missing_authority_signals": [],
+                    "ai_evaluation": {"score_source": "deterministic_rules", "decision": "review", "auto_select": False},
+                }
+            ],
+            "source_stats": {"crossref": {"ok": True, "count": 1, "error": ""}},
+        }
+
+    monkeypatch.setattr(web, "retrieval_query_plan_for_library", fake_plan)
+    monkeypatch.setattr(web, "search_retrieval", fake_search)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/guided-search-jobs",
+        json={
+            "topic": "robot",
+            "mode": "quality",
+            "time_range": {"preset": "10y"},
+            "material_types": ["paper", "data"],
+            "sources": ["crossref"],
+        },
+    )
+
+    assert response.status_code == 200
+    job = response.get_json()["job"]
+    assert job["status"] == "completed"
+    assert job["progress"]["completed_queries"] == 2
+    assert job["candidate_count"] == 2
+    assert captured_options[0]["start_year"] == 2017
+    assert captured_options[0]["material_types"] == ["paper", "data"]
+
+    latest = client.get(f"/api/library/{library['library_id']}/retrieval/guided-search-jobs/latest").get_json()["job"]
+    assert latest["job_id"] == job["job_id"]
+    candidates_response = client.get(
+        f"/api/library/{library['library_id']}/retrieval/guided-search-jobs/{job['job_id']}/candidates"
+    )
+    candidates_payload = candidates_response.get_json()
+    assert candidates_payload["ok"] is True
+    assert len(candidates_payload["candidates"]) == 2
+    assert candidates_payload["coverage"]["material_counts"]["paper"] == 1
+    assert candidates_payload["coverage"]["material_counts"]["data"] == 1
 
 
 def test_ai_candidate_evaluation_sends_metadata_only_and_rejects_unknown_ids(

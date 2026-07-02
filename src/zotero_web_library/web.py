@@ -31,6 +31,7 @@ from .metadata_import import MetadataImportError, parse_import_text, resolve_ide
 from .paths import app_data_dir
 from .retrieval import CandidateImportError, RetrievalError, imported_items_from_candidates, retrieval_source_statuses, search_retrieval
 from .retrieval.importing import imported_item_from_candidate
+from .retrieval.models import SearchOptions, candidate_material_type, normalized_material_type
 from .retrieval.providers import (
     AI_PIXEL_BASE_URL_ENV,
     AI_PIXEL_API_KEY_ENV,
@@ -92,6 +93,8 @@ from .zotero_adapter import ZoteroRepository
 
 RETRIEVAL_BATCH_LOCK = threading.Lock()
 RUNNING_RETRIEVAL_BATCHES: set[str] = set()
+RETRIEVAL_GUIDED_LOCK = threading.Lock()
+RUNNING_RETRIEVAL_GUIDED_JOBS: set[str] = set()
 RETRIEVAL_BACKGROUND_LOCK = threading.Lock()
 RUNNING_RETRIEVAL_QUERY_PLAN_JOBS: set[str] = set()
 RUNNING_RETRIEVAL_AI_SCORING_JOBS: set[str] = set()
@@ -4394,6 +4397,199 @@ def safe_float(value: Any) -> float:
         return 0.0
 
 
+def normalize_guided_search_mode(value: Any) -> str:
+    mode = str(value or "quality").strip().lower()
+    aliases = {"quick": "fast", "full": "coverage", "high_quality": "quality"}
+    mode = aliases.get(mode, mode)
+    return mode if mode in {"fast", "quality", "coverage"} else "quality"
+
+
+def normalize_guided_time_range(value: Any, mode: str) -> dict[str, Any]:
+    current_year = 2026
+    payload = value if isinstance(value, dict) else {"preset": str(value or "").strip()}
+    preset = str(payload.get("preset") or "").strip().lower()
+    if not preset:
+        preset = "5y" if mode == "fast" else "10y" if mode == "quality" else "all"
+    start_year = safe_int(payload.get("start_year")) or None
+    end_year = safe_int(payload.get("end_year")) or None
+    if preset in {"3y", "last3", "recent3"}:
+        start_year = current_year - 2
+        end_year = current_year
+    elif preset in {"5y", "last5", "recent5"}:
+        start_year = current_year - 4
+        end_year = current_year
+    elif preset in {"10y", "last10", "recent10"}:
+        start_year = current_year - 9
+        end_year = current_year
+    elif preset in {"all", "不限", "any"}:
+        start_year = None
+        end_year = None
+    if start_year and end_year and start_year > end_year:
+        start_year, end_year = end_year, start_year
+    label = "不限" if not start_year and not end_year else f"{start_year or '不限'}-{end_year or '现在'}"
+    return {"preset": preset, "start_year": start_year, "end_year": end_year, "label": label}
+
+
+def normalize_guided_material_types(value: Any) -> list[str]:
+    raw_values = value if isinstance(value, list) else []
+    normalized = [normalized_material_type(item) for item in raw_values if normalized_material_type(item)]
+    return list(dict.fromkeys(normalized)) or ["paper", "code", "data"]
+
+
+def guided_strategy(mode: str) -> dict[str, Any]:
+    if mode == "fast":
+        return {"query_limit": 3, "limit_per_source": 6, "sort_mode": "relevance", "auto_expand": False}
+    if mode == "coverage":
+        return {"query_limit": 10, "limit_per_source": 20, "sort_mode": "authority", "auto_expand": True}
+    return {"query_limit": 7, "limit_per_source": 12, "sort_mode": "authority", "auto_expand": False}
+
+
+def guided_search_options(mode: str, time_range: dict[str, Any], material_types: list[str]) -> dict[str, Any]:
+    strategy = guided_strategy(mode)
+    return {
+        "start_year": time_range.get("start_year"),
+        "end_year": time_range.get("end_year"),
+        "material_types": material_types,
+        "sort_mode": strategy["sort_mode"],
+        "strategy_mode": mode,
+    }
+
+
+def normalize_guided_plan_queries(plan: dict[str, Any], topic: str, sources: list[str], limit: int) -> list[dict[str, Any]]:
+    raw_queries = plan.get("queries") if isinstance(plan.get("queries"), list) else []
+    values: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_queries:
+        if isinstance(item, dict):
+            query = str(item.get("query_text") or item.get("query") or "").strip()
+            reason = str(item.get("reason") or item.get("model_reason") or "覆盖主题不同表达").strip()
+            intent = str(item.get("intent") or item.get("type") or "topic").strip()
+            item_sources = [str(source or "").strip().lower() for source in item.get("sources") or [] if str(source or "").strip()]
+        else:
+            query = str(item or "").strip()
+            reason = "覆盖主题不同表达"
+            intent = "topic"
+            item_sources = []
+        if not query:
+            continue
+        key = query.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(
+            {
+                "query": query,
+                "query_text": query,
+                "intent": intent,
+                "reason": reason,
+                "sources": [source for source in item_sources if source in sources] or sources,
+            }
+        )
+        if len(values) >= limit:
+            break
+    if not values:
+        values.append({"query": topic, "query_text": topic, "intent": "core", "reason": "原始主题", "sources": sources})
+    return values
+
+
+def guided_search_plan_for_library(
+    library_id: str,
+    *,
+    topic: str,
+    mode: str,
+    sources: list[str],
+    use_ai_planning: bool,
+) -> dict[str, Any]:
+    strategy = guided_strategy(mode)
+    try:
+        base_plan = retrieval_query_plan_for_library(
+            library_id,
+            seed_query=topic,
+            sample_size=5,
+            limit=strategy["query_limit"],
+            use_ai=use_ai_planning,
+            selected_sources=sources,
+        )
+    except Exception as exc:  # noqa: BLE001 - guided search can still run with rule variants
+        base_plan = {"queries": retrieval_query_plan_seed_variants(topic, sources, strategy["query_limit"]), "message": str(exc)}
+    queries = normalize_guided_plan_queries(base_plan, topic, sources, strategy["query_limit"])
+    return {
+        "topic": topic,
+        "mode": mode,
+        "strategy": strategy,
+        "queries": queries,
+        "query_count": len(queries),
+        "coverage_targets": ["core_concept", "synonyms", "methods", "applications", "paper", "code", "data", "time_range", "sources"],
+        "message": str(base_plan.get("message") or "引导式检索计划已生成。"),
+        "ai_enhancement": base_plan.get("ai_enhancement") if isinstance(base_plan.get("ai_enhancement"), dict) else {},
+    }
+
+
+def guided_search_coverage(
+    *,
+    job: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    auto_expanded: bool = False,
+) -> dict[str, Any]:
+    material_counts = {"paper": 0, "code": 0, "data": 0}
+    source_counts: dict[str, int] = {}
+    authority_count = 0
+    multi_source_count = 0
+    missing_authority_count = 0
+    for candidate in candidates:
+        material = candidate_material_type(str(candidate.get("item_type") or ""), str(candidate.get("source") or ""))
+        if material in material_counts:
+            material_counts[material] += 1
+        for source in candidate.get("sources") or [candidate.get("source")]:
+            clean_source = str(source or "").strip()
+            if clean_source:
+                source_counts[clean_source] = source_counts.get(clean_source, 0) + 1
+        if "authority" in (candidate.get("coverage_tags") or []):
+            authority_count += 1
+        if candidate.get("multi_source"):
+            multi_source_count += 1
+        if candidate.get("missing_authority_signals"):
+            missing_authority_count += 1
+    selected_materials = job.get("material_types") if isinstance(job.get("material_types"), list) else ["paper", "code", "data"]
+    selected_sources = job.get("sources") if isinstance(job.get("sources"), list) else []
+    covered_materials = [name for name in selected_materials if material_counts.get(name, 0) > 0]
+    missing = []
+    for name in selected_materials:
+        if material_counts.get(name, 0) <= 0:
+            missing.append({"area": name, "reason": "该资料类型暂未检到候选"})
+    uncovered_sources = [source for source in selected_sources if source not in source_counts]
+    for source in uncovered_sources[:6]:
+        missing.append({"area": f"source:{source}", "reason": "该数据源暂无候选或本轮失败"})
+    if candidates and authority_count <= 0:
+        missing.append({"area": "authority", "reason": "暂未检到明确引用、权威来源或使用热度信号"})
+    status = "good" if not missing else "needs_more"
+    return {
+        "status": status,
+        "candidate_count": len(candidates),
+        "covered_materials": covered_materials,
+        "material_counts": material_counts,
+        "source_counts": source_counts,
+        "authority_count": authority_count,
+        "multi_source_count": multi_source_count,
+        "missing_authority_count": missing_authority_count,
+        "missing": missing,
+        "auto_expanded": auto_expanded,
+        "message": "覆盖良好，可进入筛选导入。" if status == "good" else "仍有覆盖缺口，可查看建议 query 或继续补检。",
+    }
+
+
+def guided_gap_queries(topic: str, coverage: dict[str, Any], sources: list[str]) -> list[dict[str, Any]]:
+    queries: list[dict[str, Any]] = []
+    missing_areas = {str(item.get("area") or "") for item in coverage.get("missing") or [] if isinstance(item, dict)}
+    if "code" in missing_areas:
+        queries.append({"query": f"{topic} github implementation code", "query_text": f"{topic} github implementation code", "intent": "code", "reason": "补检代码实现", "sources": [source for source in sources if source in {"github", "zenodo", "huggingface"}] or sources})
+    if "data" in missing_areas:
+        queries.append({"query": f"{topic} dataset benchmark", "query_text": f"{topic} dataset benchmark", "intent": "data", "reason": "补检数据集和 benchmark", "sources": [source for source in sources if source in {"datacite", "zenodo", "huggingface"}] or sources})
+    if "authority" in missing_areas:
+        queries.append({"query": f"{topic} survey benchmark state of the art", "query_text": f"{topic} survey benchmark state of the art", "intent": "authority", "reason": "补检综述、基准和高影响资料", "sources": sources})
+    return queries[:3]
+
+
 def bounded_retrieval_summary_limit(value: Any, default: int = 100) -> int:
     try:
         parsed = int(value or default)
@@ -8601,6 +8797,7 @@ def create_app() -> Flask:
         include_raw: bool = False,
         use_ai_evaluation: bool = True,
         source_limits: dict[str, Any] | None = None,
+        search_options: SearchOptions | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         library = library_or_404(library_id)
         registry = retrieval_provider_registry_for_library(library_id)
@@ -8609,6 +8806,7 @@ def create_app() -> Flask:
             sources=sources,
             limit=limit,
             source_limits=source_limits,
+            options=search_options,
             include_raw=include_raw,
             registry=registry,
         )
@@ -8816,6 +9014,259 @@ def create_app() -> Flask:
             execute_retrieval_batch_job(library_id, job_id)
             return
         thread = threading.Thread(target=execute_retrieval_batch_job, args=(library_id, job_id), daemon=True)
+        thread.start()
+
+    def merge_guided_source_stats(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+        merged = copy.deepcopy(base) if isinstance(base, dict) else {}
+        for source, raw_stat in (update or {}).items():
+            if not isinstance(raw_stat, dict):
+                continue
+            item = merged.setdefault(str(source), {"ok": True, "count": 0, "elapsed_ms": 0, "rate_limit_wait_ms": 0})
+            item["count"] = safe_int(item.get("count")) + safe_int(raw_stat.get("count"))
+            item["elapsed_ms"] = safe_int(item.get("elapsed_ms")) + safe_int(raw_stat.get("elapsed_ms"))
+            item["rate_limit_wait_ms"] = safe_int(item.get("rate_limit_wait_ms")) + safe_int(raw_stat.get("rate_limit_wait_ms"))
+            if raw_stat.get("ok") is False:
+                item["ok"] = False
+                item["error"] = str(raw_stat.get("error") or item.get("error") or "")
+                item["error_kind"] = str(raw_stat.get("error_kind") or item.get("error_kind") or "")
+                item["action"] = str(raw_stat.get("action") or item.get("action") or "")
+            if raw_stat.get("filtering"):
+                item["filtering"] = raw_stat.get("filtering")
+        return merged
+
+    def guided_search_candidates_for_display(
+        library_id: str,
+        job_id: str,
+        *,
+        use_ai_evaluation: bool = False,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        library = library_or_404(library_id)
+        job = app_store.retrieval_guided_job(library_id, job_id)
+        clean_limit = max(1, min(int(limit or 200), 500))
+        candidates: list[dict[str, Any]] = []
+        by_key: dict[str, dict[str, Any]] = {}
+        for run_id in job.get("run_ids") or []:
+            clean_run_id = str(run_id or "").strip()
+            if not clean_run_id:
+                continue
+            try:
+                run_report = app_store.retrieval_run_report(library_id, clean_run_id)
+            except ValueError:
+                continue
+            run_payload = run_report.get("run") if isinstance(run_report.get("run"), dict) else {}
+            for row in run_report.get("candidates") or []:
+                if not isinstance(row, dict):
+                    continue
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                candidate = dict(payload or row)
+                stored_candidate_id = str(row.get("candidate_id") or candidate.get("candidate_id") or "").strip()
+                if stored_candidate_id:
+                    candidate["stored_candidate_id"] = stored_candidate_id
+                candidate["candidate_id"] = ""
+                candidate["guided_job_id"] = str(job.get("job_id") or "")
+                candidate["guided_run_id"] = clean_run_id
+                candidate["guided_query"] = str(run_payload.get("query") or "")
+                key = retrieval_batch_candidate_key(candidate)
+                existing = by_key.get(key)
+                if existing:
+                    query = str(run_payload.get("query") or "")
+                    if query and query not in existing.setdefault("guided_queries", []):
+                        existing["guided_queries"].append(query)
+                    existing["guided_hit_count"] = safe_int(existing.get("guided_hit_count")) + 1
+                    sources = existing.get("sources") if isinstance(existing.get("sources"), list) else []
+                    for source in [candidate.get("source"), *(candidate.get("sources") if isinstance(candidate.get("sources"), list) else [])]:
+                        clean_source = str(source or "").strip()
+                        if clean_source and clean_source not in sources:
+                            sources.append(clean_source)
+                    if sources:
+                        existing["sources"] = sources
+                        existing["source_count"] = len(sources)
+                        existing["multi_source"] = len(sources) > 1
+                    continue
+                candidate["guided_queries"] = [str(run_payload.get("query") or "")]
+                candidate["guided_hit_count"] = 1
+                by_key[key] = candidate
+                candidates.append(candidate)
+                if len(candidates) >= clean_limit:
+                    break
+            if len(candidates) >= clean_limit:
+                break
+        candidates.sort(key=lambda candidate: safe_int(candidate.get("quality_score")), reverse=True)
+        annotate_existing_retrieval_matches(ZoteroRepository(library), candidates)
+        if use_ai_evaluation:
+            query_text = " / ".join(str(item.get("query_text") or item.get("query") or "") for item in (job.get("plan") or {}).get("queries", []) if isinstance(item, dict))
+            ai_summary = evaluate_retrieval_candidates_with_ai(
+                library_id,
+                query_text or str(job.get("topic") or "guided search"),
+                candidates,
+                use_ai_evaluation=False,
+            )
+        else:
+            ai_summary = {"status": "skipped", "score_source": "deterministic_rules", "candidate_count": len(candidates)}
+        coverage = guided_search_coverage(job=job, candidates=candidates, auto_expanded=bool((job.get("coverage") or {}).get("auto_expanded")))
+        return {
+            "job": job,
+            "candidates": candidates,
+            "source_stats": job.get("source_stats") if isinstance(job.get("source_stats"), dict) else {},
+            "coverage": coverage,
+            "ai_evaluation_summary": ai_summary,
+        }
+
+    def execute_retrieval_guided_job(library_id: str, job_id: str) -> None:
+        try:
+            job = app_store.retrieval_guided_job(library_id, job_id)
+            if job.get("status") in {"canceled", "paused"}:
+                return
+            progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+            app_store.update_retrieval_guided_job(
+                library_id,
+                job_id,
+                status="running",
+                progress={**progress, "stage": "planning"},
+                started=True,
+            )
+            job = app_store.retrieval_guided_job(library_id, job_id)
+            plan = job.get("plan") if isinstance(job.get("plan"), dict) else {}
+            if not plan.get("queries"):
+                plan = guided_search_plan_for_library(
+                    library_id,
+                    topic=str(job.get("topic") or ""),
+                    mode=str(job.get("mode") or "quality"),
+                    sources=[str(source) for source in job.get("sources") or []],
+                    use_ai_planning=bool(job.get("use_ai_planning")),
+                )
+            queries = [item for item in plan.get("queries") or [] if isinstance(item, dict)]
+            progress = {
+                **(job.get("progress") if isinstance(job.get("progress"), dict) else {}),
+                "stage": "retrieving",
+                "total_queries": len(queries),
+                "completed_queries": safe_int((job.get("progress") or {}).get("completed_queries")),
+                "failed_queries": safe_int((job.get("progress") or {}).get("failed_queries")),
+                "candidate_count": safe_int((job.get("progress") or {}).get("candidate_count")),
+            }
+            app_store.update_retrieval_guided_job(library_id, job_id, plan=plan, progress=progress)
+            auto_expanded = bool((job.get("coverage") or {}).get("auto_expanded"))
+            completed_queries = safe_int(progress.get("completed_queries"))
+            failed_queries = safe_int(progress.get("failed_queries"))
+            run_ids = [str(run_id) for run_id in job.get("run_ids") or [] if str(run_id or "").strip()]
+            source_stats = job.get("source_stats") if isinstance(job.get("source_stats"), dict) else {}
+            index = 0
+            while index < len(queries):
+                current_job = app_store.retrieval_guided_job(library_id, job_id)
+                if current_job.get("status") in {"canceled", "paused"}:
+                    return
+                if index < completed_queries + failed_queries:
+                    index += 1
+                    continue
+                query_item = queries[index]
+                query_text = str(query_item.get("query_text") or query_item.get("query") or current_job.get("topic") or "").strip()
+                query_sources = [str(source or "").strip().lower() for source in query_item.get("sources") or current_job.get("sources") or [] if str(source or "").strip()]
+                options = SearchOptions.from_payload(current_job.get("options") if isinstance(current_job.get("options"), dict) else {})
+                strategy = plan.get("strategy") if isinstance(plan.get("strategy"), dict) else guided_strategy(str(current_job.get("mode") or "quality"))
+                progress = {
+                    **(current_job.get("progress") if isinstance(current_job.get("progress"), dict) else {}),
+                    "stage": "retrieving",
+                    "current_query": query_text,
+                    "current_query_index": index,
+                    "total_queries": len(queries),
+                    "completed_queries": completed_queries,
+                    "failed_queries": failed_queries,
+                    "candidate_count": safe_int((current_job.get("progress") or {}).get("candidate_count")),
+                }
+                app_store.update_retrieval_guided_job(library_id, job_id, progress=progress)
+                try:
+                    result = run_retrieval_search_for_library(
+                        library_id,
+                        query_text,
+                        query_sources or current_job.get("sources") or None,
+                        safe_int(strategy.get("limit_per_source")) or 10,
+                        use_ai_evaluation=False,
+                        search_options=options,
+                    )
+                    run_id = str(result.get("run_id") or "")
+                    if run_id:
+                        run_ids.append(run_id)
+                    completed_queries += 1
+                    source_stats = merge_guided_source_stats(source_stats, result.get("source_stats") if isinstance(result.get("source_stats"), dict) else {})
+                    candidate_count = safe_int((current_job.get("progress") or {}).get("candidate_count")) + len(result.get("candidates") or [])
+                    display = guided_search_candidates_for_display(library_id, job_id, use_ai_evaluation=False, limit=300) if run_ids[:-1] else {"candidates": []}
+                    all_candidates = list(display.get("candidates") or []) + list(result.get("candidates") or [])
+                    coverage = guided_search_coverage(job={**current_job, "run_ids": run_ids}, candidates=all_candidates, auto_expanded=auto_expanded)
+                    progress = {
+                        **progress,
+                        "completed_queries": completed_queries,
+                        "failed_queries": failed_queries,
+                        "candidate_count": candidate_count,
+                        "current_query": "",
+                    }
+                    app_store.update_retrieval_guided_job(
+                        library_id,
+                        job_id,
+                        source_stats=source_stats,
+                        run_ids=run_ids,
+                        coverage=coverage,
+                        progress=progress,
+                    )
+                    current_job = app_store.retrieval_guided_job(library_id, job_id)
+                    if (
+                        str(current_job.get("mode") or "") == "coverage"
+                        and not auto_expanded
+                        and coverage.get("status") != "good"
+                        and index == len(queries) - 1
+                    ):
+                        gap_queries = guided_gap_queries(str(current_job.get("topic") or ""), coverage, [str(source) for source in current_job.get("sources") or []])
+                        seen = {str(item.get("query_text") or item.get("query") or "").casefold() for item in queries}
+                        for gap in gap_queries:
+                            if str(gap.get("query_text") or gap.get("query") or "").casefold() not in seen:
+                                queries.append(gap)
+                        auto_expanded = True
+                        plan["queries"] = queries
+                        plan["query_count"] = len(queries)
+                        coverage["auto_expanded"] = True
+                        coverage["auto_expanded_queries"] = gap_queries
+                        progress["total_queries"] = len(queries)
+                        app_store.update_retrieval_guided_job(library_id, job_id, plan=plan, coverage=coverage, progress=progress)
+                except Exception as exc:  # noqa: BLE001 - keep guided search moving across query failures
+                    failed_queries += 1
+                    progress = {**progress, "failed_queries": failed_queries, "last_error": str(exc), "current_query": ""}
+                    app_store.update_retrieval_guided_job(library_id, job_id, progress=progress, error=str(exc))
+                index += 1
+            latest = app_store.retrieval_guided_job(library_id, job_id)
+            if latest.get("status") not in {"canceled", "paused"}:
+                status = "partial" if safe_int((latest.get("progress") or {}).get("failed_queries")) else "completed"
+                app_store.update_retrieval_guided_job(
+                    library_id,
+                    job_id,
+                    status=status,
+                    progress={**(latest.get("progress") if isinstance(latest.get("progress"), dict) else {}), "stage": status},
+                    finished=True,
+                )
+        except Exception as exc:  # noqa: BLE001 - persist guided job systemic failure
+            try:
+                app_store.update_retrieval_guided_job(
+                    library_id,
+                    job_id,
+                    status="failed",
+                    error=str(exc),
+                    progress={"stage": "failed", "error": str(exc)},
+                    finished=True,
+                )
+            except Exception:
+                pass
+        finally:
+            with RETRIEVAL_GUIDED_LOCK:
+                RUNNING_RETRIEVAL_GUIDED_JOBS.discard(job_id)
+
+    def start_retrieval_guided_worker(library_id: str, job_id: str) -> None:
+        with RETRIEVAL_GUIDED_LOCK:
+            if job_id in RUNNING_RETRIEVAL_GUIDED_JOBS:
+                return
+            RUNNING_RETRIEVAL_GUIDED_JOBS.add(job_id)
+        if os.environ.get("WEB_LIBRARY_RETRIEVAL_GUIDED_INLINE", "").strip().lower() in {"1", "true", "yes"}:
+            execute_retrieval_guided_job(library_id, job_id)
+            return
+        thread = threading.Thread(target=execute_retrieval_guided_job, args=(library_id, job_id), daemon=True)
         thread.start()
 
     def execute_retrieval_search_job(library_id: str, job_id: str) -> None:
@@ -9440,6 +9891,106 @@ def create_app() -> Flask:
             summary = repo.import_metadata_items(parse_import_text(text, fmt), collection_key)
             return jsonify({"ok": True, **summary})
         except (SourceError, ValueError, MetadataImportError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/guided-search-jobs")
+    def api_create_retrieval_guided_search_job(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        topic = str(payload.get("topic") or payload.get("query") or "").strip()
+        if not topic:
+            return jsonify({"ok": False, "error": "检索主题不能为空。"}), 400
+        try:
+            library_or_404(library_id)
+            mode = normalize_guided_search_mode(payload.get("mode"))
+            time_range = normalize_guided_time_range(payload.get("time_range"), mode)
+            material_types = normalize_guided_material_types(payload.get("material_types"))
+            registry = retrieval_provider_registry_for_library(library_id)
+            source_names = [str(source or "").strip().lower() for source in payload.get("sources") or [] if str(source or "").strip()]
+            unknown = [source for source in source_names if source not in registry]
+            if unknown:
+                raise ValueError(f"未知数据源：{', '.join(unknown)}")
+            if not source_names:
+                source_names = [source for source in ["crossref", "arxiv", "pubmed", "semanticscholar", "datacite", "github", "huggingface", "zenodo"] if source in registry]
+            options = guided_search_options(mode, time_range, material_types)
+            job = app_store.create_retrieval_guided_job(
+                library_id,
+                topic=topic,
+                mode=mode,
+                time_range=time_range,
+                material_types=material_types,
+                sources=source_names,
+                options=options,
+                use_ai_planning=payload.get("use_ai_planning") is not False,
+            )
+            start_retrieval_guided_worker(library_id, str(job.get("job_id") or ""))
+            return jsonify({"ok": True, "job": app_store.retrieval_guided_job(library_id, str(job.get("job_id") or ""))})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/retrieval/guided-search-jobs/latest")
+    def api_latest_retrieval_guided_search_job(library_id: str):
+        try:
+            library_or_404(library_id)
+            job = app_store.latest_retrieval_guided_job(library_id)
+            if job and job.get("status") in {"queued", "running"}:
+                start_retrieval_guided_worker(library_id, str(job.get("job_id") or ""))
+            return jsonify({"ok": True, "job": job})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/retrieval/guided-search-jobs/<job_id>")
+    def api_retrieval_guided_search_job(library_id: str, job_id: str):
+        try:
+            library_or_404(library_id)
+            job = app_store.retrieval_guided_job(library_id, job_id)
+            if job.get("status") in {"queued", "running"}:
+                start_retrieval_guided_worker(library_id, str(job.get("job_id") or ""))
+                job = app_store.retrieval_guided_job(library_id, job_id)
+            return jsonify({"ok": True, "job": job})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+
+    @app.get("/api/library/<library_id>/retrieval/guided-search-jobs/<job_id>/candidates")
+    def api_retrieval_guided_search_candidates(library_id: str, job_id: str):
+        try:
+            limit = int(request.args.get("limit") or 200)
+            use_ai_evaluation = request.args.get("use_ai_evaluation", "0").strip().lower() in {"1", "true", "yes"}
+            result = guided_search_candidates_for_display(
+                library_id,
+                job_id,
+                use_ai_evaluation=use_ai_evaluation,
+                limit=limit,
+            )
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/guided-search-jobs/<job_id>/cancel")
+    def api_cancel_retrieval_guided_search_job(library_id: str, job_id: str):
+        try:
+            library_or_404(library_id)
+            job = app_store.cancel_retrieval_guided_job(library_id, job_id, "引导式检索已取消。")
+            return jsonify({"ok": True, "job": job})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/guided-search-jobs/<job_id>/pause")
+    def api_pause_retrieval_guided_search_job(library_id: str, job_id: str):
+        try:
+            library_or_404(library_id)
+            job = app_store.pause_retrieval_guided_job(library_id, job_id, "引导式检索已暂停。")
+            return jsonify({"ok": True, "job": job})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/guided-search-jobs/<job_id>/resume")
+    def api_resume_retrieval_guided_search_job(library_id: str, job_id: str):
+        try:
+            library_or_404(library_id)
+            job = app_store.resume_retrieval_guided_job(library_id, job_id)
+            start_retrieval_guided_worker(library_id, str(job.get("job_id") or ""))
+            return jsonify({"ok": True, "job": app_store.retrieval_guided_job(library_id, job_id)})
+        except (SourceError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.post("/api/library/<library_id>/retrieval/search")

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
 from .merge import merge_candidates
-from .models import RetrievedCandidate, SourceSearchResult
+from .models import RetrievedCandidate, SearchOptions, SourceSearchResult, candidate_material_type, normalized_material_type, year_from_fields
 from zotero_web_library.metadata_import import (
     ImportedCreator,
     ImportedItem,
@@ -79,7 +79,7 @@ class RetrievalError(ValueError):
 class MetadataProvider(Protocol):
     name: str
 
-    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+    def search(self, query: str, limit: int = 10, options: SearchOptions | None = None) -> list[RetrievedCandidate]:
         ...
 
 
@@ -567,6 +567,7 @@ def retrieval_search_cache_key(
     limits: dict[str, int],
     include_raw: bool,
     registry: dict[str, MetadataProvider],
+    options: SearchOptions | None = None,
 ) -> tuple[Any, ...]:
     provider_signature = tuple(
         (
@@ -582,6 +583,7 @@ def retrieval_search_cache_key(
         tuple(source_names),
         tuple((source, limits.get(source, 0)) for source in source_names),
         bool(include_raw),
+        json.dumps(options.as_dict() if options else {}, ensure_ascii=False, sort_keys=True),
         provider_signature,
     )
 
@@ -707,6 +709,7 @@ def run_provider_search(
     query: str,
     limit: int,
     *,
+    options: SearchOptions | None = None,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
 ) -> SourceSearchResult:
@@ -715,7 +718,11 @@ def run_provider_search(
     wait_seconds = 0.0
     try:
         wait_seconds = wait_for_source_rate_limit(source, provider, sleep=sleep, now=now)
-        candidates = provider.search(query, limit)
+        try:
+            candidates = provider.search(query, limit, options=options)
+        except TypeError:
+            candidates = provider.search(query, limit)
+        candidates, filtering = filter_candidates_by_search_options(candidates, options)
         elapsed_ms = int(round((time.perf_counter() - started) * 1000))
         return SourceSearchResult(
             source=source,
@@ -724,6 +731,7 @@ def run_provider_search(
             elapsed_ms=elapsed_ms,
             rate_limit_wait_ms=int(round(wait_seconds * 1000)),
             rate_limit_seconds=rate_limit_seconds,
+            filtering=filtering,
         )
     except Exception as exc:  # noqa: BLE001 - per-source failures are part of the retrieval contract
         elapsed_ms = int(round((time.perf_counter() - started) * 1000))
@@ -736,6 +744,42 @@ def run_provider_search(
             rate_limit_seconds=rate_limit_seconds,
             **details,
         )
+
+
+def filter_candidates_by_search_options(
+    candidates: list[RetrievedCandidate],
+    options: SearchOptions | None,
+) -> tuple[list[RetrievedCandidate], dict[str, Any]]:
+    if not options:
+        return candidates, {}
+    filtered: list[RetrievedCandidate] = []
+    removed_by_year = 0
+    removed_by_material_type = 0
+    material_types = {normalized_material_type(item) for item in options.material_types if normalized_material_type(item)}
+    for candidate in candidates:
+        fields = candidate.item.fields
+        year_text = year_from_fields(fields)
+        year = int(year_text) if year_text.isdigit() else None
+        if options.start_year and year and year < options.start_year:
+            removed_by_year += 1
+            continue
+        if options.end_year and year and year > options.end_year:
+            removed_by_year += 1
+            continue
+        material_type = candidate_material_type(candidate.item.item_type, candidate.source)
+        if material_types and material_type not in material_types:
+            removed_by_material_type += 1
+            continue
+        filtered.append(candidate)
+    filtering: dict[str, Any] = {
+        "mode": "post_filter",
+        "start_year": options.start_year,
+        "end_year": options.end_year,
+        "material_types": sorted(material_types),
+        "removed_by_year": removed_by_year,
+        "removed_by_material_type": removed_by_material_type,
+    }
+    return filtered, filtering
 
 
 class CrossrefProvider:
@@ -1086,6 +1130,7 @@ class OpenAlexProvider:
                 "display_name",
                 "publication_year",
                 "publication_date",
+                "cited_by_count",
                 "type",
                 "authorships",
                 "primary_location",
@@ -1165,7 +1210,7 @@ def openalex_candidate(work: dict[str, Any]) -> RetrievedCandidate:
         source="openalex",
         external_id=clean_text(work.get("id") or ids.get("openalex") or doi or pmid or pmcid),
         item=item,
-        raw={"id": work.get("id"), "type": work_type, "ids": ids},
+        raw={"id": work.get("id"), "type": work_type, "ids": ids, "cited_by_count": work.get("cited_by_count")},
         confidence=0.86 if identifiers else 0.7,
         evidence=evidence,
         landing_url=landing_url,
@@ -1237,6 +1282,8 @@ class SemanticScholarProvider:
                 "publicationTypes",
                 "authors",
                 "externalIds",
+                "citationCount",
+                "influentialCitationCount",
                 "url",
                 "openAccessPdf",
                 "journal",
@@ -1325,7 +1372,13 @@ def semantic_scholar_candidate(paper: dict[str, Any]) -> RetrievedCandidate:
         source="semanticscholar",
         external_id=semantic_scholar_external_id(paper, identifiers),
         item=item,
-        raw={"paperId": paper_id, "corpusId": paper.get("corpusId"), "externalIds": external_ids},
+        raw={
+            "paperId": paper_id,
+            "corpusId": paper.get("corpusId"),
+            "externalIds": external_ids,
+            "citationCount": paper.get("citationCount"),
+            "influentialCitationCount": paper.get("influentialCitationCount"),
+        },
         confidence=0.86 if identifiers else 0.68,
         evidence=evidence,
         landing_url=fields.get("url", ""),
@@ -2064,6 +2117,7 @@ class ADSProvider:
                 "issue",
                 "page",
                 "doctype",
+                "citation_count",
             ]
         )
         params = urllib.parse.urlencode({"q": clean_query, "rows": rows, "fl": fields, "sort": "score desc"})
@@ -2114,7 +2168,12 @@ def ads_candidate(doc: dict[str, Any]) -> RetrievedCandidate:
         source="ads",
         external_id=bibcode or doi or title,
         item=item,
-        raw={"bibcode": bibcode, "doctype": doctype, "identifier": ads_list(doc.get("identifier"), limit=20)},
+        raw={
+            "bibcode": bibcode,
+            "doctype": doctype,
+            "identifier": ads_list(doc.get("identifier"), limit=20),
+            "citation_count": doc.get("citation_count"),
+        },
         confidence=0.9 if bibcode else 0.7 if doi else 0.6,
         evidence=evidence,
         landing_url=fields.get("url", ""),
@@ -4732,6 +4791,7 @@ def search_retrieval(
     sources: Any = None,
     limit: int = 10,
     source_limits: dict[str, Any] | None = None,
+    options: SearchOptions | dict[str, Any] | None = None,
     registry: dict[str, MetadataProvider] | None = None,
     include_raw: bool = False,
 ) -> dict[str, Any]:
@@ -4741,6 +4801,7 @@ def search_retrieval(
     provider_registry = registry or default_provider_registry()
     source_names = normalize_sources(sources, provider_registry)
     per_source_limit = max(1, min(int(limit or 10), 50))
+    search_options = SearchOptions.from_payload(options) if options else None
 
     def limit_for_source(source: str) -> int:
         if not isinstance(source_limits, dict):
@@ -4752,7 +4813,7 @@ def search_retrieval(
             return per_source_limit
 
     resolved_limits = {source: limit_for_source(source) for source in source_names}
-    cache_key = retrieval_search_cache_key(clean_query, source_names, resolved_limits, include_raw, provider_registry)
+    cache_key = retrieval_search_cache_key(clean_query, source_names, resolved_limits, include_raw, provider_registry, search_options)
     cached_result = get_retrieval_search_cache(cache_key)
     if cached_result is not None:
         return cached_result
@@ -4760,7 +4821,14 @@ def search_retrieval(
     results: dict[str, SourceSearchResult] = {}
     with ThreadPoolExecutor(max_workers=max(1, len(source_names))) as executor:
         futures = {
-            executor.submit(run_provider_search, source, provider_registry[source], clean_query, resolved_limits[source]): source
+            executor.submit(
+                run_provider_search,
+                source,
+                provider_registry[source],
+                clean_query,
+                resolved_limits[source],
+                options=search_options,
+            ): source
             for source in source_names
         }
         for future in as_completed(futures):
@@ -4772,6 +4840,8 @@ def search_retrieval(
                 results[source] = SourceSearchResult(source=source, ok=False, **details)
     ordered_results = [results[source] for source in source_names]
     candidates = merge_candidates([candidate for result in ordered_results for candidate in result.candidates])
+    if search_options and search_options.sort_mode == "authority":
+        candidates.sort(key=lambda candidate: candidate.as_dict().get("quality_score", 0), reverse=True)
     candidate_payloads = []
     for index, candidate in enumerate(candidates, start=1):
         payload = candidate.as_dict(include_raw=include_raw)
@@ -4783,5 +4853,7 @@ def search_retrieval(
         "candidates": candidate_payloads,
         "source_stats": {result.source: result.stats_dict() for result in ordered_results},
     }
+    if search_options:
+        payload["search_options"] = search_options.as_dict()
     set_retrieval_search_cache(cache_key, payload)
     return payload
