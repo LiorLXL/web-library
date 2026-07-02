@@ -4,6 +4,8 @@ import csv
 import copy
 import contextlib
 import contextvars
+import html
+import ipaddress
 import json
 import os
 import re
@@ -20,7 +22,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
 from .merge import merge_candidates
-from .models import RetrievedCandidate, SearchOptions, SourceSearchResult, candidate_material_type, normalized_material_type, year_from_fields
+from .models import (
+    RetrievedCandidate,
+    SearchOptions,
+    SourceSearchResult,
+    candidate_resource_type,
+    normalized_material_type,
+    year_from_fields,
+)
 from zotero_web_library.metadata_import import (
     ImportedCreator,
     ImportedItem,
@@ -50,6 +59,8 @@ GLOBAL_SOURCE_RATE_LIMIT_ENV = "WEB_LIBRARY_RETRIEVAL_RATE_LIMIT_SECONDS"
 HTTP_JSON_CONFIG_ENV = "WEB_LIBRARY_RETRIEVAL_HTTP_JSON_CONFIG"
 SQLITE_CONFIG_ENV = "WEB_LIBRARY_RETRIEVAL_SQLITE_CONFIG"
 MANIFEST_CONFIG_ENV = "WEB_LIBRARY_RETRIEVAL_MANIFEST_CONFIG"
+GITLAB_TOKEN_ENV = "GITLAB_TOKEN"
+BRAVE_SEARCH_API_KEY_ENV = "BRAVE_SEARCH_API_KEY"
 AI_PIXEL_BASE_URL_ENV = "AI_PIXEL_BASE_URL"
 AI_PIXEL_API_KEY_ENV = "AI_PIXEL_API_KEY"
 AI_PIXEL_MODEL_ENV = "AI_PIXEL_MODEL"
@@ -511,8 +522,16 @@ SOURCE_SETUP_NOTES = {
     "openalex": ["必须配置 OPENALEX_API_KEY，本项目避免匿名配额不稳定。"],
     "semanticscholar": ["无 Key 可用；配置 SEMANTIC_SCHOLAR_API_KEY 后限额和稳定性更好。"],
     "datacite": ["公共 API 无需鉴权，适合数据集、软件和报告 DOI。"],
+    "europepmc": ["公共 API 无需鉴权，适合生医论文、预印本、PMID/PMCID 元数据。"],
+    "dblp": ["公共 API 无需鉴权，适合计算机论文、会议和期刊元数据。"],
+    "openreview": ["公共 API 无需鉴权，适合 OpenReview 会议投稿、预印本和评审条目。"],
+    "figshare": ["公共 API 无需鉴权，适合数据集、软件、图表和研究对象。"],
+    "osf": ["公共 API 无需鉴权，适合项目、数据集、预注册和补充材料。"],
+    "openml": ["公共 API 无需鉴权，适合机器学习数据集、任务和基准。"],
     "openlibrary": ["公共 Search API 无需鉴权，适合图书和 ISBN 元数据。"],
     "ads": ["配置 ADS_API_TOKEN 或 ADS_DEV_KEY 后启用 NASA ADS。"],
+    "gitlab": ["无 token 可用；配置 GITLAB_TOKEN 后限额和稳定性更好。"],
+    "brave": ["需要配置 BRAVE_SEARCH_API_KEY；用于相关网址和网页资源候选。"],
     "localfile": ["可在文库级配置路径，也可设置 WEB_LIBRARY_RETRIEVAL_LOCAL_PATHS。"],
     "httpjson": ["可在文库级保存 JSON 配置，也可设置 WEB_LIBRARY_RETRIEVAL_HTTP_JSON_CONFIG。"],
     "sqlite": ["可在文库级保存只读数据库配置，也可设置 WEB_LIBRARY_RETRIEVAL_SQLITE_CONFIG。"],
@@ -766,7 +785,7 @@ def filter_candidates_by_search_options(
         if options.end_year and year and year > options.end_year:
             removed_by_year += 1
             continue
-        material_type = candidate_material_type(candidate.item.item_type, candidate.source)
+        material_type = candidate_resource_type(candidate)
         if material_types and material_type not in material_types:
             removed_by_material_type += 1
             continue
@@ -2227,6 +2246,776 @@ def ads_pages(value: Any) -> str:
     return pages[0] if pages else ""
 
 
+class EuropePMCProvider:
+    name = "europepmc"
+    timeout_seconds = 15
+    rate_limit_seconds = 0.25
+    rate_limit_note = "Europe PMC public REST API; useful for biomedical papers, preprints, PMIDs and PMCIDs."
+
+    def __init__(self, get_json: JsonFetcher = _http_get_json) -> None:
+        self.get_json = get_json
+
+    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+        clean_query = clean_text(query)
+        if not clean_query:
+            raise RetrievalError("Search query cannot be empty.")
+        rows = max(1, min(int(limit or 10), 50))
+        params = urllib.parse.urlencode(
+            {"query": clean_query, "format": "json", "pageSize": rows, "resultType": "core"}
+        )
+        data = self.get_json(f"https://www.ebi.ac.uk/europepmc/webservices/rest/search?{params}")
+        records = (((data or {}).get("resultList") or {}).get("result") or []) if isinstance(data, dict) else []
+        return [europe_pmc_candidate(record) for record in records if isinstance(record, dict)]
+
+
+def europe_pmc_candidate(record: dict[str, Any]) -> RetrievedCandidate:
+    doi = normalize_doi(record.get("doi") or "")
+    pmid = normalize_pmid(record.get("pmid") or "")
+    pmcid = normalize_pmcid(record.get("pmcid") or "")
+    source_label = clean_text(record.get("source") or "Europe PMC")
+    title = clean_text(record.get("title") or "")
+    journal = clean_text(record.get("journalTitle") or record.get("bookOrReportDetails") or "")
+    landing_url = europe_pmc_fulltext_url(record)
+    if not landing_url:
+        if record.get("id") and record.get("source"):
+            landing_url = f"https://europepmc.org/article/{urllib.parse.quote(str(record.get('source'))).upper()}/{urllib.parse.quote(str(record.get('id')))}"
+        elif doi:
+            landing_url = f"https://doi.org/{doi}"
+    identifiers = {key: value for key, value in {"doi": doi, "pmid": pmid, "pmcid": pmcid}.items() if value}
+    creators = europe_pmc_authors(record.get("authorString"))
+    fields = {
+        "title": title,
+        "date": clean_text(record.get("firstPublicationDate") or record.get("pubYear") or ""),
+        "DOI": doi,
+        "url": landing_url,
+        "publicationTitle": journal,
+        "abstractNote": clean_html_text(record.get("abstractText") or ""),
+        "extra": "\n".join(
+            value
+            for value in [
+                f"Europe PMC ID: {clean_text(record.get('id') or '')}",
+                f"PMID: {pmid}" if pmid else "",
+                f"PMCID: {pmcid}" if pmcid else "",
+                f"Cited by: {clean_text(record.get('citedByCount') or '')}" if record.get("citedByCount") is not None else "",
+            ]
+            if value
+        ),
+    }
+    evidence = ["Europe PMC metadata"]
+    if identifiers:
+        evidence.append("Strong identifier")
+    item = ImportedItem(
+        item_type="preprint" if "preprint" in clean_text(record.get("pubType") or "").casefold() else "journalArticle",
+        fields={key: value for key, value in fields.items() if value},
+        creators=creators,
+        tags=europe_pmc_list(record.get("meshHeadingList")),
+        identifiers=identifiers,
+        source="Europe PMC",
+    )
+    return RetrievedCandidate(
+        source="europepmc",
+        external_id=pmid or pmcid or doi or clean_text(record.get("id") or title),
+        item=item,
+        raw={"id": record.get("id"), "source": source_label, "cited_by_count": record.get("citedByCount")},
+        confidence=0.88 if identifiers else 0.66,
+        evidence=evidence,
+        landing_url=landing_url,
+    )
+
+
+def europe_pmc_authors(value: Any) -> list[ImportedCreator]:
+    text = clean_text(value)
+    if not text:
+        return []
+    return [creator for creator in (name_parts(part) for part in re.split(r"\s*,\s*|\s+and\s+", text) if clean_text(part)) if creator.last_name][:24]
+
+
+def europe_pmc_fulltext_url(record: dict[str, Any]) -> str:
+    container = record.get("fullTextUrlList")
+    if not isinstance(container, dict):
+        return ""
+    values = container.get("fullTextUrl")
+    if isinstance(values, dict):
+        values = [values]
+    if not isinstance(values, list):
+        return ""
+    for item in values:
+        if isinstance(item, dict) and clean_text(item.get("url")):
+            return clean_text(item.get("url"))
+    return ""
+
+
+def europe_pmc_list(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        value = value.get("meshHeading") or value.get("items")
+    if not isinstance(value, list):
+        return []
+    tags: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            text = clean_text(item.get("descriptorName") or item.get("term") or item.get("name") or "")
+        else:
+            text = clean_text(item)
+        if text and text not in tags:
+            tags.append(text)
+    return tags[:12]
+
+
+class DBLPProvider:
+    name = "dblp"
+    timeout_seconds = 15
+    rate_limit_seconds = 0.5
+    rate_limit_note = "DBLP public publication search API; useful for computer science papers and venues."
+
+    def __init__(self, get_json: JsonFetcher = _http_get_json) -> None:
+        self.get_json = get_json
+
+    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+        clean_query = clean_text(query)
+        if not clean_query:
+            raise RetrievalError("Search query cannot be empty.")
+        rows = max(1, min(int(limit or 10), 100))
+        params = urllib.parse.urlencode({"q": clean_query, "format": "json", "h": rows})
+        data = self.get_json(f"https://dblp.org/search/publ/api?{params}")
+        hits = ((((data or {}).get("result") or {}).get("hits") or {}).get("hit") or []) if isinstance(data, dict) else []
+        return [dblp_candidate(hit.get("info") or hit) for hit in hits if isinstance(hit, dict)]
+
+
+def dblp_candidate(info: dict[str, Any]) -> RetrievedCandidate:
+    title = clean_html_text(info.get("title") or "")
+    doi = normalize_doi(info.get("doi") or "")
+    landing_url = clean_text(info.get("url") or info.get("ee") or (f"https://doi.org/{doi}" if doi else ""))
+    venue = clean_text(info.get("venue") or "")
+    year = clean_text(info.get("year") or "")
+    creators = dblp_authors((info.get("authors") or {}).get("author") if isinstance(info.get("authors"), dict) else info.get("authors"))
+    fields = {
+        "title": title,
+        "date": year,
+        "DOI": doi,
+        "url": landing_url,
+        "publicationTitle": venue,
+        "pages": clean_text(info.get("pages") or ""),
+        "volume": clean_text(info.get("volume") or ""),
+        "extra": f"DBLP key: {clean_text(info.get('key') or '')}" if info.get("key") else "",
+    }
+    item_type = "conferencePaper" if clean_text(info.get("type") or "").casefold() in {"conference", "inproceedings"} else "journalArticle"
+    item = ImportedItem(
+        item_type=item_type,
+        fields={key: value for key, value in fields.items() if value},
+        creators=creators,
+        tags=[],
+        identifiers={"doi": doi} if doi else {},
+        source="DBLP",
+    )
+    return RetrievedCandidate(
+        source="dblp",
+        external_id=clean_text(info.get("key") or doi or landing_url or title),
+        item=item,
+        raw={"key": info.get("key"), "type": info.get("type"), "venue": venue},
+        confidence=0.86 if landing_url or doi else 0.62,
+        evidence=["DBLP metadata", "DOI"] if doi else ["DBLP metadata"],
+        landing_url=landing_url,
+    )
+
+
+def dblp_authors(value: Any) -> list[ImportedCreator]:
+    values = value if isinstance(value, list) else [value] if value else []
+    creators: list[ImportedCreator] = []
+    for raw in values:
+        name = clean_text(raw.get("text") or raw.get("#text") or raw.get("name") or raw) if isinstance(raw, dict) else clean_text(raw)
+        if name:
+            creators.append(name_parts(name))
+    return [creator for creator in creators if creator.last_name][:24]
+
+
+class OpenReviewProvider:
+    name = "openreview"
+    timeout_seconds = 15
+    rate_limit_seconds = 0.5
+    rate_limit_note = "OpenReview API; useful for papers, reviews and venue submissions."
+
+    def __init__(self, get_json: JsonFetcher = _http_get_json) -> None:
+        self.get_json = get_json
+
+    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+        clean_query = clean_text(query)
+        if not clean_query:
+            raise RetrievalError("Search query cannot be empty.")
+        rows = max(1, min(int(limit or 10), 50))
+        params = urllib.parse.urlencode({"term": clean_query, "limit": rows, "content": "title,abstract,authors,venue,year"})
+        data = self.get_json(f"https://api2.openreview.net/notes/search?{params}")
+        records = openreview_records(data)
+        return [openreview_candidate(record) for record in records[:rows] if isinstance(record, dict)]
+
+
+def openreview_records(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, dict):
+        for key in ("notes", "results", "data"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def openreview_content_value(content: dict[str, Any], key: str) -> Any:
+    value = content.get(key)
+    if isinstance(value, dict) and "value" in value:
+        return value.get("value")
+    return value
+
+
+def openreview_candidate(note: dict[str, Any]) -> RetrievedCandidate:
+    content = note.get("content") if isinstance(note.get("content"), dict) else {}
+    note_id = clean_text(note.get("id") or note.get("forum") or "")
+    title = clean_text(openreview_content_value(content, "title"))
+    abstract = clean_html_text(openreview_content_value(content, "abstract") or "")
+    authors_raw = openreview_content_value(content, "authors")
+    creators = [creator for creator in (name_parts(name) for name in openreview_string_list(authors_raw)) if creator.last_name][:24]
+    venue = clean_text(openreview_content_value(content, "venue") or openreview_content_value(content, "venueid") or "")
+    year = clean_text(openreview_content_value(content, "year") or openreview_year(note))
+    landing_url = f"https://openreview.net/forum?id={urllib.parse.quote(note_id)}" if note_id else ""
+    fields = {
+        "title": title,
+        "date": year,
+        "url": landing_url,
+        "publicationTitle": venue,
+        "abstractNote": abstract,
+        "repository": "OpenReview",
+    }
+    item = ImportedItem(
+        item_type="preprint",
+        fields={key: value for key, value in fields.items() if value},
+        creators=creators,
+        tags=openreview_string_list(openreview_content_value(content, "keywords")),
+        identifiers={},
+        source="OpenReview",
+    )
+    return RetrievedCandidate(
+        source="openreview",
+        external_id=note_id or title,
+        item=item,
+        raw={"id": note_id, "venue": venue, "invitations": note.get("invitations")},
+        confidence=0.78 if title else 0.58,
+        evidence=["OpenReview metadata"],
+        landing_url=landing_url,
+    )
+
+
+def openreview_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [clean_text(item) for item in value if clean_text(item)]
+    text = clean_text(value)
+    if not text:
+        return []
+    separator = ";" if ";" in text else ","
+    return [clean_text(item) for item in text.split(separator) if clean_text(item)]
+
+
+def openreview_year(note: dict[str, Any]) -> str:
+    for key in ("pdate", "cdate", "mdate"):
+        value = note.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            try:
+                return time.strftime("%Y", time.gmtime(value / 1000 if value > 100000000000 else value))
+            except (OverflowError, OSError, ValueError):
+                return ""
+    return ""
+
+
+class FigshareProvider:
+    name = "figshare"
+    timeout_seconds = 15
+    rate_limit_seconds = 0.5
+    rate_limit_note = "Figshare public API; useful for datasets, software, figures and research objects."
+
+    def __init__(self, get_json: JsonFetcher = _http_get_json) -> None:
+        self.get_json = get_json
+
+    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+        clean_query = clean_text(query)
+        if not clean_query:
+            raise RetrievalError("Search query cannot be empty.")
+        rows = max(1, min(int(limit or 10), 100))
+        params = urllib.parse.urlencode({"search_for": clean_query, "page_size": rows, "order": "published_date", "order_direction": "desc"})
+        data = self.get_json(f"https://api.figshare.com/v2/articles/search?{params}")
+        records = data if isinstance(data, list) else []
+        return [figshare_candidate(record) for record in records if isinstance(record, dict)]
+
+
+def figshare_candidate(record: dict[str, Any]) -> RetrievedCandidate:
+    title = clean_text(record.get("title") or "")
+    doi = normalize_doi(record.get("doi") or "")
+    landing_url = clean_text(record.get("url_public_api") or record.get("figshare_url") or record.get("url") or (f"https://doi.org/{doi}" if doi else ""))
+    type_name = clean_text(record.get("defined_type_name") or record.get("resource_type") or "")
+    item_type = "dataset" if "dataset" in type_name.casefold() or "figure" in type_name.casefold() else "document"
+    fields = {
+        "title": title,
+        "date": clean_text(record.get("published_date") or record.get("modified_date") or "")[:10],
+        "DOI": doi,
+        "url": landing_url,
+        "abstractNote": clean_html_text(record.get("description") or ""),
+        "publisher": "Figshare",
+        "extra": f"Figshare type: {type_name}" if type_name else "",
+    }
+    item = ImportedItem(
+        item_type=item_type,
+        fields={key: value for key, value in fields.items() if value},
+        creators=figshare_authors(record.get("authors")),
+        tags=figshare_tags(record.get("tags") or record.get("keywords")),
+        identifiers={"doi": doi} if doi else {},
+        source="Figshare",
+    )
+    return RetrievedCandidate(
+        source="figshare",
+        external_id=clean_text(record.get("id") or doi or landing_url or title),
+        item=item,
+        raw={"id": record.get("id"), "resource_type": "dataset", "type_name": type_name, "citation_count": record.get("citation_count")},
+        confidence=0.82 if doi or landing_url else 0.62,
+        evidence=["Figshare metadata"],
+        landing_url=landing_url,
+    )
+
+
+def figshare_authors(value: Any) -> list[ImportedCreator]:
+    if not isinstance(value, list):
+        return []
+    creators: list[ImportedCreator] = []
+    for author in value:
+        name = clean_text(author.get("full_name") or author.get("name") or author) if isinstance(author, dict) else clean_text(author)
+        if name:
+            creators.append(name_parts(name))
+    return [creator for creator in creators if creator.last_name][:24]
+
+
+def figshare_tags(value: Any) -> list[str]:
+    values = value if isinstance(value, list) else [value] if value else []
+    tags: list[str] = []
+    for raw in values:
+        text = clean_text(raw.get("name") or raw) if isinstance(raw, dict) else clean_text(raw)
+        if text and text not in tags:
+            tags.append(text)
+    return tags[:16]
+
+
+class OSFProvider:
+    name = "osf"
+    timeout_seconds = 15
+    rate_limit_seconds = 0.5
+    rate_limit_note = "OSF public search API; useful for projects, datasets, preregistrations and related artifacts."
+
+    def __init__(self, get_json: JsonFetcher = _http_get_json) -> None:
+        self.get_json = get_json
+
+    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+        clean_query = clean_text(query)
+        if not clean_query:
+            raise RetrievalError("Search query cannot be empty.")
+        rows = max(1, min(int(limit or 10), 50))
+        params = urllib.parse.urlencode({"q": clean_query, "page[size]": rows})
+        data = self.get_json(f"https://api.osf.io/v2/search/?{params}")
+        records = data.get("data") if isinstance(data, dict) else []
+        return [osf_candidate(record) for record in records or [] if isinstance(record, dict)]
+
+
+def osf_candidate(record: dict[str, Any]) -> RetrievedCandidate:
+    attrs = record.get("attributes") if isinstance(record.get("attributes"), dict) else record
+    links = record.get("links") if isinstance(record.get("links"), dict) else {}
+    title = clean_text(attrs.get("title") or attrs.get("name") or "")
+    landing_url = clean_text(links.get("html") or attrs.get("url") or "")
+    fields = {
+        "title": title,
+        "date": clean_text(attrs.get("date_modified") or attrs.get("date_created") or "")[:10],
+        "url": landing_url,
+        "abstractNote": clean_html_text(attrs.get("description") or attrs.get("summary") or ""),
+        "publisher": "OSF",
+        "repository": "OSF",
+    }
+    item = ImportedItem(
+        item_type="dataset",
+        fields={key: value for key, value in fields.items() if value},
+        creators=[],
+        tags=figshare_tags(attrs.get("tags")),
+        identifiers={},
+        source="OSF",
+    )
+    return RetrievedCandidate(
+        source="osf",
+        external_id=clean_text(record.get("id") or landing_url or title),
+        item=item,
+        raw={"id": record.get("id"), "resource_type": "dataset", "category": attrs.get("category")},
+        confidence=0.72 if title else 0.55,
+        evidence=["OSF metadata"],
+        landing_url=landing_url,
+    )
+
+
+class OpenMLProvider:
+    name = "openml"
+    timeout_seconds = 15
+    rate_limit_seconds = 0.5
+    rate_limit_note = "OpenML public API; useful for machine-learning datasets, tasks and benchmarks."
+
+    def __init__(self, get_json: JsonFetcher = _http_get_json) -> None:
+        self.get_json = get_json
+
+    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+        clean_query = clean_text(query)
+        if not clean_query:
+            raise RetrievalError("Search query cannot be empty.")
+        rows = max(1, min(int(limit or 10), 100))
+        encoded = urllib.parse.quote(clean_query, safe="")
+        data = self.get_json(f"https://www.openml.org/api/v1/json/data/list/data_name/{encoded}/limit/{rows}")
+        records = (((data or {}).get("data") or {}).get("datasets") or {}).get("dataset") if isinstance(data, dict) else []
+        if isinstance(records, dict):
+            records = [records]
+        return [openml_candidate(record) for record in records or [] if isinstance(record, dict)]
+
+
+def openml_candidate(record: dict[str, Any]) -> RetrievedCandidate:
+    did = clean_text(record.get("did") or record.get("id") or "")
+    name = clean_text(record.get("name") or "")
+    landing_url = f"https://www.openml.org/d/{urllib.parse.quote(did)}" if did else clean_text(record.get("url") or "")
+    fields = {
+        "title": name,
+        "date": clean_text(record.get("date") or ""),
+        "url": landing_url,
+        "abstractNote": clean_text(record.get("description") or record.get("format") or ""),
+        "publisher": "OpenML",
+        "repository": "OpenML",
+        "extra": "\n".join(
+            value
+            for value in [
+                f"OpenML ID: {did}" if did else "",
+                f"Version: {clean_text(record.get('version') or '')}" if record.get("version") else "",
+                f"Instances: {clean_text(record.get('NumberOfInstances') or record.get('number_of_instances') or '')}" if record.get("NumberOfInstances") or record.get("number_of_instances") else "",
+                f"Features: {clean_text(record.get('NumberOfFeatures') or record.get('number_of_features') or '')}" if record.get("NumberOfFeatures") or record.get("number_of_features") else "",
+            ]
+            if value
+        ),
+    }
+    item = ImportedItem(
+        item_type="dataset",
+        fields={key: value for key, value in fields.items() if value},
+        creators=[],
+        tags=figshare_tags(record.get("tag")),
+        identifiers={},
+        source="OpenML",
+    )
+    return RetrievedCandidate(
+        source="openml",
+        external_id=did or name or landing_url,
+        item=item,
+        raw={"id": did, "resource_type": "benchmark" if record.get("task_id") else "dataset", "downloads": record.get("NumberOfDownloads")},
+        confidence=0.78 if did else 0.58,
+        evidence=["OpenML metadata"],
+        landing_url=landing_url,
+    )
+
+
+class GitLabProvider:
+    name = "gitlab"
+    api_key_env = GITLAB_TOKEN_ENV
+    optional_api_key = True
+    timeout_seconds = 8
+    rate_limit_seconds = 1.0
+    rate_limit_note = "GitLab project search works without a token; configure GITLAB_TOKEN to improve rate limits."
+
+    def __init__(self, api_key: str = "", get_json: JsonFetcher | None = None) -> None:
+        self.api_key = clean_text(api_key)
+        self.get_json = get_json
+
+    def token(self) -> str:
+        return self.api_key or clean_text(os.environ.get(self.api_key_env))
+
+    def is_configured(self) -> bool:
+        return bool(self.token())
+
+    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+        clean_query = clean_text(query)
+        if not clean_query:
+            raise RetrievalError("Search query cannot be empty.")
+        rows = max(1, min(int(limit or 10), 50))
+        params = urllib.parse.urlencode({"search": clean_query, "per_page": rows, "order_by": "star_count", "sort": "desc", "simple": "true"})
+        data = self.fetch_json(f"https://gitlab.com/api/v4/projects?{params}")
+        records = data if isinstance(data, list) else []
+        return [gitlab_candidate(record) for record in records if isinstance(record, dict)]
+
+    def fetch_json(self, url: str) -> Any:
+        if self.get_json:
+            return self.get_json(url)
+        headers = {}
+        token = self.token()
+        if token:
+            headers["PRIVATE-TOKEN"] = token
+        return _http_get_json(url, timeout=provider_timeout_seconds(self), headers=headers)
+
+
+def gitlab_candidate(project: dict[str, Any]) -> RetrievedCandidate:
+    name = clean_text(project.get("path_with_namespace") or project.get("name_with_namespace") or project.get("name") or "")
+    description = clean_text(project.get("description") or "")
+    landing_url = clean_text(project.get("web_url") or project.get("http_url_to_repo") or "")
+    stars = project.get("star_count")
+    forks = project.get("forks_count")
+    license_value = clean_text((project.get("license") or {}).get("key") if isinstance(project.get("license"), dict) else project.get("license") or "")
+    updated_at = clean_text(project.get("last_activity_at") or project.get("updated_at") or "")[:10]
+    fields = {
+        "title": name,
+        "abstractNote": description,
+        "url": landing_url,
+        "repository": "GitLab",
+        "date": updated_at,
+        "extra": "\n".join(
+            value
+            for value in [
+                f"GitLab Project: {name}" if name else "",
+                f"Stars: {clean_text(stars)}" if stars is not None else "",
+                f"Forks: {clean_text(forks)}" if forks is not None else "",
+                f"License: {license_value}" if license_value else "",
+            ]
+            if value
+        ),
+    }
+    item = ImportedItem(
+        item_type="computerProgram",
+        fields={key: value for key, value in fields.items() if value},
+        creators=[],
+        tags=figshare_tags(project.get("tag_list") or project.get("topics")),
+        identifiers={},
+        source="GitLab",
+    )
+    return RetrievedCandidate(
+        source="gitlab",
+        external_id=clean_text(project.get("id") or name or landing_url),
+        item=item,
+        raw={"id": project.get("id"), "stars": stars, "forks": forks, "license": license_value, "resource_type": "code"},
+        confidence=0.72 if description else 0.62,
+        evidence=["GitLab project metadata"],
+        landing_url=landing_url,
+    )
+
+
+class BraveSearchProvider:
+    name = "brave"
+    api_key_env = BRAVE_SEARCH_API_KEY_ENV
+    timeout_seconds = 8
+    rate_limit_seconds = 1.0
+    rate_limit_note = "Brave Search API requires BRAVE_SEARCH_API_KEY and returns related websites."
+
+    def __init__(
+        self,
+        api_key: str = "",
+        get_json: JsonFetcher | None = None,
+        get_text: TextFetcher | None = _http_get_text,
+    ) -> None:
+        self.api_key = clean_text(api_key)
+        self.get_json = get_json
+        self.get_text = get_text
+
+    def token(self) -> str:
+        return self.api_key or clean_text(os.environ.get(self.api_key_env))
+
+    def is_configured(self) -> bool:
+        return bool(self.token())
+
+    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+        clean_query = clean_text(query)
+        if not clean_query:
+            raise RetrievalError("Search query cannot be empty.")
+        token = self.token()
+        if not token:
+            raise RetrievalError(f"Brave Search requires {self.api_key_env}.")
+        rows = max(1, min(int(limit or 10), 20))
+        params = urllib.parse.urlencode({"q": clean_query, "count": rows})
+        data = self.fetch_json(f"https://api.search.brave.com/res/v1/web/search?{params}", token)
+        records = (((data or {}).get("web") or {}).get("results") or []) if isinstance(data, dict) else []
+        return [brave_candidate(record, self.get_text) for record in records if isinstance(record, dict)]
+
+    def fetch_json(self, url: str, token: str) -> Any:
+        if self.get_json:
+            return self.get_json(url)
+        return _http_get_json(
+            url,
+            timeout=provider_timeout_seconds(self),
+            headers={"Accept": "application/json", "X-Subscription-Token": token},
+        )
+
+
+def brave_candidate(record: dict[str, Any], get_text: TextFetcher | None = _http_get_text) -> RetrievedCandidate:
+    landing_url = clean_text(record.get("url") or "")
+    title = clean_html_text(record.get("title") or "")
+    description = clean_html_text(record.get("description") or record.get("snippet") or "")
+    metadata = {"title": title, "description": description, "source": "brave"}
+    if landing_url and get_text is not None:
+        try:
+            fetched = safe_webpage_metadata(landing_url, get_text=get_text)
+            metadata.update({key: value for key, value in fetched.items() if value})
+        except RetrievalError as exc:
+            metadata["fallback_reason"] = str(exc)
+    final_title = clean_text(metadata.get("title") or title)
+    final_description = clean_text(metadata.get("description") or description)
+    fields = {
+        "title": final_title,
+        "abstractNote": final_description,
+        "url": landing_url,
+        "websiteTitle": clean_text(record.get("profile", {}).get("name") if isinstance(record.get("profile"), dict) else ""),
+        "date": clean_text(record.get("age") or "")[:10],
+        "extra": "Brave Search result",
+    }
+    item = ImportedItem(
+        item_type="webpage",
+        fields={key: value for key, value in fields.items() if value},
+        creators=[],
+        tags=[],
+        identifiers={},
+        source="Brave Search",
+    )
+    return RetrievedCandidate(
+        source="brave",
+        external_id=landing_url or final_title,
+        item=item,
+        raw={"resource_type": "website", "webpage_metadata": metadata, "rank": record.get("rank")},
+        confidence=0.62 if landing_url else 0.45,
+        evidence=["Brave Search result"],
+        landing_url=landing_url,
+    )
+
+
+def safe_webpage_metadata(url: str, *, get_text: TextFetcher = _http_get_text, timeout_seconds: int = 4) -> dict[str, str]:
+    safe_url = validate_safe_webpage_url(url)
+    try:
+        text = get_text(safe_url) if get_text is not _http_get_text else _http_get_text(safe_url, timeout=timeout_seconds)
+    except Exception as exc:  # noqa: BLE001 - metadata fetch is optional
+        raise RetrievalError(f"webpage metadata fetch failed: {exc}") from exc
+    return extract_webpage_metadata(text)
+
+
+def validate_safe_webpage_url(url: str) -> str:
+    return validate_safe_http_url(url, label="webpage metadata")
+
+
+def extract_webpage_metadata(text: str) -> dict[str, str]:
+    limited = str(text or "")[:200000]
+    title = regex_first(limited, r"<title[^>]*>(.*?)</title>")
+    description = regex_meta_content(limited, "description") or regex_meta_property(limited, "og:description")
+    og_title = regex_meta_property(limited, "og:title")
+    site_name = regex_meta_property(limited, "og:site_name")
+    return {
+        "title": clean_html_text(html.unescape(og_title or title)),
+        "description": clean_html_text(html.unescape(description)),
+        "site_name": clean_html_text(html.unescape(site_name)),
+    }
+
+
+def regex_first(text: str, pattern: str) -> str:
+    match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    return match.group(1) if match else ""
+
+
+def regex_meta_content(text: str, name: str) -> str:
+    escaped = re.escape(name)
+    patterns = [
+        rf"<meta[^>]+name=[\"']{escaped}[\"'][^>]+content=[\"'](.*?)[\"'][^>]*>",
+        rf"<meta[^>]+content=[\"'](.*?)[\"'][^>]+name=[\"']{escaped}[\"'][^>]*>",
+    ]
+    for pattern in patterns:
+        value = regex_first(text, pattern)
+        if value:
+            return value
+    return ""
+
+
+def regex_meta_property(text: str, prop: str) -> str:
+    escaped = re.escape(prop)
+    patterns = [
+        rf"<meta[^>]+property=[\"']{escaped}[\"'][^>]+content=[\"'](.*?)[\"'][^>]*>",
+        rf"<meta[^>]+content=[\"'](.*?)[\"'][^>]+property=[\"']{escaped}[\"'][^>]*>",
+    ]
+    for pattern in patterns:
+        value = regex_first(text, pattern)
+        if value:
+            return value
+    return ""
+
+
+class CustomSourceProvider:
+    timeout_seconds = 10
+    rate_limit_seconds = 0.0
+    rate_limit_note = "Library-level custom source instance."
+
+    def __init__(self, source: dict[str, Any], *, get_json: JsonFetcher | None = None) -> None:
+        self.source = source
+        self.source_id = clean_text(source.get("source_id") or source.get("id") or "")
+        self.name = self.source_id
+        self.label = clean_text(source.get("name") or self.source_id or "Custom Source")
+        self.kind = normalize_custom_source_kind(source.get("kind"))
+        self.config = source.get("config") if isinstance(source.get("config"), dict) else {}
+        self.enabled = bool(source.get("enabled", True))
+        self.get_json = get_json
+
+    def is_configured(self) -> bool:
+        return self.enabled and not self.configuration_error()
+
+    def configuration_error(self) -> str:
+        if not self.enabled:
+            return "Custom source is disabled."
+        try:
+            provider = self.delegate()
+            custom_error = getattr(provider, "configuration_error", None)
+            if callable(custom_error):
+                return clean_text(custom_error())
+        except RetrievalError as exc:
+            return str(exc)
+        return ""
+
+    def delegate(self) -> MetadataProvider:
+        if self.kind == "localfile":
+            paths = self.config.get("paths") if isinstance(self.config.get("paths"), list) else split_local_path_config(clean_text(self.config.get("paths") or ""))
+            return LocalFileProvider(paths=paths, field_map=self.config.get("field_map") if isinstance(self.config.get("field_map"), dict) else None)
+        if self.kind == "httpjson":
+            return HttpJsonProvider(config=self.config, get_json=self.get_json)
+        if self.kind == "manifest":
+            return ManifestProvider(config=self.config, get_json=self.get_json)
+        if self.kind == "sqlite":
+            return SQLiteProvider(config=self.config)
+        raise RetrievalError(f"Unsupported custom source kind: {self.kind}")
+
+    def search(self, query: str, limit: int = 10) -> list[RetrievedCandidate]:
+        candidates = self.delegate().search(query, limit)
+        for candidate in candidates:
+            candidate.source = self.source_id
+            candidate.also_seen_in = [value for value in candidate.also_seen_in if value != self.source_id]
+            candidate.raw = dict(candidate.raw or {})
+            candidate.raw.update(
+                {
+                    "source_instance_id": self.source_id,
+                    "custom_source_id": self.source_id,
+                    "source_kind": self.kind,
+                    "source_label": self.label,
+                }
+            )
+            candidate.item.source = self.label
+            candidate.evidence = list(dict.fromkeys([f"Custom source: {self.label}", *candidate.evidence]))
+        return candidates
+
+
+def normalize_custom_source_kind(value: Any) -> str:
+    text = clean_text(value).casefold().replace("_", "").replace("-", "")
+    aliases = {
+        "httpjson": "httpjson",
+        "http": "httpjson",
+        "json": "httpjson",
+        "localfile": "localfile",
+        "file": "localfile",
+        "csvjsonl": "localfile",
+        "manifest": "manifest",
+        "objectmanifest": "manifest",
+        "sqlite": "sqlite",
+    }
+    return aliases.get(text, "httpjson")
+
+
 class LocalFileProvider:
     name = "localfile"
     api_key_env = "WEB_LIBRARY_RETRIEVAL_LOCAL_PATHS"
@@ -2283,6 +3072,16 @@ class HttpJsonProvider:
             if not config.get("url_template"):
                 return f"需要配置 {HTTP_JSON_CONFIG_ENV}"
             http_json_headers(config)
+            validate_safe_http_url(
+                http_json_search_url(
+                    clean_text(config.get("url_template")),
+                    HEALTH_CHECK_QUERY,
+                    1,
+                    page=http_json_page_start(config),
+                    offset=0,
+                ),
+                label="HTTP JSON",
+            )
         except RetrievalError as exc:
             return str(exc)
         return ""
@@ -2310,6 +3109,7 @@ class HttpJsonProvider:
                 page=page_start + page_index,
                 offset=page_index * rows,
             )
+            url = validate_safe_http_url(url, label="HTTP JSON")
             if self.get_json is None:
                 data = _http_get_json(
                     url,
@@ -3866,6 +4666,25 @@ def http_json_search_url(template: str, query: str, limit: int, *, page: int = 1
         raise RetrievalError(f"HTTP JSON url_template 不支持占位符：{name}") from exc
 
 
+def validate_safe_http_url(url: str, *, label: str = "HTTP") -> str:
+    clean_url = clean_text(url)
+    parsed = urllib.parse.urlparse(clean_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise RetrievalError(f"{label} 仅支持 http/https URL。")
+    host = clean_text(parsed.hostname or "").casefold()
+    if not host:
+        raise RetrievalError(f"{label} URL 缺少 host。")
+    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost"):
+        raise RetrievalError(f"{label} 阻止访问本机地址。")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+        raise RetrievalError(f"{label} 阻止访问私网地址。")
+    return clean_url
+
+
 def http_json_template_supports_pagination(template: str) -> bool:
     return any(token in str(template or "") for token in ("{page}", "{offset}"))
 
@@ -3965,6 +4784,7 @@ def http_json_sample_items(
     clean_query = clean_text(query) or HEALTH_CHECK_QUERY
     sample_limit = max(1, min(int(sample_size or 3), 10))
     url = http_json_search_url(template, clean_query, sample_limit, page=http_json_page_start(config), offset=0)
+    url = validate_safe_http_url(url, label="HTTP JSON")
     if get_json is None:
         provider = HttpJsonProvider(config=config)
         payload = _http_get_json(
@@ -4431,6 +5251,7 @@ def manifest_source(config: dict[str, Any]) -> tuple[str, str]:
 def manifest_payload(config: dict[str, Any], get_json: JsonFetcher | None = None) -> Any:
     source_kind, value = manifest_source(config)
     if source_kind == "url":
+        value = validate_safe_http_url(value, label="Object Manifest")
         if get_json is not None:
             return get_json(value)
         return _http_get_json(value, headers=http_json_headers(config))
@@ -4641,8 +5462,11 @@ def default_provider_registry(
     github_token: str = "",
     huggingface_token: str = "",
     zenodo_token: str = "",
+    gitlab_token: str = "",
+    brave_search_token: str = "",
+    custom_sources: list[dict[str, Any]] | None = None,
 ) -> dict[str, MetadataProvider]:
-    return {
+    registry: dict[str, MetadataProvider] = {
         "crossref": CrossrefProvider(),
         "arxiv": ArxivProvider(),
         "pubmed": PubMedProvider(),
@@ -4651,9 +5475,17 @@ def default_provider_registry(
         "openalex": OpenAlexProvider(),
         "semanticscholar": SemanticScholarProvider(),
         "datacite": DataCiteProvider(),
+        "europepmc": EuropePMCProvider(),
+        "dblp": DBLPProvider(),
+        "openreview": OpenReviewProvider(),
+        "figshare": FigshareProvider(),
+        "osf": OSFProvider(),
+        "openml": OpenMLProvider(),
         "github": GitHubProvider(api_key=github_token),
+        "gitlab": GitLabProvider(api_key=gitlab_token),
         "huggingface": HuggingFaceProvider(api_key=huggingface_token),
         "zenodo": ZenodoProvider(api_key=zenodo_token),
+        "brave": BraveSearchProvider(api_key=brave_search_token),
         "openlibrary": OpenLibraryProvider(),
         "ads": ADSProvider(),
         "localfile": LocalFileProvider(paths=local_file_paths, field_map=local_file_field_map),
@@ -4661,6 +5493,13 @@ def default_provider_registry(
         "sqlite": SQLiteProvider(config=sqlite_config_value),
         "manifest": ManifestProvider(config=manifest_config_value),
     }
+    for source in custom_sources or []:
+        if not isinstance(source, dict) or not source.get("enabled", True):
+            continue
+        provider = CustomSourceProvider(source)
+        if provider.source_id:
+            registry[provider.source_id] = provider
+    return registry
 
 
 def source_static_status(name: str, provider: MetadataProvider, label: str) -> dict[str, Any]:
@@ -4673,13 +5512,18 @@ def source_static_status(name: str, provider: MetadataProvider, label: str) -> d
     configured = bool(custom_configured()) if callable(custom_configured) else bool(config_key and os.environ.get(config_key, "").strip())
     if configuration_error:
         configured = False
-    available = not requires_config or configured
+    available = (not requires_config or configured) and not configuration_error
     message = "可用" if available else configuration_error or f"需要配置 {config_key}"
     if optional_config and not configured:
         message = f"可用；可配置 {config_key} 提升限额"
     return {
         "name": name,
         "label": label,
+        "custom": isinstance(provider, CustomSourceProvider),
+        "source_instance_id": getattr(provider, "source_id", "") if isinstance(provider, CustomSourceProvider) else "",
+        "kind": getattr(provider, "kind", ""),
+        "resource_types": source_resource_types(name, provider),
+        "source_category": source_category_for_status(name, provider),
         "available": available,
         "requires_config": requires_config,
         "config_key": config_key,
@@ -4697,6 +5541,64 @@ def source_static_status(name: str, provider: MetadataProvider, label: str) -> d
             optional_config=optional_config,
         ),
     }
+
+
+def source_resource_types(name: str, provider: MetadataProvider) -> list[str]:
+    if isinstance(provider, CustomSourceProvider):
+        configured = provider.config.get("resource_types") if isinstance(provider.config, dict) else []
+        values = [normalized_material_type(item) for item in configured or [] if normalized_material_type(item)]
+        if values:
+            return list(dict.fromkeys(values))
+        if provider.kind == "localfile":
+            return ["paper", "code", "model", "dataset", "benchmark", "website"]
+        if provider.kind == "httpjson":
+            return ["paper", "dataset", "website"]
+        if provider.kind == "manifest":
+            return ["paper", "code", "model", "dataset", "benchmark", "website"]
+        return ["paper"]
+    mapping = {
+        "crossref": ["paper"],
+        "arxiv": ["paper"],
+        "pubmed": ["paper"],
+        "biorxiv": ["paper"],
+        "medrxiv": ["paper"],
+        "openalex": ["paper"],
+        "semanticscholar": ["paper"],
+        "datacite": ["paper", "code", "dataset"],
+        "europepmc": ["paper"],
+        "dblp": ["paper"],
+        "openreview": ["paper"],
+        "figshare": ["dataset", "code"],
+        "osf": ["dataset", "paper"],
+        "openml": ["dataset", "benchmark"],
+        "github": ["code"],
+        "gitlab": ["code"],
+        "huggingface": ["model", "dataset"],
+        "zenodo": ["paper", "code", "dataset"],
+        "brave": ["website"],
+        "openlibrary": ["paper"],
+        "ads": ["paper"],
+        "localfile": ["paper", "code", "model", "dataset", "benchmark", "website"],
+        "httpjson": ["paper", "dataset", "website"],
+        "sqlite": ["paper", "dataset"],
+        "manifest": ["paper", "code", "model", "dataset", "benchmark", "website"],
+    }
+    return mapping.get(name, ["paper"])
+
+
+def source_category_for_status(name: str, provider: MetadataProvider) -> str:
+    if isinstance(provider, CustomSourceProvider):
+        return "custom"
+    types = source_resource_types(name, provider)
+    if "website" in types:
+        return "website"
+    if "code" in types and len(types) == 1:
+        return "code"
+    if "model" in types:
+        return "model"
+    if "dataset" in types and "paper" not in types:
+        return "dataset"
+    return "paper"
 
 
 def source_health_checks(
@@ -4748,9 +5650,17 @@ def retrieval_source_statuses(
         "openalex": "OpenAlex",
         "semanticscholar": "Semantic Scholar",
         "datacite": "DataCite",
+        "europepmc": "Europe PMC",
+        "dblp": "DBLP",
+        "openreview": "OpenReview",
+        "figshare": "Figshare",
+        "osf": "OSF",
+        "openml": "OpenML",
         "github": "GitHub",
+        "gitlab": "GitLab",
         "huggingface": "HuggingFace",
         "zenodo": "Zenodo",
+        "brave": "Brave Search",
         "openlibrary": "OpenLibrary",
         "ads": "NASA ADS",
         "localfile": "Local CSV/JSONL",
@@ -4758,7 +5668,10 @@ def retrieval_source_statuses(
         "sqlite": "SQLite",
         "manifest": "Object Manifest",
     }
-    statuses = [source_static_status(name, provider, labels.get(name, name)) for name, provider in provider_registry.items()]
+    statuses = [
+        source_static_status(name, provider, getattr(provider, "label", "") or labels.get(name, name))
+        for name, provider in provider_registry.items()
+    ]
     if include_health:
         checks = source_health_checks(provider_registry, statuses, query=health_query)
         for status in statuses:

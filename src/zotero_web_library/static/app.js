@@ -97,7 +97,7 @@ const state = {
   addItemResults: [],
   addItemBusy: false,
   retrievalQuery: "",
-  retrievalSources: new Set(["crossref", "arxiv", "pubmed", "semanticscholar", "datacite", "github", "huggingface", "zenodo"]),
+  retrievalSources: new Set(["crossref", "arxiv", "pubmed", "semanticscholar", "datacite", "europepmc", "dblp", "openreview", "figshare", "osf", "openml", "github", "gitlab", "huggingface", "zenodo", "brave"]),
   retrievalCandidates: [],
   retrievalSelectedKeys: new Set(),
   retrievalStats: null,
@@ -106,7 +106,7 @@ const state = {
   retrievalGuidedJob: null,
   retrievalGuidedMode: "quality",
   retrievalGuidedTimePreset: "10y",
-  retrievalGuidedMaterialTypes: new Set(["paper", "code", "data"]),
+  retrievalGuidedMaterialTypes: new Set(["paper", "code", "model", "dataset", "benchmark", "website"]),
   retrievalGuidedCoverage: null,
   retrievalGuidedBusy: false,
   retrievalAiEvaluationSummary: null,
@@ -121,6 +121,10 @@ const state = {
   retrievalSummaryBusy: false,
   retrievalSummaryMessage: "",
   retrievalSourceInfo: {},
+  retrievalCustomSources: [],
+  retrievalCustomSourceDraft: "",
+  retrievalCustomSourceBusy: false,
+  retrievalCustomSourceMessage: "",
   retrievalSourcesBusy: false,
   retrievalSourcesChecking: false,
   retrievalSourcesMessage: "",
@@ -329,6 +333,8 @@ function renderApiConfigPage() {
   const github = config.code_sources?.github || {};
   const huggingface = config.code_sources?.huggingface || {};
   const zenodo = config.code_sources?.zenodo || {};
+  const gitlab = config.code_sources?.gitlab || {};
+  const brave = config.code_sources?.brave || {};
   const mineru = config.mineru || {};
   const apiKeyValue = state.apiConfigShowSecrets ? String(model.api_key || "") : "";
   const apiKeyPlaceholder = model.configured
@@ -339,8 +345,10 @@ function renderApiConfigPage() {
     : "未配置";
   const serviceRows = [
     ["github", "GitHub Token", "github_token", github, "公开仓库搜索；可选，未填也能搜公开资源"],
+    ["gitlab", "GitLab Token", "gitlab_token", gitlab, "GitLab 项目搜索；可选"],
     ["huggingface", "HuggingFace Token", "huggingface_token", huggingface, "Hub models / datasets；可选"],
     ["zenodo", "Zenodo Token", "zenodo_token", zenodo, "公开 records；可选"],
+    ["brave", "Brave Search API Key", "brave_search_token", brave, "相关网址搜索；必填"],
   ];
   host.innerHTML = `
     <section class="api-config-card">
@@ -453,8 +461,10 @@ async function saveApiConfig(event) {
     },
     code_sources: {
       github_token: apiConfigSecretPayload(formData, "github_token", code.github?.configured, code.github?.source),
+      gitlab_token: apiConfigSecretPayload(formData, "gitlab_token", code.gitlab?.configured, code.gitlab?.source),
       huggingface_token: apiConfigSecretPayload(formData, "huggingface_token", code.huggingface?.configured, code.huggingface?.source),
       zenodo_token: apiConfigSecretPayload(formData, "zenodo_token", code.zenodo?.configured, code.zenodo?.source),
+      brave_search_token: apiConfigSecretPayload(formData, "brave_search_token", code.brave?.configured, code.brave?.source),
     },
   };
   try {
@@ -2367,6 +2377,9 @@ const SIMPLE_RETRIEVAL_SOURCE_CATEGORIES = [
       ["crossref", "Crossref", "论文 DOI"],
       ["semanticscholar", "Semantic Scholar", "论文补充"],
       ["openalex", "OpenAlex", "开放学术图谱"],
+      ["europepmc", "Europe PMC", "生医论文"],
+      ["dblp", "DBLP", "计算机论文"],
+      ["openreview", "OpenReview", "评审/投稿"],
     ],
   },
   {
@@ -2398,8 +2411,12 @@ const SIMPLE_RETRIEVAL_SOURCE_CATEGORIES = [
     sources: [
       ["datacite", "DataCite", "数据/软件 DOI"],
       ["github", "GitHub", "代码仓库"],
+      ["gitlab", "GitLab", "代码仓库"],
       ["huggingface", "HuggingFace", "模型/数据集"],
       ["zenodo", "Zenodo", "软件/数据/报告 DOI"],
+      ["figshare", "Figshare", "数据/对象"],
+      ["osf", "OSF", "项目/数据"],
+      ["openml", "OpenML", "数据/基准"],
       ["manifest", "Manifest", "代码包/对象清单"],
     ],
   },
@@ -2415,6 +2432,15 @@ const SIMPLE_RETRIEVAL_SOURCE_CATEGORIES = [
     ],
   },
   {
+    title: "相关网址",
+    tag: "Web",
+    description: "项目主页、文档、榜单和相关网页。",
+    defaultOpen: false,
+    sources: [
+      ["brave", "Brave Search", "相关网址"],
+    ],
+  },
+  {
     title: "图书 / 其他资料",
     tag: "Books",
     description: "图书、章节或其他非论文资料。",
@@ -2424,6 +2450,25 @@ const SIMPLE_RETRIEVAL_SOURCE_CATEGORIES = [
     ],
   },
 ];
+
+function simpleRetrievalSourceCategories() {
+  const customSources = Array.isArray(state.retrievalCustomSources) ? state.retrievalCustomSources : [];
+  const customOptions = customSources.map((source) => {
+    const name = String(source.source_id || source.id || "");
+    return [name, source.name || name, `${source.kind || "custom"}${source.enabled === false ? " / 已停用" : ""}`];
+  }).filter(([name]) => name);
+  if (!customOptions.length) return SIMPLE_RETRIEVAL_SOURCE_CATEGORIES;
+  return [
+    ...SIMPLE_RETRIEVAL_SOURCE_CATEGORIES,
+    {
+      title: "自定义源",
+      tag: "Custom",
+      description: "文库级自定义 HTTP、文件或 Manifest 来源。",
+      defaultOpen: false,
+      sources: customOptions,
+    },
+  ];
+}
 
 function renderSimpleRetrievalSourceOption(name, fallbackLabel, hint) {
   const info = state.retrievalSourceInfo[name] || {};
@@ -2474,6 +2519,84 @@ function renderSimpleRetrievalSourceCategory(category) {
     </summary>
     ${renderSimpleRetrievalSourceGroup(category.sources)}
   </details>`;
+}
+
+function defaultCustomSourceConfigText() {
+  return JSON.stringify({
+    label: "My HTTP JSON",
+    url_template: "https://example.com/search?q={query}&limit={limit}",
+    items_path: "items",
+    field_map: {
+      title: "title",
+      abstract: "description",
+      url: "url",
+      date: "year",
+    },
+    resource_types: ["paper"],
+  }, null, 2);
+}
+
+function renderRetrievalSourceManager() {
+  const customSources = Array.isArray(state.retrievalCustomSources) ? state.retrievalCustomSources : [];
+  const builtInStatuses = Object.values(state.retrievalSourceInfo || {}).filter((source) => source && !source.custom);
+  const sourceStats = {
+    total: builtInStatuses.length,
+    available: builtInStatuses.filter((source) => source.available !== false).length,
+    needConfig: builtInStatuses.filter((source) => source.requires_config && !source.configured).length,
+  };
+  const draft = state.retrievalCustomSourceDraft || defaultCustomSourceConfigText();
+  const rows = customSources.length ? customSources.map((source) => {
+    const id = String(source.source_id || source.id || "");
+    const status = source.status || {};
+    const ok = status.ok === true || status.available === true;
+    return `<article class="retrieval-source-instance">
+      <div>
+        <strong>${escapeHtml(source.name || id)}</strong>
+        <span>${escapeHtml(source.kind || "custom")} · ${source.enabled === false ? "已停用" : "已启用"} · ${ok ? "检测通过" : (status.error || "未检测")}</span>
+      </div>
+      <div class="simple-result-tools">
+        <button type="button" class="mini-icon retrieval-report-btn" data-check-custom-source="${escapeHtml(id)}" ${state.retrievalCustomSourceBusy ? "disabled" : ""}>检测</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-toggle-custom-source="${escapeHtml(id)}" data-enabled="${source.enabled === false ? "1" : "0"}">${source.enabled === false ? "启用" : "停用"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn danger" data-delete-custom-source="${escapeHtml(id)}">删除</button>
+      </div>
+    </article>`;
+  }).join("") : `<div class="simple-result-placeholder compact">暂无自定义源。</div>`;
+  return `
+    <section class="retrieval-source-manager">
+      <div class="retrieval-source-manager-head">
+        <div>
+          <strong>源管理中心</strong>
+          <span>内置源 ${sourceStats.available}/${sourceStats.total} 可用${sourceStats.needConfig ? `，${sourceStats.needConfig} 个需配置` : ""}</span>
+        </div>
+        <a class="mini-icon retrieval-report-btn" href="/library/${encodeURIComponent(state.libraryId)}/api-config">配置 Key</a>
+      </div>
+      <div class="retrieval-custom-source-list">${rows}</div>
+      <details class="retrieval-custom-source-form">
+        <summary>添加自定义源</summary>
+        <div data-custom-source-form class="retrieval-custom-source-fields">
+          <div class="guided-control-row">
+            <label class="guided-select">
+              <span>名称</span>
+              <input name="name" placeholder="团队内部论文库">
+            </label>
+            <label class="guided-select">
+              <span>类型</span>
+              <select name="kind">
+                <option value="httpjson">HTTP JSON</option>
+                <option value="localfile">CSV/JSONL 文件</option>
+                <option value="manifest">Object Manifest</option>
+                <option value="sqlite">SQLite（高级）</option>
+              </select>
+            </label>
+          </div>
+          <textarea name="config_text" data-custom-source-config rows="8">${escapeHtml(draft)}</textarea>
+          <div class="simple-composer-actions">
+            <button type="button" class="form-action-btn" data-save-custom-source ${state.retrievalCustomSourceBusy ? "disabled" : ""}>保存自定义源</button>
+            <span>${escapeHtml(state.retrievalCustomSourceMessage || "保存后可检测并勾选参与检索。")}</span>
+          </div>
+        </div>
+      </details>
+    </section>`;
 }
 
 function currentSimplePlanBatchJob() {
@@ -2689,20 +2812,25 @@ function guidedMaterialLabel(value) {
   return {
     paper: "论文",
     code: "代码",
-    data: "数据",
+    data: "数据集",
+    dataset: "数据集",
+    model: "模型",
+    benchmark: "基准/榜单",
+    website: "网址",
   }[String(value || "")] || value;
 }
 
 function renderGuidedSearchControls(aiConfigured) {
   const activeMode = state.retrievalGuidedMode || "quality";
   const timePreset = state.retrievalGuidedTimePreset || (activeMode === "fast" ? "5y" : activeMode === "coverage" ? "all" : "10y");
-  const materials = state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : new Set(["paper", "code", "data"]);
+  const defaultMaterials = ["paper", "code", "model", "dataset", "benchmark", "website"];
+  const materials = state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : new Set(defaultMaterials);
   const modeButtons = [
     ["fast", "快速"],
     ["quality", "高质量"],
     ["coverage", "全覆盖"],
   ].map(([mode, label]) => `<button type="button" class="${activeMode === mode ? "active" : ""}" data-guided-search-mode="${mode}">${label}</button>`).join("");
-  const materialChecks = ["paper", "code", "data"].map((name) => `
+  const materialChecks = defaultMaterials.map((name) => `
     <label class="guided-material-option">
       <input type="checkbox" name="material_types" value="${name}" data-guided-material-type ${materials.has(name) ? "checked" : ""}>
       <span>${guidedMaterialLabel(name)}</span>
@@ -2758,7 +2886,10 @@ function renderGuidedSearchStatus() {
         <span>候选 ${Number(progress.candidate_count || state.retrievalCandidates.length || 0)}</span>
         <span>论文 ${Number(materials.paper || 0)}</span>
         <span>代码 ${Number(materials.code || 0)}</span>
-        <span>数据 ${Number(materials.data || 0)}</span>
+        <span>模型 ${Number(materials.model || 0)}</span>
+        <span>数据集 ${Number(materials.dataset || materials.data || 0)}</span>
+        <span>基准 ${Number(materials.benchmark || 0)}</span>
+        <span>网址 ${Number(materials.website || 0)}</span>
       </div>
       ${missingHtml ? `<div class="guided-missing">${missingHtml}</div>` : ""}
     </section>`;
@@ -2817,8 +2948,9 @@ function renderSimpleRetrievalMain() {
             <button type="button" class="mini-icon" data-check-retrieval-sources title="刷新数据源状态">${state.retrievalSourcesChecking ? "..." : "↻"}</button>
           </div>
           <div class="simple-source-categories">
-            ${SIMPLE_RETRIEVAL_SOURCE_CATEGORIES.map(renderSimpleRetrievalSourceCategory).join("")}
+            ${simpleRetrievalSourceCategories().map(renderSimpleRetrievalSourceCategory).join("")}
           </div>
+          ${renderRetrievalSourceManager()}
           ${state.retrievalSourcesMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSourcesMessage)}</p>` : ""}
         </details>
       </form>
@@ -2873,9 +3005,17 @@ function renderRetrievalPanel() {
     ["medrxiv", "medRxiv"],
     ["semanticscholar", "Semantic Scholar"],
     ["datacite", "DataCite"],
+    ["europepmc", "Europe PMC"],
+    ["dblp", "DBLP"],
+    ["openreview", "OpenReview"],
+    ["figshare", "Figshare"],
+    ["osf", "OSF"],
+    ["openml", "OpenML"],
     ["github", "GitHub"],
+    ["gitlab", "GitLab"],
     ["huggingface", "HuggingFace"],
     ["zenodo", "Zenodo"],
+    ["brave", "Brave Search"],
     ["openlibrary", "OpenLibrary"],
     ["ads", "NASA ADS"],
     ["localfile", "Local CSV/JSONL"],
@@ -3052,6 +3192,16 @@ function renderAddItemModal() {
   panel.querySelector("[data-import-retrieval-selected]")?.addEventListener("click", submitRetrievalImport);
   panel.querySelector("[data-refresh-retrieval-runs]")?.addEventListener("click", () => loadRetrievalRuns());
   panel.querySelector("[data-check-retrieval-sources]")?.addEventListener("click", () => loadRetrievalSources({ check: true }));
+  panel.querySelector("[data-save-custom-source]")?.addEventListener("click", saveRetrievalCustomSource);
+  panel.querySelectorAll("[data-check-custom-source]").forEach((button) => {
+    button.addEventListener("click", () => checkRetrievalCustomSource(button.dataset.checkCustomSource));
+  });
+  panel.querySelectorAll("[data-toggle-custom-source]").forEach((button) => {
+    button.addEventListener("click", () => toggleRetrievalCustomSource(button.dataset.toggleCustomSource, button.dataset.enabled === "1"));
+  });
+  panel.querySelectorAll("[data-delete-custom-source]").forEach((button) => {
+    button.addEventListener("click", () => deleteRetrievalCustomSource(button.dataset.deleteCustomSource));
+  });
   panel.querySelector("[data-setup-retrieval-rehearsal]")?.addEventListener("click", setupRetrievalRehearsalKit);
   panel.querySelector("[data-validate-retrieval-rehearsal]")?.addEventListener("click", validateRetrievalRehearsalRun);
   panel.querySelector("[data-check-retrieval-readiness]")?.addEventListener("click", () => loadRetrievalReadiness());
@@ -3254,6 +3404,8 @@ function bindRetrievalPageEvents(host) {
     } else if (event.target.matches("[data-retrieval-field-map-lab-config]")) {
       state.retrievalFieldMapLabConfig = event.target.value;
       state.retrievalFieldMapLabResult = null;
+    } else if (event.target.matches("[data-custom-source-config]")) {
+      state.retrievalCustomSourceDraft = event.target.value;
     }
   });
   host.addEventListener("change", (event) => {
@@ -3263,10 +3415,10 @@ function bindRetrievalPageEvents(host) {
       renderRetrievalPage();
     } else if (event.target.matches("[data-guided-material-type]")) {
       const value = String(event.target.value || "").trim();
-      const next = new Set(state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : ["paper", "code", "data"]);
+      const next = new Set(state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : ["paper", "code", "model", "dataset", "benchmark", "website"]);
       if (event.target.checked) next.add(value);
       else next.delete(value);
-      state.retrievalGuidedMaterialTypes = next.size ? next : new Set(["paper", "code", "data"]);
+      state.retrievalGuidedMaterialTypes = next.size ? next : new Set(["paper", "code", "model", "dataset", "benchmark", "website"]);
       renderRetrievalPage();
     } else if (event.target.matches("[data-retrieval-source-intake-sample-url]")) {
       state.retrievalSourceIntakeSampleUrl = Boolean(event.target.checked);
@@ -3341,6 +3493,10 @@ function bindRetrievalPageEvents(host) {
     else if (button.matches("[data-refresh-retrieval-runs]")) loadRetrievalRuns();
     else if (button.matches("[data-load-retrieval-run-candidates]")) loadRetrievalRunCandidates(button.dataset.loadRetrievalRunCandidates);
     else if (button.matches("[data-check-retrieval-sources]")) loadRetrievalSources({ check: true });
+    else if (button.matches("[data-save-custom-source]")) saveRetrievalCustomSource(event);
+    else if (button.matches("[data-check-custom-source]")) checkRetrievalCustomSource(button.dataset.checkCustomSource);
+    else if (button.matches("[data-toggle-custom-source]")) toggleRetrievalCustomSource(button.dataset.toggleCustomSource, button.dataset.enabled === "1");
+    else if (button.matches("[data-delete-custom-source]")) deleteRetrievalCustomSource(button.dataset.deleteCustomSource);
     else if (button.matches("[data-setup-retrieval-rehearsal]")) setupRetrievalRehearsalKit();
     else if (button.matches("[data-validate-retrieval-rehearsal]")) validateRetrievalRehearsalRun();
     else if (button.matches("[data-check-retrieval-readiness]")) loadRetrievalReadiness();
@@ -3522,7 +3678,7 @@ async function submitRetrievalSearch(event) {
       retrievalGuidedPollTimer = null;
     }
     renderAddItemModal();
-    const materialTypes = [...(state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : new Set(["paper", "code", "data"]))];
+    const materialTypes = [...(state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : new Set(["paper", "code", "model", "dataset", "benchmark", "website"]))];
     const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-jobs`, {
       topic: query,
       mode: state.retrievalGuidedMode || "quality",
@@ -4593,6 +4749,7 @@ async function loadRetrievalSources(options = {}) {
       if (source.name) info[source.name] = source;
     });
     state.retrievalSourceInfo = info;
+    state.retrievalCustomSources = Array.isArray(data.custom_sources) ? data.custom_sources : [];
     Object.entries(info).forEach(([name, source]) => {
       if (source.available === false) state.retrievalSources.delete(name);
     });
@@ -4602,6 +4759,91 @@ async function loadRetrievalSources(options = {}) {
   } finally {
     state.retrievalSourcesBusy = false;
     state.retrievalSourcesChecking = false;
+    renderAddItemModal();
+  }
+}
+
+async function saveRetrievalCustomSource(event) {
+  event.preventDefault();
+  if (!state.libraryId) return;
+  const root = event.currentTarget.closest?.("[data-custom-source-form]") || document.querySelector("[data-custom-source-form]");
+  const configText = String(root?.querySelector("[name='config_text']")?.value || "").trim();
+  try {
+    state.retrievalCustomSourceBusy = true;
+    state.retrievalCustomSourceDraft = configText;
+    state.retrievalCustomSourceMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/custom-sources`, {
+      name: String(root?.querySelector("[name='name']")?.value || "").trim(),
+      kind: String(root?.querySelector("[name='kind']")?.value || "httpjson").trim(),
+      config_text: configText,
+      enabled: true,
+    });
+    if (data.source?.source_id) state.retrievalSources.add(data.source.source_id);
+    state.retrievalCustomSourceDraft = "";
+    state.retrievalCustomSourceMessage = "自定义源已保存。";
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalCustomSourceMessage = error.message;
+  } finally {
+    state.retrievalCustomSourceBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function checkRetrievalCustomSource(sourceId) {
+  if (!state.libraryId || !sourceId) return;
+  try {
+    state.retrievalCustomSourceBusy = true;
+    state.retrievalCustomSourceMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/custom-sources/${encodeURIComponent(sourceId)}/check`, {
+      query: state.retrievalQuery || "robot",
+      sample_size: 2,
+    });
+    state.retrievalCustomSourceMessage = data.check?.ok ? "检测通过。" : (data.check?.error || "检测失败。");
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalCustomSourceMessage = error.message;
+  } finally {
+    state.retrievalCustomSourceBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function toggleRetrievalCustomSource(sourceId, enabled) {
+  if (!state.libraryId || !sourceId) return;
+  try {
+    state.retrievalCustomSourceBusy = true;
+    renderAddItemModal();
+    await postJSON(`/api/library/${state.libraryId}/retrieval/custom-sources/${encodeURIComponent(sourceId)}`, { enabled: Boolean(enabled) }, "PATCH");
+    if (!enabled) state.retrievalSources.delete(sourceId);
+    state.retrievalCustomSourceMessage = enabled ? "自定义源已启用。" : "自定义源已停用。";
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalCustomSourceMessage = error.message;
+  } finally {
+    state.retrievalCustomSourceBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function deleteRetrievalCustomSource(sourceId) {
+  if (!state.libraryId || !sourceId) return;
+  if (!window.confirm("删除这个自定义源？")) return;
+  try {
+    state.retrievalCustomSourceBusy = true;
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/custom-sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+    const data = await parseJSONResponse(response);
+    if (!response.ok || !data.ok) throw new Error(data.error || "删除自定义源失败");
+    state.retrievalSources.delete(sourceId);
+    state.retrievalCustomSourceMessage = "自定义源已删除。";
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalCustomSourceMessage = error.message;
+  } finally {
+    state.retrievalCustomSourceBusy = false;
     renderAddItemModal();
   }
 }

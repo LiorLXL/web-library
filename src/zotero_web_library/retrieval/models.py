@@ -61,10 +61,17 @@ class RetrievedCandidate:
         missing_authority = missing_authority_signals(authority)
         quality = quality_score(self, authority)
         coverage = coverage_tags(self, authority)
+        resource_type = candidate_resource_type(self)
+        source_instance = source_instance_id(self)
+        web_meta = webpage_metadata(self)
         payload = {
             "source": self.source,
             "external_id": self.external_id,
             "item_type": self.item.item_type,
+            "resource_type": resource_type,
+            "resource_type_tags": resource_type_tags(resource_type, coverage),
+            "source_category": source_category(self.source, resource_type),
+            "source_instance_id": source_instance,
             "title": fields.get("title", ""),
             "year": year_from_fields(fields),
             "venue": venue_from_fields(fields),
@@ -86,7 +93,9 @@ class RetrievedCandidate:
             "authority_signals": authority,
             "missing_authority_signals": missing_authority,
             "quality_score": quality,
+            "quality_bucket": quality_bucket(quality),
             "coverage_tags": coverage,
+            "webpage_metadata": web_meta,
         }
         if include_raw:
             payload["raw"] = self.raw
@@ -153,10 +162,23 @@ def normalized_material_type(value: Any) -> str:
         "repo": "code",
         "repository": "code",
         "代码": "code",
-        "data": "data",
-        "dataset": "data",
-        "datasets": "data",
-        "数据": "data",
+        "model": "model",
+        "models": "model",
+        "ai-model": "model",
+        "ml-model": "model",
+        "data": "dataset",
+        "dataset": "dataset",
+        "datasets": "dataset",
+        "数据": "dataset",
+        "benchmark": "benchmark",
+        "benchmarks": "benchmark",
+        "leaderboard": "benchmark",
+        "leaderboards": "benchmark",
+        "website": "website",
+        "webpage": "website",
+        "web": "website",
+        "url": "website",
+        "site": "website",
     }
     return aliases.get(text, "")
 
@@ -171,13 +193,91 @@ def year_from_fields(fields: dict[str, str]) -> str:
 
 
 def candidate_material_type(item_type: str, source: str = "") -> str:
+    resource_type = candidate_resource_type_from_values(item_type=item_type, source=source)
+    return "data" if resource_type == "dataset" else resource_type
+
+
+def candidate_resource_type(candidate: RetrievedCandidate) -> str:
+    raw = candidate.raw if isinstance(candidate.raw, dict) else {}
+    return candidate_resource_type_from_values(item_type=candidate.item.item_type, source=candidate.source, raw=raw)
+
+
+def candidate_resource_type_from_values(
+    *,
+    item_type: str,
+    source: str = "",
+    raw: dict[str, Any] | None = None,
+) -> str:
     normalized = str(item_type or "").strip()
     source_name = str(source or "").strip().lower()
-    if normalized in {"computerProgram"} or source_name == "github":
+    source_base = source_name.split(":", 1)[0]
+    raw_value = raw if isinstance(raw, dict) else {}
+    explicit = normalized_material_type(
+        raw_value.get("resource_type")
+        or raw_value.get("material_type")
+        or raw_value.get("kind")
+        or raw_value.get("type")
+        or ""
+    )
+    if explicit:
+        return explicit
+    if normalized in {"computerProgram"} or source_base in {"github", "gitlab"}:
         return "code"
-    if normalized in {"dataset"} or source_name in {"huggingface", "zenodo", "datacite"}:
-        return "data"
+    if normalized in {"webpage"} or source_base in {"brave"}:
+        return "website"
+    if normalized in {"dataset"} or source_base in {"zenodo", "datacite", "figshare", "osf", "openml"}:
+        return "dataset"
+    if source_base == "huggingface":
+        text = " ".join(str(raw_value.get(key) or "") for key in ("kind", "resource_type", "pipeline_tag", "tags"))
+        if "dataset" in text.casefold():
+            return "dataset"
+        return "model"
     return "paper"
+
+
+def source_instance_id(candidate: RetrievedCandidate) -> str:
+    raw = candidate.raw if isinstance(candidate.raw, dict) else {}
+    for key in ("source_instance_id", "custom_source_id", "instance_id"):
+        value = str(raw.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def source_category(source: str, resource_type: str = "") -> str:
+    name = str(source or "").strip().lower()
+    base = name.split(":", 1)[0]
+    if base.startswith("custom-") or base in {"localfile", "httpjson", "sqlite", "manifest"}:
+        return "custom"
+    if base in {"github", "gitlab"}:
+        return "code"
+    if base in {"huggingface"}:
+        return "model"
+    if base in {"datacite", "zenodo", "figshare", "osf", "openml"}:
+        return "dataset"
+    if base in {"brave"}:
+        return "website"
+    if resource_type in {"code", "model", "dataset", "benchmark", "website"}:
+        return resource_type
+    return "paper"
+
+
+def resource_type_tags(resource_type: str, coverage: list[str]) -> list[str]:
+    return list(dict.fromkeys([tag for tag in [resource_type, *coverage] if tag]))
+
+
+def quality_bucket(score: int) -> str:
+    if score >= 80:
+        return "high"
+    if score >= 55:
+        return "medium"
+    return "low"
+
+
+def webpage_metadata(candidate: RetrievedCandidate) -> dict[str, Any]:
+    raw = candidate.raw if isinstance(candidate.raw, dict) else {}
+    value = raw.get("webpage_metadata")
+    return value if isinstance(value, dict) else {}
 
 
 def venue_from_fields(fields: dict[str, str]) -> str:
@@ -274,12 +374,12 @@ def authority_signals(candidate: RetrievedCandidate) -> dict[str, Any]:
 
 def missing_authority_signals(signals: dict[str, Any]) -> list[str]:
     missing: list[str] = []
-    if "citation_count" not in signals and signals.get("source_database") not in {"github", "huggingface"}:
+    if "citation_count" not in signals and signals.get("source_database") not in {"github", "gitlab", "huggingface", "brave"}:
         missing.append("citation_count")
     if not signals.get("venue"):
         missing.append("venue")
     source = str(signals.get("source_database") or "")
-    if source == "github" and "github_stars" not in signals:
+    if source in {"github", "gitlab"} and "github_stars" not in signals:
         missing.append("github_stars")
     if source == "huggingface" and "downloads" not in signals:
         missing.append("downloads")
@@ -313,7 +413,7 @@ def quality_score(candidate: RetrievedCandidate, signals: dict[str, Any]) -> int
 
 
 def coverage_tags(candidate: RetrievedCandidate, signals: dict[str, Any]) -> list[str]:
-    tags = [candidate_material_type(candidate.item.item_type, candidate.source)]
+    tags = [candidate_resource_type(candidate)]
     if signals.get("multi_source"):
         tags.append("multi_source")
     if signals.get("citation_count") is not None or signals.get("venue_authority") == "high":

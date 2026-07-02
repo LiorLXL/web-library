@@ -38,6 +38,9 @@ from .retrieval.providers import (
     AI_PIXEL_DEFAULT_BASE_URL,
     AI_PIXEL_DEFAULT_MODEL,
     AI_PIXEL_MODEL_ENV,
+    BRAVE_SEARCH_API_KEY_ENV,
+    CustomSourceProvider,
+    GITLAB_TOKEN_ENV,
     HTTP_JSON_CONFIG_ENV,
     MANIFEST_CONFIG_ENV,
     ai_pixel_chat_json,
@@ -181,6 +184,12 @@ def api_config_tokens_for_library(library_id: str) -> dict[str, str]:
         "github_token": clean_secret(code_sources.get("github_token") or code_sources.get("github")),
         "huggingface_token": clean_secret(code_sources.get("huggingface_token") or code_sources.get("huggingface")),
         "zenodo_token": clean_secret(code_sources.get("zenodo_token") or code_sources.get("zenodo")),
+        "gitlab_token": clean_secret(code_sources.get("gitlab_token") or code_sources.get("gitlab")),
+        "brave_search_token": clean_secret(
+            code_sources.get("brave_search_token")
+            or code_sources.get("brave_token")
+            or code_sources.get("brave")
+        ),
     }
 
 
@@ -223,15 +232,32 @@ def normalized_library_api_config(payload: dict[str, Any], existing: dict[str, A
         key in payload for key in ("model", "model_name", "base_url", "request_url", "url", "api_key", "key")
     )
     has_source_payload = isinstance(payload.get("code_sources"), dict) or any(
-        key in payload for key in ("github_token", "github", "huggingface_token", "huggingface", "zenodo_token", "zenodo")
+        key in payload
+        for key in (
+            "github_token",
+            "github",
+            "huggingface_token",
+            "huggingface",
+            "zenodo_token",
+            "zenodo",
+            "gitlab_token",
+            "gitlab",
+            "brave_search_token",
+            "brave_token",
+            "brave",
+        )
     )
     has_mineru_payload = isinstance(payload.get("mineru"), dict)
     raw_model = payload.get("model") if isinstance(payload.get("model"), dict) else (payload if has_model_payload else existing_model)
     raw_sources = payload.get("code_sources") if isinstance(payload.get("code_sources"), dict) else (payload if has_source_payload else existing_sources)
     raw_mineru = payload.get("mineru") if isinstance(payload.get("mineru"), dict) else (payload if has_mineru_payload else existing_mineru)
 
-    def next_secret(field: str, current: str = "") -> str:
-        value = clean_secret(raw_model.get(field) if field in raw_model else raw_sources.get(field))
+    def next_secret(field: str, current: str = "", *aliases: str) -> str:
+        value = ""
+        for candidate_field in (field, *aliases):
+            value = clean_secret(raw_model.get(candidate_field) if candidate_field in raw_model else raw_sources.get(candidate_field))
+            if value:
+                break
         if value == API_CONFIG_SECRET_KEEP_VALUE:
             return clean_secret(current)
         return value
@@ -255,6 +281,13 @@ def normalized_library_api_config(payload: dict[str, Any], existing: dict[str, A
             "github_token": next_secret("github_token", existing_sources.get("github_token")),
             "huggingface_token": next_secret("huggingface_token", existing_sources.get("huggingface_token")),
             "zenodo_token": next_secret("zenodo_token", existing_sources.get("zenodo_token")),
+            "gitlab_token": next_secret("gitlab_token", existing_sources.get("gitlab_token"), "gitlab"),
+            "brave_search_token": next_secret(
+                "brave_search_token",
+                existing_sources.get("brave_search_token"),
+                "brave_token",
+                "brave",
+            ),
         },
         "mineru": {
             "base_url": mineru_base_url,
@@ -294,6 +327,8 @@ def library_api_config_response(library_id: str, *, include_secrets: bool = Fals
         "github": ("github_token", "GITHUB_TOKEN"),
         "huggingface": ("huggingface_token", "HUGGINGFACE_TOKEN"),
         "zenodo": ("zenodo_token", "ZENODO_ACCESS_TOKEN"),
+        "gitlab": ("gitlab_token", GITLAB_TOKEN_ENV),
+        "brave": ("brave_search_token", BRAVE_SEARCH_API_KEY_ENV),
     }
     code_payload: dict[str, dict[str, Any]] = {}
     for service, (field, env_name) in code_sources.items():
@@ -781,6 +816,9 @@ def retrieval_provider_registry_for_library(library_id: str) -> dict[str, Any]:
         github_token=effective_code_source_token(library_id, "github_token", "GITHUB_TOKEN"),
         huggingface_token=effective_code_source_token(library_id, "huggingface_token", "HUGGINGFACE_TOKEN"),
         zenodo_token=effective_code_source_token(library_id, "zenodo_token", "ZENODO_ACCESS_TOKEN"),
+        gitlab_token=effective_code_source_token(library_id, "gitlab_token", GITLAB_TOKEN_ENV),
+        brave_search_token=effective_code_source_token(library_id, "brave_search_token", BRAVE_SEARCH_API_KEY_ENV),
+        custom_sources=app_store.list_retrieval_custom_sources(library_id, enabled_only=True),
     )
 
 
@@ -992,6 +1030,105 @@ def normalize_local_retrieval_config_payload(payload: dict[str, Any]) -> dict[st
     return {
         "paths": paths,
         "field_map": normalize_retrieval_field_map(field_map),
+    }
+
+
+def normalize_custom_source_payload(payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    existing = existing if isinstance(existing, dict) else {}
+    kind = normalize_custom_source_kind(payload.get("kind") or existing.get("kind") or "httpjson")
+    name = str(payload.get("name") or existing.get("name") or custom_source_kind_label(kind)).strip()
+    enabled = bool(payload.get("enabled", existing.get("enabled", True)))
+    config = normalize_custom_source_config(kind, payload, existing.get("config") if isinstance(existing.get("config"), dict) else {})
+    material_types = [
+        normalized_material_type(item)
+        for item in (payload.get("resource_types") or config.get("resource_types") or [])
+        if normalized_material_type(item)
+    ]
+    if material_types:
+        config["resource_types"] = list(dict.fromkeys(material_types))
+    return {
+        "source_id": str(payload.get("source_id") or payload.get("id") or existing.get("source_id") or "").strip(),
+        "name": name[:120] or custom_source_kind_label(kind),
+        "kind": kind,
+        "enabled": enabled,
+        "config": config,
+    }
+
+
+def normalize_custom_source_kind(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("_", "").replace("-", "")
+    aliases = {
+        "httpjson": "httpjson",
+        "http": "httpjson",
+        "json": "httpjson",
+        "localfile": "localfile",
+        "file": "localfile",
+        "csvjsonl": "localfile",
+        "manifest": "manifest",
+        "objectmanifest": "manifest",
+        "sqlite": "sqlite",
+    }
+    return aliases.get(text, "httpjson")
+
+
+def custom_source_kind_label(kind: str) -> str:
+    return {
+        "httpjson": "HTTP JSON",
+        "localfile": "CSV/JSONL 文件",
+        "manifest": "Object Manifest",
+        "sqlite": "SQLite",
+    }.get(kind, "自定义源")
+
+
+def normalize_custom_source_config(kind: str, payload: dict[str, Any], existing_config: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("config") if "config" in payload else None
+    if raw is None and "config_text" in payload:
+        raw = payload.get("config_text")
+    if isinstance(raw, str):
+        if not raw.strip():
+            raw = {}
+        else:
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError("config_text must be a JSON object") from exc
+    if raw is None:
+        raw = {key: value for key, value in payload.items() if key not in {"source_id", "id", "name", "kind", "enabled"}}
+    if not isinstance(raw, dict):
+        raise ValueError("custom source config must be a JSON object")
+    merged = {**existing_config, **raw}
+    if kind == "localfile":
+        config = normalize_local_retrieval_config_payload(merged)
+    elif kind == "httpjson":
+        config = normalize_http_json_config_payload({"config": merged}) or dict(merged)
+    elif kind == "manifest":
+        config = normalize_manifest_config_payload({"config": merged}) or dict(merged)
+    elif kind == "sqlite":
+        config = normalize_sqlite_config_payload({"config": merged}) or dict(merged)
+    else:
+        raise ValueError(f"unsupported custom source kind: {kind}")
+    resource_types = merged.get("resource_types")
+    if isinstance(resource_types, str):
+        resource_types = [item.strip() for item in resource_types.split(",") if item.strip()]
+    if isinstance(resource_types, list):
+        normalized_types = [normalized_material_type(item) for item in resource_types if normalized_material_type(item)]
+        if normalized_types:
+            config["resource_types"] = list(dict.fromkeys(normalized_types))
+    return config
+
+
+def custom_source_check_result(source: dict[str, Any], *, query: str = "robot", limit: int = 2) -> dict[str, Any]:
+    provider = CustomSourceProvider(source)
+    config_error = provider.configuration_error()
+    if config_error:
+        return {"ok": False, "available": False, "error": config_error, "candidate_count": 0, "candidates": []}
+    candidates = provider.search(query, max(1, min(int(limit or 2), 10)))
+    return {
+        "ok": True,
+        "available": True,
+        "candidate_count": len(candidates),
+        "candidates": [candidate.as_dict(include_raw=False) for candidate in candidates],
+        "query": query,
     }
 
 
@@ -4433,7 +4570,7 @@ def normalize_guided_time_range(value: Any, mode: str) -> dict[str, Any]:
 def normalize_guided_material_types(value: Any) -> list[str]:
     raw_values = value if isinstance(value, list) else []
     normalized = [normalized_material_type(item) for item in raw_values if normalized_material_type(item)]
-    return list(dict.fromkeys(normalized)) or ["paper", "code", "data"]
+    return list(dict.fromkeys(normalized)) or ["paper", "code", "model", "dataset", "benchmark", "website"]
 
 
 def guided_strategy(mode: str) -> dict[str, Any]:
@@ -4455,6 +4592,50 @@ def guided_search_options(mode: str, time_range: dict[str, Any], material_types:
     }
 
 
+def default_guided_sources_for_materials(registry: dict[str, Any], material_types: list[str]) -> list[str]:
+    selected_types = set(material_types or ["paper", "code", "model", "dataset", "benchmark", "website"])
+    statuses = retrieval_source_statuses(registry=registry)
+    values: list[str] = []
+    for status in statuses:
+        name = str(status.get("name") or "")
+        if not name or not status.get("available"):
+            continue
+        source_types = {str(item) for item in status.get("resource_types") or []}
+        if source_types & selected_types:
+            values.append(name)
+    return values or [str(name) for name in registry]
+
+
+def guided_sources_for_material(
+    sources: list[str],
+    material_type: str,
+    source_statuses: dict[str, dict[str, Any]],
+) -> list[str]:
+    matched: list[str] = []
+    for source in sources:
+        status = source_statuses.get(source) or {}
+        source_types = {str(item) for item in status.get("resource_types") or []}
+        if material_type in source_types:
+            matched.append(source)
+    return matched or sources
+
+
+def guided_material_query_text(query: str, material_type: str) -> str:
+    text = str(query or "").strip()
+    hints = {
+        "paper": "",
+        "code": "implementation repository code",
+        "model": "model checkpoint HuggingFace",
+        "dataset": "dataset data",
+        "benchmark": "benchmark leaderboard evaluation",
+        "website": "project website documentation",
+    }
+    hint = hints.get(material_type, "")
+    if not hint or hint.casefold() in text.casefold():
+        return text
+    return f"{text} {hint}".strip()
+
+
 def normalize_guided_plan_queries(plan: dict[str, Any], topic: str, sources: list[str], limit: int) -> list[dict[str, Any]]:
     raw_queries = plan.get("queries") if isinstance(plan.get("queries"), list) else []
     values: list[dict[str, Any]] = []
@@ -4464,11 +4645,13 @@ def normalize_guided_plan_queries(plan: dict[str, Any], topic: str, sources: lis
             query = str(item.get("query_text") or item.get("query") or "").strip()
             reason = str(item.get("reason") or item.get("model_reason") or "覆盖主题不同表达").strip()
             intent = str(item.get("intent") or item.get("type") or "topic").strip()
+            material_type = normalized_material_type(item.get("resource_type") or item.get("material_type") or item.get("material"))
             item_sources = [str(source or "").strip().lower() for source in item.get("sources") or [] if str(source or "").strip()]
         else:
             query = str(item or "").strip()
             reason = "覆盖主题不同表达"
             intent = "topic"
+            material_type = ""
             item_sources = []
         if not query:
             continue
@@ -4482,14 +4665,77 @@ def normalize_guided_plan_queries(plan: dict[str, Any], topic: str, sources: lis
                 "query_text": query,
                 "intent": intent,
                 "reason": reason,
+                "resource_type": material_type,
                 "sources": [source for source in item_sources if source in sources] or sources,
             }
         )
         if len(values) >= limit:
             break
     if not values:
-        values.append({"query": topic, "query_text": topic, "intent": "core", "reason": "原始主题", "sources": sources})
+        values.append({"query": topic, "query_text": topic, "intent": "core", "reason": "原始主题", "resource_type": "", "sources": sources})
     return values
+
+
+def guided_plan_queries_by_material(
+    queries: list[dict[str, Any]],
+    *,
+    material_types: list[str],
+    sources: list[str],
+    registry: dict[str, Any],
+    limit: int,
+) -> list[dict[str, Any]]:
+    statuses = {
+        str(status.get("name") or ""): status
+        for status in retrieval_source_statuses(registry=registry)
+        if isinstance(status, dict)
+    }
+    selected_materials = material_types or ["paper", "code", "model", "dataset", "benchmark", "website"]
+    values: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    explicit = [query for query in queries if normalized_material_type(query.get("resource_type"))]
+    if explicit:
+        for query in explicit:
+            material = normalized_material_type(query.get("resource_type"))
+            query_text = str(query.get("query_text") or query.get("query") or "").strip()
+            key = (query_text.casefold(), material)
+            if not query_text or key in seen:
+                continue
+            seen.add(key)
+            values.append(
+                {
+                    **query,
+                    "resource_type": material,
+                    "sources": guided_sources_for_material(list(query.get("sources") or sources), material, statuses),
+                }
+            )
+            if len(values) >= limit:
+                return values
+    base_queries = queries or [{"query": "", "query_text": ""}]
+    for material in selected_materials:
+        for base in base_queries:
+            base_text = str(base.get("query_text") or base.get("query") or "").strip() or str(base.get("topic") or "")
+            query_text = guided_material_query_text(base_text or "", material) or guided_material_query_text(str(base.get("reason") or ""), material)
+            query_text = query_text or guided_material_query_text(str(base.get("query") or ""), material)
+            if not query_text:
+                continue
+            key = (query_text.casefold(), material)
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(
+                {
+                    **base,
+                    "query": query_text,
+                    "query_text": query_text,
+                    "intent": str(base.get("intent") or material),
+                    "resource_type": material,
+                    "sources": guided_sources_for_material(list(base.get("sources") or sources), material, statuses),
+                }
+            )
+            break
+        if len(values) >= limit:
+            break
+    return values[:limit] or queries[:limit]
 
 
 def guided_search_plan_for_library(
@@ -4498,9 +4744,11 @@ def guided_search_plan_for_library(
     topic: str,
     mode: str,
     sources: list[str],
+    material_types: list[str],
     use_ai_planning: bool,
 ) -> dict[str, Any]:
     strategy = guided_strategy(mode)
+    registry = retrieval_provider_registry_for_library(library_id)
     try:
         base_plan = retrieval_query_plan_for_library(
             library_id,
@@ -4513,13 +4761,33 @@ def guided_search_plan_for_library(
     except Exception as exc:  # noqa: BLE001 - guided search can still run with rule variants
         base_plan = {"queries": retrieval_query_plan_seed_variants(topic, sources, strategy["query_limit"]), "message": str(exc)}
     queries = normalize_guided_plan_queries(base_plan, topic, sources, strategy["query_limit"])
+    queries = guided_plan_queries_by_material(
+        queries,
+        material_types=material_types,
+        sources=sources,
+        registry=registry,
+        limit=strategy["query_limit"],
+    )
     return {
         "topic": topic,
         "mode": mode,
         "strategy": strategy,
         "queries": queries,
         "query_count": len(queries),
-        "coverage_targets": ["core_concept", "synonyms", "methods", "applications", "paper", "code", "data", "time_range", "sources"],
+        "coverage_targets": [
+            "core_concept",
+            "synonyms",
+            "methods",
+            "applications",
+            "paper",
+            "code",
+            "model",
+            "dataset",
+            "benchmark",
+            "website",
+            "time_range",
+            "sources",
+        ],
         "message": str(base_plan.get("message") or "引导式检索计划已生成。"),
         "ai_enhancement": base_plan.get("ai_enhancement") if isinstance(base_plan.get("ai_enhancement"), dict) else {},
     }
@@ -4531,13 +4799,15 @@ def guided_search_coverage(
     candidates: list[dict[str, Any]],
     auto_expanded: bool = False,
 ) -> dict[str, Any]:
-    material_counts = {"paper": 0, "code": 0, "data": 0}
+    material_counts = {"paper": 0, "code": 0, "model": 0, "dataset": 0, "benchmark": 0, "website": 0}
     source_counts: dict[str, int] = {}
     authority_count = 0
     multi_source_count = 0
     missing_authority_count = 0
     for candidate in candidates:
-        material = candidate_material_type(str(candidate.get("item_type") or ""), str(candidate.get("source") or ""))
+        material = normalized_material_type(candidate.get("resource_type")) or candidate_material_type(str(candidate.get("item_type") or ""), str(candidate.get("source") or ""))
+        if material == "data":
+            material = "dataset"
         if material in material_counts:
             material_counts[material] += 1
         for source in candidate.get("sources") or [candidate.get("source")]:
@@ -4550,7 +4820,11 @@ def guided_search_coverage(
             multi_source_count += 1
         if candidate.get("missing_authority_signals"):
             missing_authority_count += 1
-    selected_materials = job.get("material_types") if isinstance(job.get("material_types"), list) else ["paper", "code", "data"]
+    selected_materials = [
+        normalized_material_type(item)
+        for item in (job.get("material_types") if isinstance(job.get("material_types"), list) else ["paper", "code", "model", "dataset", "benchmark", "website"])
+        if normalized_material_type(item)
+    ]
     selected_sources = job.get("sources") if isinstance(job.get("sources"), list) else []
     covered_materials = [name for name in selected_materials if material_counts.get(name, 0) > 0]
     missing = []
@@ -4585,6 +4859,14 @@ def guided_gap_queries(topic: str, coverage: dict[str, Any], sources: list[str])
         queries.append({"query": f"{topic} github implementation code", "query_text": f"{topic} github implementation code", "intent": "code", "reason": "补检代码实现", "sources": [source for source in sources if source in {"github", "zenodo", "huggingface"}] or sources})
     if "data" in missing_areas:
         queries.append({"query": f"{topic} dataset benchmark", "query_text": f"{topic} dataset benchmark", "intent": "data", "reason": "补检数据集和 benchmark", "sources": [source for source in sources if source in {"datacite", "zenodo", "huggingface"}] or sources})
+    if "model" in missing_areas:
+        queries.append({"query": f"{topic} model checkpoint HuggingFace", "query_text": f"{topic} model checkpoint HuggingFace", "intent": "model", "resource_type": "model", "reason": "supplement model resources", "sources": [source for source in sources if source in {"huggingface", "zenodo"}] or sources})
+    if "dataset" in missing_areas:
+        queries.append({"query": f"{topic} dataset data", "query_text": f"{topic} dataset data", "intent": "dataset", "resource_type": "dataset", "reason": "supplement datasets", "sources": [source for source in sources if source in {"datacite", "zenodo", "huggingface", "figshare", "osf", "openml"}] or sources})
+    if "benchmark" in missing_areas:
+        queries.append({"query": f"{topic} benchmark leaderboard evaluation", "query_text": f"{topic} benchmark leaderboard evaluation", "intent": "benchmark", "resource_type": "benchmark", "reason": "supplement benchmarks", "sources": [source for source in sources if source in {"openml", "brave", "github"}] or sources})
+    if "website" in missing_areas:
+        queries.append({"query": f"{topic} project website documentation", "query_text": f"{topic} project website documentation", "intent": "website", "resource_type": "website", "reason": "supplement websites", "sources": [source for source in sources if source in {"brave"}] or sources})
     if "authority" in missing_areas:
         queries.append({"query": f"{topic} survey benchmark state of the art", "query_text": f"{topic} survey benchmark state of the art", "intent": "authority", "reason": "补检综述、基准和高影响资料", "sources": sources})
     return queries[:3]
@@ -9134,6 +9416,7 @@ def create_app() -> Flask:
                     topic=str(job.get("topic") or ""),
                     mode=str(job.get("mode") or "quality"),
                     sources=[str(source) for source in job.get("sources") or []],
+                    material_types=[str(item) for item in job.get("material_types") or []],
                     use_ai_planning=bool(job.get("use_ai_planning")),
                 )
             queries = [item for item in plan.get("queries") or [] if isinstance(item, dict)]
@@ -9658,7 +9941,7 @@ def create_app() -> Flask:
             if service == "model":
                 with use_ai_pixel_config(api_config_model_for_library(library_id)):
                     return jsonify({"ok": True, "service": service, "check": retrieval_model_health_check()})
-            source_map = {"github": "github", "huggingface": "huggingface", "zenodo": "zenodo"}
+            source_map = {"github": "github", "gitlab": "gitlab", "huggingface": "huggingface", "zenodo": "zenodo", "brave": "brave"}
             source_name = source_map.get(service)
             if not source_name:
                 return jsonify({"ok": False, "error": "Unknown API config service."}), 400
@@ -9910,7 +10193,7 @@ def create_app() -> Flask:
             if unknown:
                 raise ValueError(f"未知数据源：{', '.join(unknown)}")
             if not source_names:
-                source_names = [source for source in ["crossref", "arxiv", "pubmed", "semanticscholar", "datacite", "github", "huggingface", "zenodo"] if source in registry]
+                source_names = default_guided_sources_for_materials(registry, material_types)
             options = guided_search_options(mode, time_range, material_types)
             job = app_store.create_retrieval_guided_job(
                 library_id,
@@ -11138,6 +11421,92 @@ def create_app() -> Flask:
         except (SourceError, RetrievalError, ValueError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.get("/api/library/<library_id>/retrieval/custom-sources")
+    def api_retrieval_custom_sources(library_id: str):
+        try:
+            library_or_404(library_id)
+            return jsonify({"ok": True, "sources": app_store.list_retrieval_custom_sources(library_id)})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/custom-sources")
+    def api_create_retrieval_custom_source(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            library_or_404(library_id)
+            normalized = normalize_custom_source_payload(payload)
+            source = app_store.upsert_retrieval_custom_source(library_id, normalized)
+            return jsonify({"ok": True, "source": source})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/retrieval/custom-sources/<source_id>")
+    def api_retrieval_custom_source(library_id: str, source_id: str):
+        try:
+            library_or_404(library_id)
+            source = app_store.get_retrieval_custom_source(library_id, source_id)
+            if not source:
+                return jsonify({"ok": False, "error": "custom source does not exist"}), 404
+            return jsonify({"ok": True, "source": source})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.patch("/api/library/<library_id>/retrieval/custom-sources/<source_id>")
+    def api_update_retrieval_custom_source(library_id: str, source_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            library_or_404(library_id)
+            existing = app_store.get_retrieval_custom_source(library_id, source_id)
+            if not existing:
+                return jsonify({"ok": False, "error": "custom source does not exist"}), 404
+            normalized = normalize_custom_source_payload({**payload, "source_id": source_id}, existing=existing)
+            source = app_store.upsert_retrieval_custom_source(library_id, normalized)
+            return jsonify({"ok": True, "source": source})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.delete("/api/library/<library_id>/retrieval/custom-sources/<source_id>")
+    def api_delete_retrieval_custom_source(library_id: str, source_id: str):
+        try:
+            library_or_404(library_id)
+            deleted = app_store.delete_retrieval_custom_source(library_id, source_id)
+            if not deleted:
+                return jsonify({"ok": False, "error": "custom source does not exist"}), 404
+            return jsonify({"ok": True, "deleted": True})
+        except (SourceError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/custom-sources/<source_id>/preview")
+    def api_preview_retrieval_custom_source(library_id: str, source_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            library_or_404(library_id)
+            source = app_store.get_retrieval_custom_source(library_id, source_id)
+            if not source:
+                return jsonify({"ok": False, "error": "custom source does not exist"}), 404
+            query = str(payload.get("query") or request.args.get("query") or "robot").strip() or "robot"
+            sample_size = bounded_retrieval_sample_size(payload.get("sample_size") or request.args.get("sample_size"), default=2)
+            result = custom_source_check_result(source, query=query, limit=sample_size)
+            return jsonify({"ok": True, "preview": result})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/retrieval/custom-sources/<source_id>/check")
+    def api_check_retrieval_custom_source(library_id: str, source_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            library_or_404(library_id)
+            source = app_store.get_retrieval_custom_source(library_id, source_id)
+            if not source:
+                return jsonify({"ok": False, "error": "custom source does not exist"}), 404
+            query = str(payload.get("query") or request.args.get("query") or "robot").strip() or "robot"
+            sample_size = bounded_retrieval_sample_size(payload.get("sample_size") or request.args.get("sample_size"), default=2)
+            result = custom_source_check_result(source, query=query, limit=sample_size)
+            stored = app_store.update_retrieval_custom_source_status(library_id, source_id, result, checked=True)
+            return jsonify({"ok": True, "check": result, "source": stored})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.get("/api/library/<library_id>/retrieval/sources")
     def api_retrieval_sources(library_id: str):
         try:
@@ -11150,6 +11519,7 @@ def create_app() -> Flask:
                         registry=retrieval_provider_registry_for_library(library_id),
                         include_health=include_health,
                     ),
+                    "custom_sources": app_store.list_retrieval_custom_sources(library_id),
                 }
             )
         except (SourceError, ValueError) as exc:

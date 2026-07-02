@@ -165,6 +165,19 @@ CREATE TABLE IF NOT EXISTS retrieval_guided_jobs (
   started_at TEXT NOT NULL DEFAULT '',
   finished_at TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS retrieval_custom_sources (
+  source_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_checked_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -283,6 +296,7 @@ def delete_library_record(library_id: str) -> None:
         conn.execute("DELETE FROM retrieval_batch_jobs WHERE library_id = ?", (library_id,))
         conn.execute("DELETE FROM retrieval_batch_items WHERE library_id = ?", (library_id,))
         conn.execute("DELETE FROM retrieval_guided_jobs WHERE library_id = ?", (library_id,))
+        conn.execute("DELETE FROM retrieval_custom_sources WHERE library_id = ?", (library_id,))
         conn.commit()
 
 
@@ -434,6 +448,158 @@ def set_retrieval_manifest_config(library_id: str, config: dict[str, Any]) -> di
     normalized = dict(config) if isinstance(config, dict) else {}
     set_preference(library_id, RETRIEVAL_MANIFEST_CONFIG_KEY, normalized)
     return normalized
+
+
+def list_retrieval_custom_sources(library_id: str, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+    ensure_app_store()
+    where = "WHERE library_id = ?"
+    values: list[Any] = [library_id]
+    if enabled_only:
+        where += " AND enabled = 1"
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM retrieval_custom_sources
+            {where}
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            values,
+        ).fetchall()
+    return [_custom_source_from_row(row) for row in rows]
+
+
+def get_retrieval_custom_source(library_id: str, source_id: str) -> dict[str, Any] | None:
+    ensure_app_store()
+    clean_id = str(source_id or "").strip()
+    if not clean_id:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM retrieval_custom_sources WHERE library_id = ? AND source_id = ?",
+            (library_id, clean_id),
+        ).fetchone()
+    return _custom_source_from_row(row) if row else None
+
+
+def upsert_retrieval_custom_source(library_id: str, source: dict[str, Any]) -> dict[str, Any]:
+    ensure_app_store()
+    existing = get_retrieval_custom_source(library_id, str(source.get("source_id") or source.get("id") or ""))
+    source_id = existing["source_id"] if existing else _custom_source_id(source.get("source_id") or source.get("id"))
+    timestamp = now_iso()
+    name = str(source.get("name") or (existing or {}).get("name") or "自定义源").strip()[:120] or "自定义源"
+    kind = str(source.get("kind") or (existing or {}).get("kind") or "httpjson").strip().lower()[:40] or "httpjson"
+    enabled = bool(source.get("enabled", (existing or {}).get("enabled", True)))
+    config = source.get("config") if isinstance(source.get("config"), dict) else (existing or {}).get("config") or {}
+    status = source.get("status") if isinstance(source.get("status"), dict) else (existing or {}).get("status") or {}
+    created_at = (existing or {}).get("created_at") or timestamp
+    last_checked_at = str(source.get("last_checked_at") or (existing or {}).get("last_checked_at") or "")
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO retrieval_custom_sources
+              (source_id, library_id, name, kind, enabled, config_json, status_json, created_at, updated_at, last_checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id) DO UPDATE SET
+              name = excluded.name,
+              kind = excluded.kind,
+              enabled = excluded.enabled,
+              config_json = excluded.config_json,
+              status_json = excluded.status_json,
+              updated_at = excluded.updated_at,
+              last_checked_at = excluded.last_checked_at
+            """,
+            (
+                source_id,
+                library_id,
+                name,
+                kind,
+                1 if enabled else 0,
+                json.dumps(config, ensure_ascii=False),
+                json.dumps(status, ensure_ascii=False),
+                created_at,
+                timestamp,
+                last_checked_at,
+            ),
+        )
+        conn.commit()
+    stored = get_retrieval_custom_source(library_id, source_id)
+    if stored is None:
+        raise ValueError("custom source was not saved")
+    return stored
+
+
+def update_retrieval_custom_source_status(
+    library_id: str,
+    source_id: str,
+    status: dict[str, Any],
+    *,
+    checked: bool = False,
+) -> dict[str, Any]:
+    ensure_app_store()
+    existing = get_retrieval_custom_source(library_id, source_id)
+    if not existing:
+        raise ValueError("custom source does not exist")
+    timestamp = now_iso()
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE retrieval_custom_sources
+            SET status_json = ?, updated_at = ?, last_checked_at = CASE WHEN ? THEN ? ELSE last_checked_at END
+            WHERE library_id = ? AND source_id = ?
+            """,
+            (
+                json.dumps(status if isinstance(status, dict) else {}, ensure_ascii=False),
+                timestamp,
+                1 if checked else 0,
+                timestamp,
+                library_id,
+                source_id,
+            ),
+        )
+        conn.commit()
+    stored = get_retrieval_custom_source(library_id, source_id)
+    if stored is None:
+        raise ValueError("custom source does not exist")
+    return stored
+
+
+def delete_retrieval_custom_source(library_id: str, source_id: str) -> bool:
+    ensure_app_store()
+    with connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM retrieval_custom_sources WHERE library_id = ? AND source_id = ?",
+            (library_id, str(source_id or "").strip()),
+        )
+        conn.commit()
+    return cursor.rowcount > 0
+
+
+def _custom_source_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["enabled"] = bool(item.get("enabled"))
+    item["config"] = _safe_json_dict(item.pop("config_json", "{}"))
+    item["status"] = _safe_json_dict(item.pop("status_json", "{}"))
+    item["id"] = item.get("source_id", "")
+    return item
+
+
+def _custom_source_id(value: Any = "") -> str:
+    raw = str(value or "").strip().lower()
+    cleaned = "".join(char if char.isalnum() or char == "-" else "-" for char in raw).strip("-")
+    if not cleaned or not cleaned.startswith("custom-"):
+        cleaned = f"custom-{new_key(10).lower()}"
+    return cleaned[:80]
+
+
+def _safe_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        decoded = json.loads(str(value or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def column_preference(library_id: str) -> list[str]:

@@ -2528,6 +2528,87 @@ button, input, select {
   overflow-wrap: anywhere;
 }
 
+.retrieval-source-manager {
+  border-top: 1px solid #d8e5f2;
+  display: grid;
+  gap: 10px;
+  margin: 0 10px 10px;
+  padding-top: 10px;
+}
+
+.retrieval-source-manager-head,
+.retrieval-source-instance {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.retrieval-source-manager-head > div,
+.retrieval-source-instance > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.retrieval-source-manager-head strong,
+.retrieval-source-instance strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.retrieval-source-manager-head span,
+.retrieval-source-instance span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.retrieval-custom-source-list {
+  display: grid;
+  gap: 8px;
+}
+
+.retrieval-source-instance {
+  background: #f8fbfd;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px;
+}
+
+.retrieval-custom-source-form {
+  background: #fbfdff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.retrieval-custom-source-form > summary {
+  color: #0f3b57;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 900;
+  padding: 10px;
+}
+
+.retrieval-custom-source-fields {
+  display: grid;
+  gap: 10px;
+  padding: 0 10px 10px;
+}
+
+.retrieval-custom-source-form textarea {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 150px;
+  padding: 10px;
+  resize: vertical;
+  width: 100%;
+}
+
 .simple-more-sources {
   border-top: 1px dashed var(--line);
   padding-top: 10px;
