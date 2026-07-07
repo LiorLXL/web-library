@@ -44,7 +44,7 @@ from zotero_web_library.retrieval.providers import (
     search_retrieval,
 )
 from zotero_web_library.sources import create_local_copy, create_read_only_source
-from zotero_web_library import app_store, web
+from zotero_web_library import app_store, retrieval_cli, web
 from zotero_web_library.web import create_app
 from zotero_web_library.zotero_adapter import ZoteroRepository
 
@@ -2140,6 +2140,569 @@ def test_retrieval_query_plan_can_use_ai_pixel_enhancement(
     assert "secret-ai-key" not in json.dumps(plan, ensure_ascii=False)
 
 
+def test_v4_natural_language_plan_translates_chinese_for_english_sources(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("AI_PIXEL_API_KEY", "secret-ai-key")
+    library = create_read_only_source(zotero_fixture, name="V4 Natural Language Plan")
+    calls: list[dict[str, object]] = []
+
+    def fake_post_json(url: str, headers: dict[str, str], payload: dict[str, object], timeout: int) -> dict:
+        calls.append({"url": url, "headers": headers, "payload": payload, "timeout": timeout})
+        messages = payload["messages"]
+        task = json.loads(messages[1]["content"])
+        assert task["input_text"] == "我想找近三年机器人双臂操作的顶会论文和代码"
+        assert task["language_policy"] == "source_adaptive"
+        assert task["safety_limit"] >= 100
+        assert task["minimum_queries_per_source"] == 5
+        assert task["queries_per_material_type"] == 5
+        assert task["planning_granularity"] == "material_type_only"
+        assert "group_by_material_type_not_by_source" in task["quality_rules"]
+        assert "source_query_style_must_inform_terms_but_must_not_create_source_groups" in task["quality_rules"]
+        assert "do_not_include_platform_name_when_source_already_implies_it" in task["quality_rules"]
+        assert task["source_catalog"][0]["query_style"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "detected_language": "zh",
+                                "normalized_topic": "dual-arm robot bimanual manipulation",
+                                "constraints": {"time_range": "recent 3 years", "venues": ["ICRA", "CoRL"]},
+                                "query_groups": [
+                                    {
+                                        "resource_type": "paper",
+                                        "source": "crossref",
+                                        "language": "en",
+                                        "queries": ["dual-arm robot bimanual manipulation", "robot two-arm manipulation ICRA CoRL"],
+                                        "must_include": ["dual-arm robot"],
+                                        "optional_terms": ["bimanual manipulation"],
+                                        "exclude_terms": [],
+                                        "reason": "English scholarly source needs translated robotics terms.",
+                                        "confidence": 0.93,
+                                    },
+                                    {
+                                        "resource_type": "code",
+                                        "source": "github",
+                                        "language": "en",
+                                        "queries": ["bimanual manipulation robot code", "dual arm robot manipulation github"],
+                                        "must_include": ["robot"],
+                                        "optional_terms": ["code"],
+                                        "exclude_terms": [],
+                                        "reason": "Code source should use English implementation terms.",
+                                        "confidence": 0.9,
+                                    },
+                                ],
+                                "coverage_targets": ["paper", "code", "methods", "applications"],
+                                "ambiguities": [],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    plan = web.retrieval_natural_language_plan_for_library(
+        library["library_id"],
+        input_text="我想找近三年机器人双臂操作的顶会论文和代码",
+        mode="quality",
+        sources=["crossref", "github"],
+        material_types=["paper", "code"],
+        ai_post_json=fake_post_json,
+    )
+
+    assert calls
+    assert plan["planner_version"] == "v4"
+    assert plan["search_route"] == "natural_language"
+    assert plan["detected_language"] == "zh"
+    assert plan["normalized_topic"] == "dual-arm robot bimanual manipulation"
+    assert plan["ai_enhancement"]["status"] == "applied"
+    assert any(item["query_text"] == "dual-arm robot bimanual manipulation" for item in plan["queries"])
+    assert any(item["query_text"] == "bimanual manipulation robot code" for item in plan["queries"])
+    assert len(plan["query_groups"]) == 2
+    assert {group["resource_type"] for group in plan["query_groups"]} == {"paper", "code"}
+    assert all(group.get("source") == "" for group in plan["query_groups"])
+    assert all(len(group["queries"]) == 5 for group in plan["query_groups"])
+    assert all(item["language"] == "en" for item in plan["query_groups"])
+    assert "secret-ai-key" not in json.dumps(plan, ensure_ascii=False)
+
+
+def test_v4_fast_natural_language_plan_uses_three_queries_per_material(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("AI_PIXEL_API_KEY", "secret-ai-key")
+    library = create_read_only_source(zotero_fixture, name="V4 Fast Material Plan")
+
+    def fake_post_json(url: str, headers: dict[str, str], payload: dict[str, object], timeout: int) -> dict:
+        task = json.loads(payload["messages"][1]["content"])
+        assert task["queries_per_material_type"] == 3
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "detected_language": "en",
+                                "normalized_topic": "speculative decoding",
+                                "constraints": {},
+                                "query_groups": [
+                                    {
+                                        "resource_type": "paper",
+                                        "language": "en",
+                                        "queries": [
+                                            "speculative decoding",
+                                            "speculative sampling language models",
+                                            "draft model verification",
+                                            "LLM inference acceleration",
+                                        ],
+                                        "reason": "Fast mode still caps by material type.",
+                                        "confidence": 0.9,
+                                    }
+                                ],
+                                "coverage_targets": ["paper"],
+                                "ambiguities": [],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    plan = web.retrieval_natural_language_plan_for_library(
+        library["library_id"],
+        input_text="speculative decoding papers",
+        mode="fast",
+        sources=["crossref", "arxiv"],
+        material_types=["paper"],
+        ai_post_json=fake_post_json,
+    )
+
+    assert len(plan["query_groups"]) == 1
+    assert plan["query_groups"][0]["resource_type"] == "paper"
+    assert plan["query_groups"][0]["source"] == ""
+    assert plan["query_groups"][0]["sources"] == ["crossref", "arxiv"]
+    assert len(plan["query_groups"][0]["queries"]) == 3
+    assert len(plan["queries"]) == 3
+
+
+def test_v4_natural_language_planner_retries_with_compact_prompt(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("AI_PIXEL_API_KEY", "secret-ai-key")
+    library = create_read_only_source(zotero_fixture, name="V4 Natural Language Retry")
+    calls: list[dict[str, object]] = []
+
+    def fake_post_json(url: str, headers: dict[str, str], payload: dict[str, object], timeout: int) -> dict:
+        calls.append({"payload": payload, "timeout": timeout})
+        if len(calls) == 1:
+            raise TimeoutError("The read operation timed out")
+        messages = payload["messages"]
+        task = json.loads(messages[1]["content"])
+        assert task["compact_retry"] is True
+        assert task["queries_per_material_type"] == 5
+        assert "do_not_include_platform_name_when_source_already_implies_it" in task["quality_rules"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "detected_language": "en",
+                                "normalized_topic": "speculative decoding model checkpoints",
+                                "constraints": {},
+                                "query_groups": [
+                                    {
+                                        "resource_type": "model",
+                                        "source": "huggingface",
+                                        "language": "en",
+                                        "queries": [
+                                            "HuggingFace speculative decoding model checkpoint",
+                                            "assisted generation draft model",
+                                            "Medusa EAGLE speculative decoding",
+                                        ],
+                                        "must_include": ["speculative decoding"],
+                                        "optional_terms": ["draft model", "assisted generation"],
+                                        "exclude_terms": [],
+                                        "reason": "Model source needs checkpoint and method aliases.",
+                                        "confidence": 0.9,
+                                    }
+                                ],
+                                "coverage_targets": ["model"],
+                                "ambiguities": [],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    plan = web.retrieval_natural_language_plan_for_library(
+        library["library_id"],
+        input_text="speculative decoding model checkpoint HuggingFace",
+        mode="quality",
+        sources=["huggingface"],
+        material_types=["model"],
+        ai_post_json=fake_post_json,
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["timeout"] == web.RETRIEVAL_PLANNER_TIMEOUT_SECONDS
+    assert calls[1]["timeout"] == web.RETRIEVAL_PLANNER_RETRY_TIMEOUT_SECONDS
+    assert calls[0]["payload"]["max_tokens"] == 2200
+    assert calls[1]["payload"]["max_tokens"] == 1600
+    assert plan["ai_enhancement"]["status"] == "applied"
+    assert plan["ai_enhancement"]["retry"]["used"] is True
+    queries = plan["query_groups"][0]["queries"]
+    assert "speculative decoding model checkpoint" in queries
+    assert len(queries) == 5
+    assert plan["query_groups"][0]["source"] == ""
+    assert plan["query_groups"][0]["sources"] == ["huggingface"]
+    assert all("HuggingFace" not in query and "Hugging Face" not in query for query in queries)
+
+
+def test_v4_natural_language_planner_marks_material_level_fallbacks(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("AI_PIXEL_API_KEY", "secret-ai-key")
+    library = create_read_only_source(zotero_fixture, name="V4 Source Level Fallback")
+    calls: list[dict[str, object]] = []
+
+    def fake_post_json(url: str, headers: dict[str, str], payload: dict[str, object], timeout: int) -> dict:
+        calls.append({"payload": payload, "timeout": timeout})
+        task = json.loads(payload["messages"][1]["content"])
+        if len(calls) <= 2:
+            raise TimeoutError("The read operation timed out")
+        material = task["material_types"][0]
+        if material == "code":
+            raise TimeoutError("code material planner timed out")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "detected_language": "en",
+                                "normalized_topic": "dual-arm robot bimanual manipulation",
+                                "constraints": {},
+                                "query_groups": [
+                                    {
+                                        "resource_type": "paper",
+                                        "source": "crossref",
+                                        "language": "en",
+                                        "queries": [
+                                            "dual-arm robot bimanual manipulation",
+                                            "bimanual manipulation robot learning",
+                                            "two-arm robotic manipulation",
+                                        ],
+                                        "must_include": ["dual-arm robot"],
+                                        "optional_terms": ["bimanual manipulation"],
+                                        "exclude_terms": [],
+                                        "reason": "Material retry generated paper terms.",
+                                        "confidence": 0.9,
+                                    }
+                                ],
+                                "coverage_targets": ["paper"],
+                                "ambiguities": [],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    plan = web.retrieval_natural_language_plan_for_library(
+        library["library_id"],
+        input_text="dual-arm robot bimanual manipulation code and papers",
+        mode="quality",
+        sources=["crossref", "github"],
+        material_types=["paper", "code"],
+        ai_post_json=fake_post_json,
+    )
+
+    assert [json.loads(call["payload"]["messages"][1]["content"])["compact_retry"] for call in calls[:2]] == [False, True]
+    assert any(json.loads(call["payload"]["messages"][1]["content"])["material_types"] == ["paper"] for call in calls[2:])
+    assert any(json.loads(call["payload"]["messages"][1]["content"])["material_types"] == ["code"] for call in calls[2:])
+    assert plan["ai_enhancement"]["status"] == "partial"
+    assert plan["ai_enhancement"]["ai_group_count"] >= 1
+    assert plan["ai_enhancement"]["fallback_group_count"] >= 1
+    statuses = plan["ai_enhancement"]["source_statuses"]
+    assert statuses["crossref"]["status"] == "ai"
+    assert statuses["github"]["status"] == "fallback"
+    material_statuses = plan["ai_enhancement"]["material_statuses"]
+    assert material_statuses["paper"]["status"] == "ai"
+    assert material_statuses["code"]["status"] == "fallback"
+    by_material = {group["resource_type"]: group for group in plan["query_groups"]}
+    assert by_material["paper"]["planning_status"] == "ai"
+    assert by_material["paper"]["source"] == ""
+    assert by_material["paper"]["sources"] == ["crossref"]
+    assert len(by_material["paper"]["queries"]) == 5
+    assert by_material["code"]["planning_status"] == "fallback"
+    assert by_material["code"]["source"] == ""
+    assert by_material["code"]["sources"] == ["github"]
+    assert len(by_material["code"]["queries"]) == 5
+    assert "AI planner failed" not in json.dumps(plan, ensure_ascii=False)
+
+
+def test_guided_keyword_route_bypasses_natural_language_planner(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_read_only_source(zotero_fixture, name="V4 Keyword Plan")
+
+    def fail_natural_language_plan(*_args, **_kwargs):
+        raise AssertionError("keyword route must not call natural language planner")
+
+    monkeypatch.setattr(web, "retrieval_natural_language_plan_for_library", fail_natural_language_plan)
+
+    plan = web.guided_search_plan_for_library(
+        library["library_id"],
+        topic="bimanual manipulation robot",
+        mode="quality",
+        sources=["crossref", "github"],
+        material_types=["paper", "code"],
+        use_ai_planning=True,
+        search_route="keyword",
+        input_text="bimanual manipulation robot",
+    )
+
+    assert plan["search_route"] == "keyword"
+    assert plan["planner_version"] == "v4"
+    assert plan["ai_enhancement"]["requested"] is False
+    assert {item["query_text"] for item in plan["queries"]} == {"bimanual manipulation robot"}
+
+
+def test_v4_fallback_preserves_speculative_decoding_phrase(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_read_only_source(zotero_fixture, name="V4 Fallback Speculative Decoding")
+    registry = web.retrieval_provider_registry_for_library(library["library_id"])
+
+    groups = web.retrieval_v4_fallback_query_groups(
+        "speculative decoding model checkpoint HuggingFace",
+        sources=["crossref", "arxiv", "huggingface"],
+        material_types=["paper", "model"],
+        registry=registry,
+        language_policy="source_adaptive",
+        limit=20,
+        queries_per_group=3,
+    )
+
+    paper_queries = [query for group in groups if group["resource_type"] == "paper" for query in group["queries"]]
+    model_queries = [query for group in groups if group["resource_type"] == "model" for query in group["queries"]]
+    all_queries = paper_queries + model_queries
+    assert "speculative decoding" in paper_queries
+    assert "speculative decoding language models" in paper_queries
+    assert "speculative decoding model checkpoint" in model_queries
+    assert all("HuggingFace model checkpoint speculative" not in query for query in all_queries)
+    assert all("Hugging Face model checkpoint speculative" not in query for query in all_queries)
+
+
+def test_guided_natural_language_job_requires_configured_model(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.delenv("AI_PIXEL_API_KEY", raising=False)
+    library = create_read_only_source(zotero_fixture, name="V4 Natural Language Requires Model")
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/guided-search-jobs",
+        json={
+            "topic": "找机器人双臂操作的顶会论文和代码",
+            "search_route": "natural_language",
+            "mode": "quality",
+            "sources": ["crossref", "github"],
+            "material_types": ["paper", "code"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "模型未配置" in response.get_json()["error"]
+
+
+def test_guided_search_plan_api_returns_editable_v4_plan(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("AI_PIXEL_API_KEY", "secret-ai-key")
+    library = create_read_only_source(zotero_fixture, name="V4 Plan API")
+
+    def fake_ai(*_args, **_kwargs):
+        return {
+            "detected_language": "zh",
+            "normalized_topic": "dual-arm robot bimanual manipulation",
+            "constraints": {"time_range": "recent 3 years"},
+            "query_groups": [
+                {
+                    "resource_type": "paper",
+                    "source": "crossref",
+                    "language": "en",
+                    "queries": ["dual-arm robot bimanual manipulation"],
+                    "must_include": ["dual-arm robot"],
+                    "optional_terms": ["bimanual manipulation"],
+                    "exclude_terms": [],
+                    "reason": "Translated query for English scholarly APIs.",
+                    "confidence": 0.92,
+                }
+            ],
+            "coverage_targets": ["paper"],
+            "ambiguities": [],
+        }
+
+    monkeypatch.setattr(web, "ai_pixel_chat_json", fake_ai)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/guided-search-plan",
+        json={
+            "topic": "找双臂机器人论文",
+            "search_route": "natural_language",
+            "mode": "quality",
+            "limit_per_source": 7,
+            "source_limits": {"crossref": 11},
+            "sources": ["crossref"],
+            "material_types": ["paper"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    plan = payload["plan"]
+    assert plan["planner_version"] == "v4"
+    assert plan["search_route"] == "natural_language"
+    assert plan["strategy"]["limit_per_source"] == 7
+    assert plan["strategy"]["source_limits"]["crossref"] == 11
+    assert plan["query_groups"][0]["queries"][0] == "dual-arm robot bimanual manipulation"
+    assert len(plan["query_groups"][0]["queries"]) >= 3
+    assert app_store.latest_retrieval_guided_job(library["library_id"]) is None
+
+
+def test_guided_search_job_accepts_confirmed_plan(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    monkeypatch.setenv("AI_PIXEL_API_KEY", "secret-ai-key")
+    local_csv = tmp_path / "confirmed-plan.csv"
+    local_csv.write_text(
+        "title,year,doi,authors,abstract,keywords,url,item_type\n"
+        "Dual Arm Robot Manipulation,2026,10.6060/DUAL-ARM,Ada Lovelace,"
+        "Bimanual manipulation robot paper,dual-arm robot,https://example.test/dual,paper\n",
+        encoding="utf-8",
+    )
+    library = create_read_only_source(zotero_fixture, name="V4 Confirmed Plan")
+    client = create_app().test_client()
+    save_response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/local-files",
+        json={"paths": [str(local_csv)]},
+    )
+    assert save_response.status_code == 200
+    confirmed_plan = {
+        "planner_version": "v4",
+        "search_route": "natural_language",
+        "input_text": "找双臂机器人论文",
+        "strategy": {"limit_per_source": 99},
+        "query_groups": [
+            {
+                "resource_type": "paper",
+                "source": "localfile",
+                "language": "en",
+                "queries": ["dual-arm robot bimanual manipulation"],
+                "reason": "User confirmed editable plan.",
+                "confidence": 0.9,
+            }
+        ],
+        "queries": [
+            {
+                "query_text": "dual-arm robot bimanual manipulation",
+                "query": "dual-arm robot bimanual manipulation",
+                "sources": ["localfile"],
+                "resource_type": "paper",
+            }
+        ],
+        "query_count": 1,
+    }
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/retrieval/guided-search-jobs",
+        json={
+            "topic": "找双臂机器人论文",
+            "search_route": "natural_language",
+            "mode": "quality",
+            "limit_per_source": 4,
+            "source_limits": {"localfile": 9},
+            "sources": ["localfile"],
+            "material_types": ["paper"],
+            "plan": confirmed_plan,
+        },
+    )
+
+    assert response.status_code == 200
+    job = response.get_json()["job"]
+    assert job["plan"]["query_groups"][0]["queries"] == ["dual-arm robot bimanual manipulation"]
+    assert job["plan"]["queries"][0]["sources"] == ["localfile"]
+    assert job["plan"]["strategy"]["limit_per_source"] == 4
+    assert job["plan"]["strategy"]["source_limits"]["localfile"] == 9
+    assert "query_limit" not in job["options"]
+    assert job["options"]["source_limits"]["localfile"] == 9
+
+
+def test_retrieval_cli_can_generate_keyword_plan(
+    zotero_fixture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_read_only_source(zotero_fixture, name="V4 CLI Keyword Plan")
+
+    exit_code = retrieval_cli.run(
+        [
+            "plan",
+            "--library-id",
+            library["library_id"],
+            "--route",
+            "keyword",
+            "--input",
+            "bimanual manipulation robot",
+            "--sources",
+            "crossref,github",
+            "--material-types",
+            "paper,code",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["plan"]["search_route"] == "keyword"
+    assert {item["query_text"] for item in payload["plan"]["queries"]} == {"bimanual manipulation robot"}
+
+
 def test_retrieval_query_plan_ignores_unrelated_source_samples(
     zotero_fixture: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3241,11 +3804,17 @@ def test_guided_search_job_runs_inline_and_restores_candidates(
     assert job["status"] == "completed"
     assert job["progress"]["completed_queries"] == 2
     assert job["candidate_count"] == 2
+    event_messages = [str(event.get("message") or "") for event in job["events"]]
+    assert job["progress"]["events"] == job["events"]
+    assert any("任务开始" in message for message in event_messages)
+    assert any("开始检索 1/2" in message for message in event_messages)
+    assert any("完成检索 2/2" in message for message in event_messages)
     assert captured_options[0]["start_year"] == 2017
     assert captured_options[0]["material_types"] == ["paper", "dataset"]
 
     latest = client.get(f"/api/library/{library['library_id']}/retrieval/guided-search-jobs/latest").get_json()["job"]
     assert latest["job_id"] == job["job_id"]
+    assert latest["events"]
     candidates_response = client.get(
         f"/api/library/{library['library_id']}/retrieval/guided-search-jobs/{job['job_id']}/candidates"
     )

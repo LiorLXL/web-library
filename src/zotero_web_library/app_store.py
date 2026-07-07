@@ -11,6 +11,10 @@ from .semantic_tags import normalize_hash_tag, stable_tag_color
 from .utils import new_key, now_iso
 
 
+GUIDED_JOB_EVENT_LIMIT = 40
+GUIDED_JOB_EVENT_MESSAGE_LIMIT = 220
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS libraries (
   library_id TEXT PRIMARY KEY,
@@ -938,12 +942,55 @@ def _guided_job_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     for key, fallback in json_defaults.items():
         item[key.replace("_json", "")] = _decode_json_field(item.pop(key, ""), fallback)
     item["use_ai_planning"] = bool(item.get("use_ai_planning"))
+    options = item.get("options") if isinstance(item.get("options"), dict) else {}
+    item["search_route"] = str(options.get("search_route") or options.get("route") or "").strip()
+    item["input_text"] = str(options.get("input_text") or item.get("topic") or "").strip()
+    item["planner_version"] = str(options.get("planner_version") or "").strip()
+    item["expansion_level"] = str(options.get("expansion_level") or "").strip()
+    item["language_policy"] = str(options.get("language_policy") or "").strip()
     progress = item.get("progress") if isinstance(item.get("progress"), dict) else {}
+    events = progress.get("events") if isinstance(progress.get("events"), list) else []
+    item["events"] = [event for event in events if isinstance(event, dict)][-GUIDED_JOB_EVENT_LIMIT:]
     total = int(progress.get("total_queries") or 0)
     completed = int(progress.get("completed_queries") or 0)
     item["candidate_count"] = int(progress.get("candidate_count") or 0)
     item["progress_ratio"] = round(completed / total, 3) if total else 0
     return item
+
+
+def _guided_event_payload(message: str, kind: str = "progress", data: dict[str, Any] | None = None) -> dict[str, Any]:
+    cleaned = " ".join(str(message or "").split())[:GUIDED_JOB_EVENT_MESSAGE_LIMIT].strip()
+    if not cleaned:
+        return {}
+    event = {
+        "event_id": f"event-{new_key(10).lower()}",
+        "kind": str(kind or "progress").strip().lower() or "progress",
+        "message": cleaned,
+        "created_at": now_iso(),
+    }
+    if isinstance(data, dict) and data:
+        event["data"] = data
+    return event
+
+
+def _guided_progress_with_event(
+    progress: dict[str, Any] | None,
+    message: str,
+    *,
+    kind: str = "progress",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    next_progress = dict(progress or {}) if isinstance(progress, dict) else {}
+    event = _guided_event_payload(message, kind=kind, data=data)
+    if not event:
+        return next_progress
+    events = [item for item in next_progress.get("events") or [] if isinstance(item, dict)]
+    latest = events[-1] if events else {}
+    if str(latest.get("kind") or "") == event["kind"] and str(latest.get("message") or "") == event["message"]:
+        return next_progress
+    events.append(event)
+    next_progress["events"] = events[-GUIDED_JOB_EVENT_LIMIT:]
+    return next_progress
 
 
 def create_retrieval_guided_job(
@@ -966,6 +1013,7 @@ def create_retrieval_guided_job(
     timestamp = now_iso()
     job_id = f"guided-{new_key(12).lower()}"
     progress = {"stage": "queued", "total_queries": 0, "completed_queries": 0, "failed_queries": 0, "candidate_count": 0}
+    progress = _guided_progress_with_event(progress, "已创建引导式检索任务，等待后台执行。", kind="queued")
     with connect() as conn:
         conn.execute(
             """
@@ -1091,16 +1139,39 @@ def update_retrieval_guided_job(
     return retrieval_guided_job(library_id, job_id)
 
 
+def append_retrieval_guided_event(
+    library_id: str,
+    job_id: str,
+    message: str,
+    *,
+    kind: str = "progress",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    job = retrieval_guided_job(library_id, job_id)
+    progress = _guided_progress_with_event(
+        job.get("progress") if isinstance(job.get("progress"), dict) else {},
+        message,
+        kind=kind,
+        data=data,
+    )
+    return update_retrieval_guided_job(library_id, job_id, progress=progress)
+
+
 def cancel_retrieval_guided_job(library_id: str, job_id: str, reason: str = "Guided search canceled.") -> dict[str, Any]:
     job = retrieval_guided_job(library_id, job_id)
     if job.get("status") not in {"queued", "running", "pausing"}:
         return job
+    progress = _guided_progress_with_event(
+        {**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "canceled"},
+        reason,
+        kind="warning",
+    )
     return update_retrieval_guided_job(
         library_id,
         job_id,
         status="canceled",
         error=reason,
-        progress={**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "canceled"},
+        progress=progress,
         finished=True,
     )
 
@@ -1109,12 +1180,17 @@ def pause_retrieval_guided_job(library_id: str, job_id: str, reason: str = "Guid
     job = retrieval_guided_job(library_id, job_id)
     if job.get("status") not in {"queued", "running"}:
         raise ValueError("guided search job cannot be paused")
+    progress = _guided_progress_with_event(
+        {**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "paused"},
+        reason,
+        kind="warning",
+    )
     return update_retrieval_guided_job(
         library_id,
         job_id,
         status="paused",
         error=reason,
-        progress={**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "paused"},
+        progress=progress,
     )
 
 
@@ -1122,12 +1198,17 @@ def resume_retrieval_guided_job(library_id: str, job_id: str) -> dict[str, Any]:
     job = retrieval_guided_job(library_id, job_id)
     if job.get("status") != "paused":
         raise ValueError("guided search job is not paused")
+    progress = _guided_progress_with_event(
+        {**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "queued"},
+        "已恢复引导式检索任务，等待继续执行。",
+        kind="progress",
+    )
     return update_retrieval_guided_job(
         library_id,
         job_id,
         status="queued",
         error="",
-        progress={**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "queued"},
+        progress=progress,
     )
 
 

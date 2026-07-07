@@ -123,6 +123,9 @@ AI_CANDIDATE_EVALUATION_TIMEOUT_SECONDS = 90
 AI_CANDIDATE_MANUAL_EVALUATION_LIMIT = 10
 AI_CANDIDATE_METADATA_ABSTRACT_LIMIT = 600
 AI_CANDIDATE_SCORE_FRAMEWORK = "ai_rubric_v1"
+RETRIEVAL_PLANNER_TIMEOUT_SECONDS = 90
+RETRIEVAL_PLANNER_RETRY_TIMEOUT_SECONDS = 45
+RETRIEVAL_PLANNER_MATERIAL_TIMEOUT_SECONDS = 30
 DETERMINISTIC_CANDIDATE_SCORE_FRAMEWORK = "metadata_rules_v1"
 SENSITIVE_CONFIG_KEY_RE = re.compile(
     r"(authorization|api[-_ ]?key|token|secret|password|credential|bearer)",
@@ -4621,15 +4624,39 @@ def normalize_guided_material_types(value: Any) -> list[str]:
     return list(dict.fromkeys(normalized)) or ["paper", "code", "model", "dataset", "benchmark", "website"]
 
 
+def guided_planner_queries_per_material(mode: str) -> int:
+    return 3 if mode == "fast" else 5
+
+
 def guided_strategy(mode: str) -> dict[str, Any]:
     if mode == "fast":
-        return {"query_limit": 3, "limit_per_source": 6, "sort_mode": "relevance", "auto_expand": False}
+        return {"query_limit": 120, "limit_per_source": 5, "minimum_queries_per_group": 3, "queries_per_material_type": 3, "sort_mode": "relevance", "auto_expand": False}
     if mode == "coverage":
-        return {"query_limit": 10, "limit_per_source": 20, "sort_mode": "authority", "auto_expand": True}
-    return {"query_limit": 7, "limit_per_source": 12, "sort_mode": "authority", "auto_expand": False}
+        return {"query_limit": 160, "limit_per_source": 20, "minimum_queries_per_group": 5, "queries_per_material_type": 5, "sort_mode": "authority", "auto_expand": True}
+    return {"query_limit": 120, "limit_per_source": 8, "minimum_queries_per_group": 5, "queries_per_material_type": 5, "sort_mode": "authority", "auto_expand": False}
 
 
-def guided_search_options(mode: str, time_range: dict[str, Any], material_types: list[str]) -> dict[str, Any]:
+def normalize_guided_limit_per_source(value: Any, mode: str) -> int:
+    default = 5 if mode == "fast" else 8
+    parsed = safe_int(value) or default
+    return max(1, min(parsed, 50))
+
+
+def normalize_guided_query_limit(value: Any, mode: str) -> int:
+    default = safe_int(guided_strategy(mode).get("query_limit")) or 120
+    parsed = safe_int(value) or default
+    return max(1, min(parsed, 200))
+
+
+def guided_search_options(
+    mode: str,
+    time_range: dict[str, Any],
+    material_types: list[str],
+    *,
+    query_limit: int | None = None,
+    limit_per_source: int | None = None,
+    source_limits: dict[str, int] | None = None,
+) -> dict[str, Any]:
     strategy = guided_strategy(mode)
     return {
         "start_year": time_range.get("start_year"),
@@ -4637,7 +4664,1307 @@ def guided_search_options(mode: str, time_range: dict[str, Any], material_types:
         "material_types": material_types,
         "sort_mode": strategy["sort_mode"],
         "strategy_mode": mode,
+        "limit_per_source": normalize_guided_limit_per_source(limit_per_source, mode),
+        "source_limits": source_limits or {},
     }
+
+
+def apply_guided_plan_limit(
+    plan: dict[str, Any],
+    limit_per_source: int,
+    source_limits: dict[str, int] | None = None,
+    query_limit: int | None = None,
+) -> dict[str, Any]:
+    if not isinstance(plan, dict):
+        return plan
+    strategy = plan.get("strategy") if isinstance(plan.get("strategy"), dict) else {}
+    next_strategy = {
+        **strategy,
+        "limit_per_source": normalize_guided_limit_per_source(limit_per_source, str(plan.get("mode") or "quality")),
+    }
+    if query_limit:
+        next_strategy["query_limit"] = normalize_guided_query_limit(query_limit, str(plan.get("mode") or "quality"))
+    if source_limits:
+        next_strategy["source_limits"] = source_limits
+    plan["strategy"] = next_strategy
+    return plan
+
+
+def guided_limit_for_sources(source_limits: dict[str, Any], sources: list[str], fallback: int) -> int:
+    limits = [
+        safe_int(source_limits.get(str(source or "").strip().lower()))
+        for source in sources
+        if str(source or "").strip().lower() in source_limits
+    ]
+    limits = [limit for limit in limits if limit > 0]
+    return max(limits) if limits else max(1, min(safe_int(fallback) or 10, 50))
+
+
+def normalize_retrieval_search_route(value: Any, *, default: str = "legacy") -> str:
+    route = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "topic": "keyword",
+        "topic_keyword": "keyword",
+        "direct": "keyword",
+        "exact": "keyword",
+        "nl": "natural_language",
+        "natural": "natural_language",
+        "semantic": "natural_language",
+        "agentic": "agent",
+    }
+    route = aliases.get(route, route)
+    if route in {"keyword", "natural_language", "agent", "legacy"}:
+        return route
+    return default
+
+
+def normalize_retrieval_expansion_level(value: Any) -> str:
+    level = str(value or "balanced").strip().lower()
+    return level if level in {"conservative", "balanced", "high_recall"} else "balanced"
+
+
+def normalize_retrieval_language_policy(value: Any) -> str:
+    policy = str(value or "source_adaptive").strip().lower()
+    aliases = {"adaptive": "source_adaptive", "all_bilingual": "bilingual_all", "english": "english_only"}
+    policy = aliases.get(policy, policy)
+    return policy if policy in {"source_adaptive", "bilingual_all", "english_only"} else "source_adaptive"
+
+
+def retrieval_text_has_chinese(value: Any) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", str(value or "")))
+
+
+def retrieval_v4_source_language(source: str, *, input_text: str, language_policy: str) -> str:
+    if language_policy == "english_only":
+        return "en"
+    if language_policy == "bilingual_all":
+        return "bilingual" if retrieval_text_has_chinese(input_text) else "en"
+    if retrieval_text_has_chinese(input_text) and source in {"brave", "localfile", "httpjson", "sqlite", "manifest"}:
+        return "bilingual"
+    return "en"
+
+
+def retrieval_v4_source_query_style(source: str, resource_types: list[str]) -> dict[str, Any]:
+    source_key = str(source or "").strip().lower()
+    types = {normalized_material_type(item) or str(item) for item in resource_types or []}
+    platform_terms = {
+        "github": ["GitHub", "github"],
+        "gitlab": ["GitLab", "gitlab"],
+        "huggingface": ["HuggingFace", "Hugging Face", "huggingface"],
+        "zenodo": ["Zenodo", "zenodo"],
+        "figshare": ["Figshare", "figshare"],
+        "openml": ["OpenML", "openml"],
+        "openreview": ["OpenReview", "openreview"],
+        "brave": ["Brave", "brave search"],
+    }.get(source_key, [])
+    if types & {"code"}:
+        style = "code_search: implementation-oriented keywords; avoid papers-only words unless the user asks for papers"
+    elif types & {"model"}:
+        style = "model_search: model/checkpoint/task keywords; include architecture, method alias, and benchmark terms"
+    elif types & {"dataset", "benchmark"}:
+        style = "data_search: dataset/benchmark/task keywords; include evaluation, leaderboard, corpus, or benchmark aliases"
+    elif types & {"website"}:
+        style = "web_search: natural web keywords; project, documentation, demo, or official page queries are allowed"
+    else:
+        style = "scholarly_search: concise academic phrases; include exact topic, synonym, method alias, and survey/evaluation angles"
+    return {
+        "query_style": style,
+        "avoid_terms": platform_terms,
+        "platform_name_policy": "do_not_include_source_platform_name_unless_it_is_the_research_topic",
+    }
+
+
+def retrieval_v4_source_catalog(registry: dict[str, Any], sources: list[str]) -> list[dict[str, Any]]:
+    statuses = retrieval_source_statuses(registry=registry)
+    selected = set(sources)
+    catalog: list[dict[str, Any]] = []
+    for status in statuses:
+        name = str(status.get("name") or "")
+        if not name or name not in selected:
+            continue
+        resource_types = [normalized_material_type(item) or str(item) for item in status.get("resource_types") or []]
+        source_style = retrieval_v4_source_query_style(name, resource_types)
+        catalog.append(
+            {
+                "source": name,
+                "label": str(status.get("label") or name),
+                "available": bool(status.get("available")),
+                "configured": bool(status.get("configured")),
+                "resource_types": resource_types,
+                "source_category": str(status.get("source_category") or ""),
+                "query_style": source_style["query_style"],
+                "avoid_terms": source_style["avoid_terms"],
+                "platform_name_policy": source_style["platform_name_policy"],
+            }
+        )
+    return catalog
+
+
+def retrieval_v4_sources_for_material(
+    source_catalog: list[dict[str, Any]],
+    material_type: str,
+    fallback_sources: list[str],
+) -> list[str]:
+    matched = [
+        str(item.get("source") or "")
+        for item in source_catalog
+        if material_type in {normalized_material_type(value) for value in item.get("resource_types") or []}
+    ]
+    return [source for source in matched if source] or fallback_sources
+
+
+def retrieval_v4_concept_terms(input_text: str) -> list[str]:
+    text = str(input_text or "").strip()
+    lower = text.casefold()
+    concepts: list[str] = []
+    if any(term in lower for term in ["speculative decoding", "speculative sampling", "投机解码", "推测解码"]):
+        concepts.extend(
+            [
+                "speculative decoding",
+                "speculative sampling",
+                "LLM inference acceleration",
+                "assisted generation",
+            ]
+        )
+    if "self-speculative" in lower or "self speculative" in lower:
+        concepts.append("self-speculative decoding")
+    if "draft model" in lower or "草稿模型" in text:
+        concepts.extend(["draft model", "draft model verification"])
+    if "model checkpoint" in lower or ("checkpoint" in lower and "model" in lower) or "检查点" in text:
+        concepts.extend(["model checkpoint", "draft model checkpoint"])
+    if "huggingface" in lower or "hugging face" in lower:
+        concepts.append("Hugging Face")
+    known: list[tuple[str, list[str]]] = [
+        ("投机解码", ["speculative decoding", "speculative sampling", "LLM inference acceleration"]),
+        ("双臂", ["dual-arm robot", "bimanual manipulation"]),
+        ("机器人", ["robotics", "robot manipulation"]),
+        ("操作", ["manipulation"]),
+        ("顶会", ["top conference"]),
+        ("代码", ["code implementation"]),
+        ("模型", ["model"]),
+        ("数据集", ["dataset"]),
+        ("基准", ["benchmark"]),
+        ("榜单", ["leaderboard"]),
+        ("自然语言", ["natural language"]),
+        ("大模型", ["large language model"]),
+        ("推理加速", ["inference acceleration"]),
+        ("推测解码", ["speculative decoding"]),
+        ("草稿模型", ["draft model", "draft model verification"]),
+        ("检查点", ["checkpoint", "model checkpoint"]),
+        ("模型检查点", ["model checkpoint", "HuggingFace checkpoint"]),
+        ("HuggingFace", ["HuggingFace", "model checkpoint"]),
+    ]
+    for token, values in known:
+        if token in text:
+            concepts.extend(values)
+    english_terms = [term for term in retrieval_query_plan_terms(text) if re.search(r"[a-z]", term, re.I)]
+    concepts.extend(english_terms)
+    if not concepts and lower:
+        concepts.append(lower)
+    return list(dict.fromkeys(concepts))
+
+
+def retrieval_v4_fallback_query_variants(input_text: str, material: str) -> list[str]:
+    lower = str(input_text or "").casefold()
+    if any(term in lower for term in ["speculative decoding", "speculative sampling", "投机解码", "推测解码"]):
+        speculative_variants = {
+            "paper": [
+                "speculative decoding",
+                "speculative decoding language models",
+                "speculative sampling large language models",
+                "draft model verification speculative decoding",
+                "LLM inference acceleration speculative decoding",
+                "self-speculative decoding language models",
+                "Medusa speculative decoding",
+                "EAGLE speculative decoding",
+                "lookahead decoding language models",
+            ],
+            "code": [
+                "speculative decoding implementation",
+                "speculative decoding repository",
+                "assisted generation draft model code",
+                "vLLM speculative decoding",
+                "Medusa speculative decoding implementation",
+                "EAGLE speculative decoding implementation",
+            ],
+            "model": [
+                "speculative decoding model checkpoint",
+                "speculative decoding draft model",
+                "assisted generation draft model",
+                "Hugging Face speculative decoding model",
+                "Hugging Face draft model checkpoint",
+                "LLM inference acceleration checkpoint",
+            ],
+            "dataset": [
+                "speculative decoding benchmark dataset",
+                "LLM inference acceleration benchmark dataset",
+                "speculative decoding evaluation data",
+                "draft model evaluation dataset",
+            ],
+            "benchmark": [
+                "speculative decoding benchmark",
+                "LLM inference acceleration benchmark",
+                "speculative decoding leaderboard",
+                "draft model verification benchmark",
+            ],
+            "website": [
+                "speculative decoding project",
+                "speculative decoding documentation",
+                "Hugging Face speculative decoding",
+                "assisted generation documentation",
+            ],
+        }
+        return [
+            query
+            for query in dict.fromkeys(clean_v4_query_text(item) for item in speculative_variants.get(material, speculative_variants["paper"]))
+            if query
+        ]
+    concepts = retrieval_v4_concept_terms(input_text)
+    english_concepts = [term for term in concepts if re.search(r"[a-z]", term, re.I)]
+    base_terms = english_concepts or concepts
+    base = " ".join(base_terms[:3]).strip() or str(input_text or "").strip()
+    variants_by_material = {
+        "paper": [
+            base,
+            f"{base} method",
+            f"{base} survey",
+            f"{base} benchmark",
+            " ".join(base_terms[:2]).strip(),
+        ],
+        "code": [
+            f"{base} implementation",
+            f"{base} repository",
+            f"{base} code",
+            "speculative decoding implementation repository" if "speculative decoding" in base.casefold() else "",
+            "draft model verification code" if "draft model" in base.casefold() or "speculative decoding" in base.casefold() else "",
+        ],
+        "model": [
+            f"{base} model checkpoint",
+            f"{base} HuggingFace",
+            f"{base} draft model",
+            "speculative decoding model checkpoint" if "speculative decoding" in base.casefold() else "",
+            "assisted generation draft model" if "speculative decoding" in base.casefold() else "",
+        ],
+        "dataset": [
+            f"{base} dataset",
+            f"{base} benchmark dataset",
+            f"{base} evaluation data",
+            "LLM inference acceleration benchmark dataset" if "speculative decoding" in base.casefold() else "",
+        ],
+        "benchmark": [
+            f"{base} benchmark",
+            f"{base} leaderboard",
+            f"{base} evaluation",
+            "LLM inference acceleration benchmark" if "speculative decoding" in base.casefold() else "",
+        ],
+        "website": [
+            f"{base} project",
+            f"{base} documentation",
+            f"{base} resource",
+            "speculative decoding project page" if "speculative decoding" in base.casefold() else "",
+        ],
+    }
+    return [
+        query
+        for query in dict.fromkeys(clean_v4_query_text(item) for item in variants_by_material.get(material, [base, f"{base} {material}"]))
+        if query
+    ]
+
+
+def retrieval_v4_platform_terms_for_query(source: str, material: str) -> list[str]:
+    source_key = str(source or "").strip().lower()
+    source_terms = {
+        "github": ["GitHub", "github"],
+        "gitlab": ["GitLab", "gitlab"],
+        "huggingface": ["HuggingFace", "Hugging Face", "huggingface"],
+        "zenodo": ["Zenodo", "zenodo"],
+        "figshare": ["Figshare", "figshare"],
+        "openml": ["OpenML", "openml"],
+        "openreview": ["OpenReview", "openreview"],
+    }.get(source_key, [])
+    if material == "website":
+        return source_terms
+    generic_platform_terms = [
+        "GitHub",
+        "github",
+        "GitLab",
+        "gitlab",
+        "HuggingFace",
+        "Hugging Face",
+        "huggingface",
+    ]
+    return list(dict.fromkeys([*source_terms, *generic_platform_terms]))
+
+
+def retrieval_v4_clean_source_query(value: Any, *, source: str, material: str) -> str:
+    query = clean_v4_query_text(value)
+    if not query:
+        return ""
+    for term in retrieval_v4_platform_terms_for_query(source, material):
+        query = re.sub(rf"(?i)(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", " ", query)
+    query = clean_v4_query_text(query)
+    if not query:
+        return ""
+    if len(retrieval_query_plan_terms(query)) == 1 and len(query) < 10:
+        return ""
+    return query
+
+
+def retrieval_v4_fallback_queries_for_source(input_text: str, material: str, source: str, minimum: int) -> list[str]:
+    variants = retrieval_v4_fallback_query_variants(input_text, material)
+    queries: list[str] = []
+    for variant in variants:
+        query = retrieval_v4_clean_source_query(variant, source=source, material=material)
+        if query and query not in queries:
+            queries.append(query)
+    if len(queries) >= minimum:
+        return queries
+    core_terms = [term for term in retrieval_v4_concept_terms(input_text) if term not in {"GitHub", "GitLab", "Hugging Face", "HuggingFace"}]
+    core = " ".join(core_terms[:3]).strip() or str(input_text or "").strip()
+    source_hints = {
+        "paper": ["survey", "method", "evaluation"],
+        "code": ["implementation", "repository", "example"],
+        "model": ["draft model", "checkpoint", "assisted generation"],
+        "dataset": ["benchmark dataset", "evaluation data", "corpus"],
+        "benchmark": ["benchmark", "leaderboard", "evaluation"],
+        "website": ["project", "documentation", "tutorial"],
+    }
+    for hint in source_hints.get(material, [material]):
+        query = retrieval_v4_clean_source_query(f"{core} {hint}", source=source, material=material)
+        if query and query not in queries:
+            queries.append(query)
+        if len(queries) >= minimum:
+            break
+    return queries
+
+
+def retrieval_v4_fallback_query_groups(
+    input_text: str,
+    *,
+    sources: list[str],
+    material_types: list[str],
+    registry: dict[str, Any],
+    language_policy: str,
+    limit: int,
+    queries_per_group: int = 3,
+) -> list[dict[str, Any]]:
+    catalog = retrieval_v4_source_catalog(registry, sources)
+    concepts = retrieval_v4_concept_terms(input_text)
+    suffixes = {
+        "paper": ["survey", "method", "benchmark"],
+        "code": ["implementation", "repository", "code"],
+        "model": ["model", "checkpoint", "HuggingFace"],
+        "dataset": ["dataset", "data", "benchmark"],
+        "benchmark": ["benchmark", "leaderboard", "evaluation"],
+        "website": ["project", "documentation", "resource"],
+    }
+    groups: list[dict[str, Any]] = []
+    per_group = max(3, min(safe_int(queries_per_group) or 3, 12))
+    for material in material_types:
+        material_sources = retrieval_v4_sources_for_material(catalog, material, sources)
+        for source in material_sources:
+            language = retrieval_v4_source_language(source, input_text=input_text, language_policy=language_policy)
+            variants = retrieval_v4_fallback_queries_for_source(input_text, material, source, per_group)
+            if language == "bilingual" and retrieval_text_has_chinese(input_text):
+                chinese_query = retrieval_v4_clean_source_query(str(input_text or "").strip(), source=source, material=material)
+                if chinese_query:
+                    variants.append(chinese_query)
+            queries = [query for query in dict.fromkeys(variants) if query][:per_group]
+            if not queries:
+                base = " ".join(retrieval_v4_concept_terms(input_text)[:3]).strip() or str(input_text or "").strip()
+                raw_query = base if material == "paper" else f"{base} {suffixes.get(material, [material])[0]}".strip()
+                query = retrieval_v4_clean_source_query(raw_query, source=source, material=material) or clean_v4_query_text(raw_query)
+                queries = [query]
+            groups.append(
+                {
+                    "resource_type": material,
+                    "source": source,
+                    "language": language,
+                    "queries": queries,
+                    "must_include": concepts[:3],
+                    "optional_terms": suffixes.get(material, [])[:3],
+                    "exclude_terms": [],
+                    "reason": "deterministic_v4_fallback",
+                    "confidence": 0.45,
+                    "planning_status": "fallback",
+                    "planning_message": "AI 未覆盖该源，已用规则补足。",
+                }
+            )
+            if len(groups) >= limit:
+                return groups
+    return groups
+
+
+def retrieval_v4_fallback_material_query_groups(
+    input_text: str,
+    *,
+    sources: list[str],
+    material_types: list[str],
+    registry: dict[str, Any],
+    language_policy: str,
+    limit: int,
+    queries_per_group: int,
+) -> list[dict[str, Any]]:
+    catalog = retrieval_v4_source_catalog(registry, sources)
+    concepts = retrieval_v4_concept_terms(input_text)
+    groups: list[dict[str, Any]] = []
+    per_group = max(1, min(safe_int(queries_per_group) or 3, 8))
+    suffixes = {
+        "paper": ["survey", "method", "evaluation"],
+        "code": ["implementation", "repository", "code"],
+        "model": ["model", "checkpoint", "task"],
+        "dataset": ["dataset", "data", "benchmark"],
+        "benchmark": ["benchmark", "leaderboard", "evaluation"],
+        "website": ["project", "documentation", "resource"],
+    }
+    extra_suffixes = {
+        "paper": ["review", "benchmark", "applications"],
+        "code": ["python implementation", "open source implementation", "library"],
+        "model": ["draft model", "pretrained model", "architecture"],
+        "dataset": ["evaluation dataset", "corpus", "benchmark data"],
+        "benchmark": ["evaluation protocol", "comparison", "results"],
+        "website": ["tutorial", "demo", "official documentation"],
+    }
+    for material in material_types:
+        material_sources = retrieval_v4_sources_for_material(catalog, material, sources)
+        variants = retrieval_v4_fallback_queries_for_source(input_text, material, "", per_group)
+        queries = [query for query in dict.fromkeys(variants) if query][:per_group]
+        if len(queries) < per_group:
+            base = " ".join(retrieval_v4_concept_terms(input_text)[:3]).strip() or str(input_text or "").strip()
+            for suffix in extra_suffixes.get(material, []):
+                query = retrieval_v4_clean_source_query(f"{base} {suffix}", source="", material=material)
+                if query and query not in queries:
+                    queries.append(query)
+                if len(queries) >= per_group:
+                    break
+        if len(queries) < per_group:
+            base = " ".join(retrieval_v4_concept_terms(input_text)[:3]).strip() or str(input_text or "").strip()
+            filler_suffixes = {
+                "paper": ["overview", "recent advances", "applications"],
+                "code": ["example implementation", "inference implementation", "serving code"],
+                "model": ["model card", "task checkpoint", "inference model"],
+                "dataset": ["training data", "evaluation corpus", "test set"],
+                "benchmark": ["baseline comparison", "evaluation suite", "performance results"],
+                "website": ["project page", "technical blog", "documentation"],
+            }.get(material, [material])
+            for suffix in filler_suffixes:
+                query = retrieval_v4_clean_source_query(f"{base} {suffix}", source="", material=material)
+                if query and query not in queries:
+                    queries.append(query)
+                if len(queries) >= per_group:
+                    break
+        if not queries:
+            base = " ".join(retrieval_v4_concept_terms(input_text)[:3]).strip() or str(input_text or "").strip()
+            queries = [clean_v4_query_text(f"{base} {suffixes.get(material, [material])[0]}".strip()) or base]
+        groups.append(
+            {
+                "resource_type": material,
+                "source": "",
+                "sources": material_sources,
+                "language": retrieval_v4_source_language(material_sources[0] if material_sources else "", input_text=input_text, language_policy=language_policy),
+                "queries": queries,
+                "must_include": concepts[:3],
+                "optional_terms": suffixes.get(material, [])[:3],
+                "exclude_terms": [],
+                "reason": "deterministic_v4_material_fallback",
+                "confidence": 0.45,
+                "planning_status": "fallback",
+                "planning_message": "AI 未覆盖该资料类型，已用规则补足。",
+            }
+        )
+        if len(groups) >= limit:
+            return groups
+    return groups
+
+
+def retrieval_v4_expected_pairs(
+    source_catalog: list[dict[str, Any]],
+    sources: list[str],
+    material_types: list[str],
+    limit: int,
+) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for material in material_types:
+        for source in retrieval_v4_sources_for_material(source_catalog, material, sources):
+            key = (str(source or "").strip().lower(), material)
+            if not key[0] or key in seen:
+                continue
+            seen.add(key)
+            pairs.append(key)
+            if len(pairs) >= limit:
+                return pairs
+    return pairs
+
+
+def retrieval_v4_covered_pairs(query_groups: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    return {
+        (str(group.get("source") or "").strip().lower(), normalized_material_type(group.get("resource_type")) or "paper")
+        for group in query_groups
+        if str(group.get("source") or "").strip()
+    }
+
+
+def retrieval_v4_covered_materials(query_groups: list[dict[str, Any]]) -> set[str]:
+    return {
+        normalized_material_type(group.get("resource_type")) or "paper"
+        for group in query_groups
+        if isinstance(group, dict)
+    }
+
+
+def retrieval_v4_mark_plan_groups(
+    query_groups: list[dict[str, Any]],
+    *,
+    status: str,
+    message: str,
+    reason: str | None = None,
+) -> list[dict[str, Any]]:
+    marked: list[dict[str, Any]] = []
+    for group in query_groups:
+        if not isinstance(group, dict):
+            continue
+        next_group = dict(group)
+        next_group["planning_status"] = status
+        next_group["planning_message"] = message
+        if reason:
+            next_group["planning_reason"] = reason
+        marked.append(next_group)
+    return marked
+
+
+def retrieval_v4_source_materials(
+    source_catalog: list[dict[str, Any]],
+    source: str,
+    material_types: list[str],
+) -> list[str]:
+    source_key = str(source or "").strip().lower()
+    selected = set(material_types)
+    for item in source_catalog:
+        if str(item.get("source") or "").strip().lower() == source_key:
+            resource_types = {normalized_material_type(value) or str(value) for value in item.get("resource_types") or []}
+            matched = [material for material in material_types if material in resource_types]
+            return matched or material_types
+    return [material for material in material_types if material in selected]
+
+
+def retrieval_v4_group_material_statuses(query_groups: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    statuses: dict[str, dict[str, Any]] = {}
+    for group in query_groups:
+        material = normalized_material_type(group.get("resource_type")) or "paper"
+        status = str(group.get("planning_status") or "ai").strip().lower()
+        message = str(group.get("planning_message") or "").strip()
+        sources = [str(source or "").strip().lower() for source in group.get("sources") or [] if str(source or "").strip()]
+        row = statuses.setdefault(material, {"material_type": material, "status": "ai", "sources": [], "messages": []})
+        for source in sources:
+            if source not in row["sources"]:
+                row["sources"].append(source)
+        if message and message not in row["messages"]:
+            row["messages"].append(message)
+        if status in {"fallback", "error"}:
+            row["status"] = "fallback" if row["status"] != "partial" else "partial"
+        elif status != row["status"] and row["status"] in {"ai", "fallback"}:
+            row["status"] = "partial"
+    return statuses
+
+
+def retrieval_v4_group_source_statuses(query_groups: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    statuses: dict[str, dict[str, Any]] = {}
+    for group in query_groups:
+        group_sources = [str(group.get("source") or "").strip().lower()]
+        group_sources.extend(str(source or "").strip().lower() for source in group.get("sources") or [])
+        for source in [source for source in dict.fromkeys(group_sources) if source]:
+            material = normalized_material_type(group.get("resource_type")) or "paper"
+            status = str(group.get("planning_status") or "ai").strip().lower()
+            message = str(group.get("planning_message") or "").strip()
+            row = statuses.setdefault(source, {"source": source, "status": "ai", "materials": [], "messages": []})
+            if material not in row["materials"]:
+                row["materials"].append(material)
+            if message and message not in row["messages"]:
+                row["messages"].append(message)
+            if status in {"fallback", "error"}:
+                row["status"] = "fallback" if row["status"] != "partial" else "partial"
+            elif status != row["status"] and row["status"] in {"ai", "fallback"}:
+                row["status"] = "partial"
+    return statuses
+
+
+def retrieval_v4_plan_messages(
+    input_text: str,
+    *,
+    mode: str,
+    material_types: list[str],
+    source_catalog: list[dict[str, Any]],
+    expansion_level: str,
+    language_policy: str,
+    limit: int,
+    compact: bool = False,
+) -> list[dict[str, str]]:
+    queries_per_material = guided_planner_queries_per_material(mode)
+    payload = {
+        "input_text": input_text,
+        "mode": mode,
+        "material_types": material_types,
+        "source_catalog": source_catalog,
+        "expansion_level": expansion_level,
+        "language_policy": language_policy,
+        "safety_limit": limit,
+        "planning_granularity": "material_type_only",
+        "queries_per_material_type": queries_per_material,
+        "minimum_queries_per_source": queries_per_material,
+        "minimum_queries_per_group": queries_per_material,
+        "compact_retry": compact,
+        "request_profile": {
+            "route": "natural_language_retrieval",
+            "goal": "turn vague or multilingual research needs into material-type search keywords",
+            "query_count_policy": "mode decides query count per material type: fast=3, quality=5; never bind it to per-source candidate limit",
+        },
+        "quality_rules": [
+            "translate_non_english_to_english_for_english_sources",
+            "group_by_material_type_not_by_source",
+            "generate_queries_once_per_material_type",
+            "source_query_style_must_inform_terms_but_must_not_create_source_groups",
+            "do_not_include_platform_name_when_source_already_implies_it",
+            "preserve_exact_technical_phrases_and_standard_aliases",
+            "each_query_must_have_a_distinct_retrieval_angle_not_suffix_only",
+            "exact_query_count_per_material_type",
+            "avoid_one_word_or_overly_broad_queries",
+            "do_not_invent_papers_ids_urls_or_facts",
+        ],
+        "bad_query_patterns": [
+            "HuggingFace model checkpoint speculative",
+            "HuggingFace model checkpoint speculative method",
+            "topic method / topic survey / topic benchmark when only suffix changes",
+        ],
+        "good_query_examples": {
+            "paper": [
+                "speculative decoding language models",
+                "draft model verification speculative decoding",
+                "LLM inference acceleration assisted generation",
+            ],
+            "model": [
+                "speculative decoding draft model",
+                "assisted generation model checkpoint",
+                "Medusa EAGLE speculative decoding",
+            ],
+            "code": [
+                "speculative decoding implementation",
+                "assisted generation draft model code",
+                "vLLM speculative decoding",
+            ],
+        },
+        "schema": {
+            "detected_language": "zh | en | mixed",
+            "normalized_topic": "short English topic when possible",
+            "constraints": {
+                "time_range": "explicit time constraint if any",
+                "venue_or_quality": "conference/journal/authority preference if any",
+                "must_include": ["core concepts"],
+                "exclude_terms": ["negative terms"],
+            },
+            "query_groups": [
+                {
+                    "resource_type": "paper | code | model | dataset | benchmark | website",
+                    "language": "en | zh | bilingual",
+                    "queries": [f"exactly {queries_per_material} search queries for this material type"],
+                    "must_include": ["core terms"],
+                    "optional_terms": ["aliases, hypernyms, hyponyms, method names"],
+                    "exclude_terms": ["negative terms"],
+                    "reason": "short reason",
+                    "confidence": 0.0,
+                }
+            ],
+            "coverage_targets": ["core_concept", "synonyms", "methods", "applications"],
+            "ambiguities": ["unclear points"],
+        },
+    }
+    if compact:
+        payload["source_catalog"] = [
+            {
+                "source": item.get("source"),
+                "resource_types": item.get("resource_types"),
+                "query_style": item.get("query_style"),
+                "avoid_terms": item.get("avoid_terms"),
+            }
+            for item in source_catalog
+        ]
+    system_prompt = (
+        "Return only a JSON object matching the requested schema. "
+        "You are a senior research librarian writing executable search keywords for heterogeneous APIs. "
+        "First identify the core concept, synonyms, aliases, broader/narrower terms, methods, applications, and exclusions. "
+        "Group query_groups by resource_type only; do not create separate groups for Crossref, arXiv, GitHub, HuggingFace, or any other source. "
+        f"Each requested resource_type must contain exactly {queries_per_material} distinct search queries. "
+        "For English sources, translate Chinese or mixed input into English search keywords. "
+        "For bilingual/custom/web sources, keep Chinese or bilingual queries only when useful. "
+        "Every query must be directly usable by the target source; do not write explanations inside query strings. "
+        "Use source_query_style from source_catalog only as background for wording, not as a reason to split by source. "
+        "Do not include platform/source names like GitHub or HuggingFace unless the user is explicitly asking for that platform as content. "
+        "Do not create suffix chains such as 'topic method', 'topic survey', 'topic benchmark' unless each query changes retrieval intent. "
+        f"Generate exactly {queries_per_material} queries for each material-type group. "
+        "Do not target a fixed total query count and do not use per-source candidate limits as query counts. "
+        "Avoid near duplicates, one-word queries, long sentences, URLs, API keys, or invented facts."
+    )
+    if compact:
+        system_prompt = (
+            "Return JSON only. Produce a compact source-adaptive retrieval plan. "
+            "Group by resource_type only, never by source. "
+            "Use English for English sources; keep Chinese only for bilingual/custom/web sources. "
+            f"Each requested material type needs exactly {queries_per_material} distinct keyword queries. "
+            "No platform-name pollution, no suffix-only variants, no invented facts."
+        )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+
+
+def clean_v4_query_text(value: Any) -> str:
+    query = re.sub(r"\s+", " ", str(value or "").strip())
+    if len(query) < 2 or len(query) > 160:
+        return ""
+    if re.search(r"https?://|authorization|bearer|api[_\s-]*key|secret|password", query, re.I):
+        return ""
+    return query
+
+
+def normalize_v4_query_groups(
+    raw_payload: Any,
+    *,
+    input_text: str,
+    sources: list[str],
+    material_types: list[str],
+    registry: dict[str, Any],
+    language_policy: str,
+    limit: int,
+    queries_per_group: int = 3,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    raw_groups = payload.get("query_groups")
+    if not isinstance(raw_groups, list):
+        raw_groups = payload.get("queries") if isinstance(payload.get("queries"), list) else []
+    catalog = retrieval_v4_source_catalog(registry, sources)
+    groups_by_material: dict[str, dict[str, Any]] = {}
+    desired_queries = max(1, min(safe_int(queries_per_group) or 3, 8))
+    for raw in raw_groups:
+        if not isinstance(raw, dict):
+            continue
+        material = normalized_material_type(raw.get("resource_type") or raw.get("material_type")) or "paper"
+        if material not in material_types:
+            continue
+        raw_queries = raw.get("queries")
+        if isinstance(raw_queries, str):
+            raw_queries = [raw_queries]
+        if not isinstance(raw_queries, list):
+            raw_queries = [raw.get("query") or raw.get("query_text")]
+        raw_clean_queries = list(dict.fromkeys(retrieval_v4_clean_source_query(query, source="", material=material) for query in raw_queries))
+        raw_clean_queries = [query for query in raw_clean_queries if query]
+        if not raw_clean_queries:
+            continue
+        bucket = groups_by_material.setdefault(
+            material,
+            {
+                "resource_type": material,
+                "source": "",
+                "sources": retrieval_v4_sources_for_material(catalog, material, sources),
+                "language": "",
+                "queries": [],
+                "must_include": [],
+                "optional_terms": [],
+                "exclude_terms": [],
+                "reason": str(raw.get("reason") or raw.get("model_reason") or "natural_language_planner")[:240],
+                "confidence": max(0.0, min(safe_float(raw.get("confidence")) or 0.7, 1.0)),
+                "planning_status": "ai",
+                "planning_message": "AI Planner 按资料类型生成。",
+            },
+        )
+        language = str(raw.get("language") or "").strip().lower()
+        if language in {"en", "zh", "bilingual"} and not bucket.get("language"):
+            bucket["language"] = language
+        for query in raw_clean_queries:
+            if query not in bucket["queries"]:
+                bucket["queries"].append(query)
+        for key, max_count in [("must_include", 6), ("optional_terms", 10), ("exclude_terms", 8)]:
+            values = bucket[key]
+            for item in raw.get(key) or []:
+                text = str(item)[:80].strip()
+                if text and text not in values:
+                    values.append(text)
+                if len(values) >= max_count:
+                    break
+    groups: list[dict[str, Any]] = []
+    for material in material_types:
+        bucket = groups_by_material.get(material)
+        if not bucket:
+            continue
+        material_sources = [str(source or "").strip().lower() for source in bucket.get("sources") or [] if str(source or "").strip()]
+        if not bucket.get("language"):
+            bucket["language"] = retrieval_v4_source_language(material_sources[0] if material_sources else "", input_text=input_text, language_policy=language_policy)
+        for fallback_query in retrieval_v4_fallback_queries_for_source(input_text, material, "", desired_queries):
+            if len(bucket["queries"]) >= desired_queries:
+                break
+            if fallback_query not in bucket["queries"]:
+                bucket["queries"].append(fallback_query)
+        bucket["queries"] = bucket["queries"][:desired_queries]
+        if len(bucket["queries"]) < desired_queries:
+            continue
+        groups.append(bucket)
+        if len(groups) >= limit:
+            break
+    metadata = {
+        "detected_language": str(payload.get("detected_language") or ("zh" if retrieval_text_has_chinese(input_text) else "en")),
+        "normalized_topic": str(payload.get("normalized_topic") or "").strip()[:160],
+        "constraints": payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {},
+        "coverage_targets": payload.get("coverage_targets") if isinstance(payload.get("coverage_targets"), list) else [],
+        "ambiguities": payload.get("ambiguities") if isinstance(payload.get("ambiguities"), list) else [],
+    }
+    return groups, metadata
+
+
+def flatten_v4_query_groups(query_groups: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    queries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for group in query_groups:
+        source = str(group.get("source") or "").strip().lower()
+        group_sources = [str(item or "").strip().lower() for item in group.get("sources") or [] if str(item or "").strip()]
+        if source and source not in group_sources:
+            group_sources.insert(0, source)
+        material = normalized_material_type(group.get("resource_type")) or "paper"
+        for query in group.get("queries") or []:
+            query_text = clean_v4_query_text(query)
+            if not query_text:
+                continue
+            key = (",".join(group_sources), query_text.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            queries.append(
+                {
+                    "query": query_text,
+                    "query_text": query_text,
+                    "intent": str(group.get("reason") or material),
+                    "reason": str(group.get("reason") or ""),
+                    "resource_type": material,
+                    "source": source,
+                    "sources": group_sources,
+                    "language": str(group.get("language") or ""),
+                    "must_include": group.get("must_include") or [],
+                    "optional_terms": group.get("optional_terms") or [],
+                    "exclude_terms": group.get("exclude_terms") or [],
+                    "confidence": group.get("confidence"),
+                }
+            )
+            if len(queries) >= limit:
+                return queries
+    return queries
+
+
+def retrieval_v4_plan_from_groups(
+    *,
+    input_text: str,
+    topic: str,
+    mode: str,
+    strategy: dict[str, Any],
+    search_route: str,
+    expansion_level: str,
+    language_policy: str,
+    query_groups: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    ai_enhancement: dict[str, Any],
+    message: str,
+) -> dict[str, Any]:
+    queries = flatten_v4_query_groups(query_groups, safe_int(strategy.get("query_limit")) or 5)
+    coverage_targets = metadata.get("coverage_targets") if isinstance(metadata.get("coverage_targets"), list) else []
+    if not coverage_targets:
+        coverage_targets = [
+            "core_concept",
+            "translation",
+            "synonyms",
+            "hypernyms",
+            "hyponyms",
+            "methods",
+            "applications",
+            "paper",
+            "code",
+            "model",
+            "dataset",
+            "benchmark",
+            "website",
+            "time_range",
+            "sources",
+        ]
+    return {
+        "schema": "web-library.retrieval-query-plan/v4",
+        "planner_version": "v4",
+        "search_route": search_route,
+        "input_text": input_text,
+        "topic": topic,
+        "mode": mode,
+        "strategy": strategy,
+        "expansion_level": expansion_level,
+        "language_policy": language_policy,
+        "detected_language": metadata.get("detected_language") or ("zh" if retrieval_text_has_chinese(input_text) else "en"),
+        "normalized_topic": metadata.get("normalized_topic") or topic,
+        "constraints": metadata.get("constraints") if isinstance(metadata.get("constraints"), dict) else {},
+        "query_groups": query_groups,
+        "queries": queries,
+        "query_count": len(queries),
+        "coverage_targets": coverage_targets,
+        "ambiguities": metadata.get("ambiguities") if isinstance(metadata.get("ambiguities"), list) else [],
+        "message": message,
+        "ai_enhancement": ai_enhancement,
+    }
+
+
+def retrieval_keyword_plan_for_library(
+    library_id: str,
+    *,
+    topic: str,
+    mode: str,
+    sources: list[str],
+    material_types: list[str],
+    expansion_level: str = "balanced",
+    language_policy: str = "source_adaptive",
+    query_limit: int | None = None,
+) -> dict[str, Any]:
+    strategy = {**guided_strategy(mode), "query_limit": normalize_guided_query_limit(query_limit, mode)}
+    registry = retrieval_provider_registry_for_library(library_id)
+    query_groups: list[dict[str, Any]] = []
+    catalog = retrieval_v4_source_catalog(registry, sources)
+    for material in material_types:
+        for source in retrieval_v4_sources_for_material(catalog, material, sources):
+            query_groups.append(
+                {
+                    "resource_type": material,
+                    "source": source,
+                    "language": retrieval_v4_source_language(source, input_text=topic, language_policy=language_policy),
+                    "queries": [topic],
+                    "must_include": [topic],
+                    "optional_terms": [],
+                    "exclude_terms": [],
+                    "reason": "keyword_exact_match",
+                    "confidence": 1.0,
+                }
+            )
+            if len(query_groups) >= strategy["query_limit"]:
+                break
+        if len(query_groups) >= strategy["query_limit"]:
+            break
+    if not query_groups:
+        query_groups = [
+            {
+                "resource_type": "paper",
+                "source": sources[0] if sources else "",
+                "language": "en",
+                "queries": [topic],
+                "must_include": [topic],
+                "optional_terms": [],
+                "exclude_terms": [],
+                "reason": "keyword_exact_match",
+                "confidence": 1.0,
+            }
+        ]
+    return retrieval_v4_plan_from_groups(
+        input_text=topic,
+        topic=topic,
+        mode=mode,
+        strategy=strategy,
+        search_route="keyword",
+        expansion_level=expansion_level,
+        language_policy=language_policy,
+        query_groups=query_groups,
+        metadata={"detected_language": "zh" if retrieval_text_has_chinese(topic) else "en", "normalized_topic": topic},
+        ai_enhancement={"requested": False, "status": "skipped", "message": "主题词检索不进行 AI 拆解。"},
+        message="主题词检索已按原始输入生成直接检索任务。",
+    )
+
+
+def retrieval_natural_language_plan_for_library(
+    library_id: str,
+    *,
+    input_text: str,
+    mode: str,
+    sources: list[str],
+    material_types: list[str],
+    expansion_level: str = "balanced",
+    language_policy: str = "source_adaptive",
+    query_limit: int | None = None,
+    ai_post_json: Any = None,
+) -> dict[str, Any]:
+    strategy = {**guided_strategy(mode), "query_limit": normalize_guided_query_limit(query_limit, mode)}
+    registry = retrieval_provider_registry_for_library(library_id)
+    catalog = retrieval_v4_source_catalog(registry, sources)
+    with use_ai_pixel_config(api_config_model_for_library(library_id)):
+        model = retrieval_model_status()
+        if not model.get("configured"):
+            raise ValueError("模型未配置，无法进行自然语言检索；请先配置模型，或切换为主题词检索。")
+        ai_enhancement: dict[str, Any] = {
+            "requested": True,
+            "configured": True,
+            "provider": model.get("provider"),
+            "base_url": model.get("base_url"),
+            "model": model.get("model"),
+            "status": "applied",
+            "message": "AI natural-language planner generated source-adaptive query groups.",
+        }
+        query_groups: list[dict[str, Any]] = []
+        metadata: dict[str, Any] = {}
+        planner_attempts: list[dict[str, Any]] = []
+
+        def call_v4_planner(messages: list[dict[str, str]], *, max_tokens: int, timeout_seconds: int) -> dict[str, Any]:
+            if callable(ai_post_json):
+                return ai_pixel_chat_json(
+                    messages,
+                    post_json=ai_post_json,
+                    max_tokens=max_tokens,
+                    timeout_seconds=timeout_seconds,
+                )
+            return ai_pixel_chat_json(
+                messages,
+                max_tokens=max_tokens,
+                timeout_seconds=timeout_seconds,
+            )
+
+        for compact_attempt in (False, True):
+            attempt_label = "compact_retry" if compact_attempt else "primary"
+            try:
+                messages = retrieval_v4_plan_messages(
+                    input_text,
+                    mode=mode,
+                    material_types=material_types,
+                    source_catalog=catalog,
+                    expansion_level=expansion_level,
+                    language_policy=language_policy,
+                    limit=strategy["query_limit"],
+                    compact=compact_attempt,
+                )
+                raw_plan = call_v4_planner(
+                    messages,
+                    max_tokens=1600 if compact_attempt else 2200,
+                    timeout_seconds=RETRIEVAL_PLANNER_RETRY_TIMEOUT_SECONDS if compact_attempt else RETRIEVAL_PLANNER_TIMEOUT_SECONDS,
+                )
+                query_groups, metadata = normalize_v4_query_groups(
+                    raw_plan,
+                    input_text=input_text,
+                    sources=sources,
+                    material_types=material_types,
+                    registry=registry,
+                    language_policy=language_policy,
+                    limit=strategy["query_limit"],
+                    queries_per_group=safe_int(strategy.get("queries_per_material_type") or strategy.get("minimum_queries_per_group")) or guided_planner_queries_per_material(mode),
+                )
+                planner_attempts.append(
+                    {
+                        "attempt": attempt_label,
+                        "status": "applied" if query_groups else "empty",
+                        "query_group_count": len(query_groups),
+                    }
+                )
+                if query_groups:
+                    if compact_attempt:
+                        ai_enhancement["message"] = "AI natural-language planner generated source-adaptive query groups after compact retry."
+                        ai_enhancement["retry"] = {"used": True}
+                    else:
+                        ai_enhancement["retry"] = {"used": False}
+                    break
+            except Exception as exc:  # noqa: BLE001 - retry once before deterministic fallback.
+                planner_attempts.append(
+                    {
+                        "attempt": attempt_label,
+                        "status": "error",
+                        "message": str(exc or exc.__class__.__name__)[:240],
+                    }
+                )
+
+        def append_material_fallbacks(
+            groups: list[dict[str, Any]],
+            materials: list[str],
+            *,
+            message: str,
+            reason: str,
+        ) -> list[dict[str, Any]]:
+            covered = retrieval_v4_covered_materials(groups)
+            values = list(groups)
+            for material in materials:
+                if len(values) >= strategy["query_limit"] or material in covered:
+                    continue
+                fallback_groups = retrieval_v4_fallback_material_query_groups(
+                    input_text,
+                    sources=sources,
+                    material_types=[material],
+                    registry=registry,
+                    language_policy=language_policy,
+                    limit=1,
+                    queries_per_group=safe_int(strategy.get("queries_per_material_type") or strategy.get("minimum_queries_per_group")) or guided_planner_queries_per_material(mode),
+                )
+                marked = retrieval_v4_mark_plan_groups(
+                    fallback_groups,
+                    status="fallback",
+                    message=message,
+                    reason=reason,
+                )
+                values.extend(marked)
+                covered.update(retrieval_v4_covered_materials(marked))
+            return values
+
+        if query_groups:
+            query_groups = append_material_fallbacks(
+                query_groups,
+                material_types,
+                message="AI 未覆盖该资料类型，已用规则补足。",
+                reason="missing_material_fallback",
+            )
+
+        if not query_groups:
+            material_retry_groups: list[dict[str, Any]] = []
+            material_metadata: dict[str, Any] = {}
+            for material in material_types:
+                if len(material_retry_groups) >= strategy["query_limit"]:
+                    break
+                material_sources = retrieval_v4_sources_for_material(catalog, material, sources)
+                material_sources = list(dict.fromkeys(material_sources))
+                if not material_sources:
+                    continue
+                material_catalog = [
+                    item
+                    for item in catalog
+                    if str(item.get("source") or "").strip().lower() in set(material_sources)
+                ]
+                try:
+                    raw_plan = call_v4_planner(
+                        retrieval_v4_plan_messages(
+                            input_text,
+                            mode=mode,
+                            material_types=[material],
+                            source_catalog=material_catalog,
+                            expansion_level=expansion_level,
+                            language_policy=language_policy,
+                            limit=max(1, strategy["query_limit"] - len(material_retry_groups)),
+                            compact=True,
+                        ),
+                        max_tokens=1200,
+                        timeout_seconds=RETRIEVAL_PLANNER_MATERIAL_TIMEOUT_SECONDS,
+                    )
+                    material_groups, material_metadata = normalize_v4_query_groups(
+                        raw_plan,
+                        input_text=input_text,
+                        sources=material_sources,
+                        material_types=[material],
+                        registry=registry,
+                        language_policy=language_policy,
+                        limit=max(1, strategy["query_limit"] - len(material_retry_groups)),
+                        queries_per_group=safe_int(strategy.get("queries_per_material_type") or strategy.get("minimum_queries_per_group")) or guided_planner_queries_per_material(mode),
+                    )
+                    material_groups = retrieval_v4_mark_plan_groups(
+                        material_groups,
+                        status="ai",
+                        message="全量规划不稳定，已按资料类型重试生成。",
+                        reason="material_retry",
+                    )
+                    planner_attempts.append(
+                        {
+                            "attempt": "material_retry",
+                            "material": material,
+                            "status": "applied" if material_groups else "empty",
+                            "query_group_count": len(material_groups),
+                        }
+                    )
+                    material_retry_groups.extend(material_groups)
+                    material_retry_groups = append_material_fallbacks(
+                        material_retry_groups,
+                        [material],
+                        message="该资料类型未被 AI 小批规划覆盖，已用规则补足。",
+                        reason="material_retry_missing_material_fallback",
+                    )
+                except Exception as exc:  # noqa: BLE001 - failed material chunk falls back by material type.
+                    message = str(exc or exc.__class__.__name__)[:160]
+                    planner_attempts.append(
+                        {
+                            "attempt": "material_retry",
+                            "material": material,
+                            "status": "error",
+                            "message": message,
+                        }
+                    )
+                    material_retry_groups = append_material_fallbacks(
+                        material_retry_groups,
+                        [material],
+                        message=f"该资料类型 AI 小批规划未返回，已用规则补足：{message}",
+                        reason="material_retry_error_fallback",
+                    )
+            if material_retry_groups:
+                query_groups = material_retry_groups[: strategy["query_limit"]]
+                metadata = {
+                    **metadata,
+                    **{key: value for key, value in material_metadata.items() if value},
+                    "detected_language": metadata.get("detected_language") or ("zh" if retrieval_text_has_chinese(input_text) else "en"),
+                    "normalized_topic": metadata.get("normalized_topic") or material_metadata.get("normalized_topic") or " ".join(retrieval_v4_concept_terms(input_text)[:4]) or input_text,
+                    "ambiguities": ["部分资料类型由规则补足；请查看每组状态。"],
+                }
+
+        ai_enhancement["attempts"] = planner_attempts
+        if not query_groups:
+            ai_enhancement["message"] = "; ".join(
+                str(attempt.get("message") or f"{attempt.get('attempt')} returned no usable query groups")
+                for attempt in planner_attempts
+            )[:360]
+            query_groups = retrieval_v4_fallback_material_query_groups(
+                input_text,
+                sources=sources,
+                material_types=material_types,
+                registry=registry,
+                language_policy=language_policy,
+                limit=strategy["query_limit"],
+                queries_per_group=safe_int(strategy.get("queries_per_material_type") or strategy.get("minimum_queries_per_group")) or guided_planner_queries_per_material(mode),
+            )
+            metadata = {
+                "detected_language": "zh" if retrieval_text_has_chinese(input_text) else "en",
+                "normalized_topic": " ".join(retrieval_v4_concept_terms(input_text)[:4]) or input_text,
+                "ambiguities": ["模型规划未稳定返回，已按资料类型生成规则兜底计划。"],
+            }
+        if not query_groups:
+            query_groups = retrieval_v4_fallback_material_query_groups(
+                input_text,
+                sources=sources,
+                material_types=material_types,
+                registry=registry,
+                language_policy=language_policy,
+                limit=strategy["query_limit"],
+                queries_per_group=safe_int(strategy.get("queries_per_material_type") or strategy.get("minimum_queries_per_group")) or guided_planner_queries_per_material(mode),
+            )
+            metadata = {
+                "detected_language": "zh" if retrieval_text_has_chinese(input_text) else "en",
+                "normalized_topic": " ".join(retrieval_v4_concept_terms(input_text)[:4]) or input_text,
+                "ambiguities": ["模型规划未返回可用检索词，已按资料类型生成规则兜底计划。"],
+            }
+        ai_group_count = sum(1 for group in query_groups if str(group.get("planning_status") or "").lower() == "ai")
+        fallback_group_count = sum(1 for group in query_groups if str(group.get("planning_status") or "").lower() == "fallback")
+        if ai_group_count and fallback_group_count:
+            ai_enhancement["status"] = "partial"
+            ai_enhancement["message"] = "已生成可编辑计划；部分资料类型使用规则补足，请查看每组状态。"
+        elif ai_group_count:
+            ai_enhancement["status"] = "applied"
+            ai_enhancement["message"] = ai_enhancement.get("message") or "AI natural-language planner generated source-adaptive query groups."
+        else:
+            ai_enhancement["status"] = "fallback"
+            ai_enhancement["message"] = "已生成可编辑计划；模型规划未稳定返回，所有数据源已用规则兜底。"
+        ai_enhancement["ai_group_count"] = ai_group_count
+        ai_enhancement["fallback_group_count"] = fallback_group_count
+        ai_enhancement["material_statuses"] = retrieval_v4_group_material_statuses(query_groups)
+        ai_enhancement["source_statuses"] = retrieval_v4_group_source_statuses(query_groups)
+    topic = str(metadata.get("normalized_topic") or input_text).strip()
+    return retrieval_v4_plan_from_groups(
+        input_text=input_text,
+        topic=topic,
+        mode=mode,
+        strategy=strategy,
+        search_route="natural_language",
+        expansion_level=expansion_level,
+        language_policy=language_policy,
+        query_groups=query_groups,
+        metadata=metadata,
+        ai_enhancement=ai_enhancement,
+        message="自然语言检索计划已生成：已按资料类型拆解检索词，并会自动分发到对应数据源。",
+    )
 
 
 def default_guided_sources_for_materials(registry: dict[str, Any], material_types: list[str]) -> list[str]:
@@ -4794,8 +6121,41 @@ def guided_search_plan_for_library(
     sources: list[str],
     material_types: list[str],
     use_ai_planning: bool,
+    search_route: str = "legacy",
+    input_text: str | None = None,
+    expansion_level: str = "balanced",
+    language_policy: str = "source_adaptive",
+    query_limit: int | None = None,
 ) -> dict[str, Any]:
-    strategy = guided_strategy(mode)
+    route = normalize_retrieval_search_route(search_route, default="legacy")
+    clean_input = str(input_text or topic or "").strip()
+    clean_expansion = normalize_retrieval_expansion_level(expansion_level)
+    clean_language_policy = normalize_retrieval_language_policy(language_policy)
+    if route == "keyword":
+        return retrieval_keyword_plan_for_library(
+            library_id,
+            topic=topic,
+            mode=mode,
+            sources=sources,
+            material_types=material_types,
+            expansion_level=clean_expansion,
+            language_policy=clean_language_policy,
+            query_limit=query_limit,
+        )
+    if route == "natural_language":
+        return retrieval_natural_language_plan_for_library(
+            library_id,
+            input_text=clean_input or topic,
+            mode=mode,
+            sources=sources,
+            material_types=material_types,
+            expansion_level=clean_expansion,
+            language_policy=clean_language_policy,
+            query_limit=query_limit,
+        )
+    if route == "agent":
+        raise ValueError("智能体检索实验入口需要使用多源检索 skill/CLI；当前 guided job 只执行主题词和自然语言工作流。")
+    strategy = {**guided_strategy(mode), "query_limit": normalize_guided_query_limit(query_limit, mode)}
     registry = retrieval_provider_registry_for_library(library_id)
     try:
         base_plan = retrieval_query_plan_for_library(
@@ -9456,9 +10816,16 @@ def create_app() -> Flask:
                 progress={**progress, "stage": "planning"},
                 started=True,
             )
+            job = app_store.append_retrieval_guided_event(library_id, job_id, "任务开始，正在准备检索计划。")
             job = app_store.retrieval_guided_job(library_id, job_id)
             plan = job.get("plan") if isinstance(job.get("plan"), dict) else {}
+            job_options = job.get("options") if isinstance(job.get("options"), dict) else {}
             if not plan.get("queries"):
+                app_store.append_retrieval_guided_event(
+                    library_id,
+                    job_id,
+                    "正在生成 AI 检索计划。" if job.get("use_ai_planning") else "正在生成规则检索计划。",
+                )
                 plan = guided_search_plan_for_library(
                     library_id,
                     topic=str(job.get("topic") or ""),
@@ -9466,7 +10833,30 @@ def create_app() -> Flask:
                     sources=[str(source) for source in job.get("sources") or []],
                     material_types=[str(item) for item in job.get("material_types") or []],
                     use_ai_planning=bool(job.get("use_ai_planning")),
+                    search_route=str(job_options.get("search_route") or "legacy"),
+                    input_text=str(job_options.get("input_text") or job.get("input_text") or job.get("topic") or ""),
+                    expansion_level=str(job_options.get("expansion_level") or "balanced"),
+                    language_policy=str(job_options.get("language_policy") or "source_adaptive"),
                 )
+                app_store.append_retrieval_guided_event(
+                    library_id,
+                    job_id,
+                    f"检索计划已生成，共 {safe_int(plan.get('query_count')) or len(plan.get('queries') or [])} 组检索。",
+                    kind="success",
+                )
+            else:
+                app_store.append_retrieval_guided_event(
+                    library_id,
+                    job_id,
+                    f"使用已确认的检索计划，共 {safe_int(plan.get('query_count')) or len(plan.get('queries') or [])} 组检索。",
+                    kind="success",
+                )
+            apply_guided_plan_limit(
+                plan,
+                normalize_guided_limit_per_source(job_options.get("limit_per_source"), str(job.get("mode") or "quality")),
+                job_options.get("source_limits") if isinstance(job_options.get("source_limits"), dict) else None,
+            )
+            job = app_store.retrieval_guided_job(library_id, job_id)
             queries = [item for item in plan.get("queries") or [] if isinstance(item, dict)]
             progress = {
                 **(job.get("progress") if isinstance(job.get("progress"), dict) else {}),
@@ -9495,6 +10885,12 @@ def create_app() -> Flask:
                 query_sources = [str(source or "").strip().lower() for source in query_item.get("sources") or current_job.get("sources") or [] if str(source or "").strip()]
                 options = SearchOptions.from_payload(current_job.get("options") if isinstance(current_job.get("options"), dict) else {})
                 strategy = plan.get("strategy") if isinstance(plan.get("strategy"), dict) else guided_strategy(str(current_job.get("mode") or "quality"))
+                source_limits = strategy.get("source_limits") if isinstance(strategy.get("source_limits"), dict) else {}
+                limit_for_query = guided_limit_for_sources(
+                    source_limits,
+                    query_sources or [str(source) for source in current_job.get("sources") or []],
+                    safe_int(strategy.get("limit_per_source")) or 10,
+                )
                 progress = {
                     **(current_job.get("progress") if isinstance(current_job.get("progress"), dict) else {}),
                     "stage": "retrieving",
@@ -9505,14 +10901,22 @@ def create_app() -> Flask:
                     "failed_queries": failed_queries,
                     "candidate_count": safe_int((current_job.get("progress") or {}).get("candidate_count")),
                 }
-                app_store.update_retrieval_guided_job(library_id, job_id, progress=progress)
+                current_job = app_store.update_retrieval_guided_job(library_id, job_id, progress=progress)
+                current_job = app_store.append_retrieval_guided_event(
+                    library_id,
+                    job_id,
+                    f"开始检索 {index + 1}/{len(queries)}：{query_text}",
+                    data={"query": query_text, "sources": query_sources, "limit": limit_for_query},
+                )
+                progress = current_job.get("progress") if isinstance(current_job.get("progress"), dict) else progress
                 try:
                     result = run_retrieval_search_for_library(
                         library_id,
                         query_text,
                         query_sources or current_job.get("sources") or None,
-                        safe_int(strategy.get("limit_per_source")) or 10,
+                        limit_for_query,
                         use_ai_evaluation=False,
+                        source_limits=source_limits,
                         search_options=options,
                     )
                     run_id = str(result.get("run_id") or "")
@@ -9539,7 +10943,21 @@ def create_app() -> Flask:
                         coverage=coverage,
                         progress=progress,
                     )
+                    source_counts = []
+                    for source_name, stats in (result.get("source_stats") if isinstance(result.get("source_stats"), dict) else {}).items():
+                        if isinstance(stats, dict):
+                            source_counts.append(f"{source_name} {safe_int(stats.get('count'))}")
+                    source_summary = " / ".join(source_counts[:5])
+                    app_store.append_retrieval_guided_event(
+                        library_id,
+                        job_id,
+                        f"完成检索 {index + 1}/{len(queries)}：新增 {len(result.get('candidates') or [])} 条候选"
+                        + (f"，{source_summary}" if source_summary else ""),
+                        kind="success",
+                        data={"query": query_text, "candidate_count": len(result.get("candidates") or [])},
+                    )
                     current_job = app_store.retrieval_guided_job(library_id, job_id)
+                    progress = current_job.get("progress") if isinstance(current_job.get("progress"), dict) else progress
                     if (
                         str(current_job.get("mode") or "") == "coverage"
                         and not auto_expanded
@@ -9558,10 +10976,22 @@ def create_app() -> Flask:
                         coverage["auto_expanded_queries"] = gap_queries
                         progress["total_queries"] = len(queries)
                         app_store.update_retrieval_guided_job(library_id, job_id, plan=plan, coverage=coverage, progress=progress)
+                        app_store.append_retrieval_guided_event(
+                            library_id,
+                            job_id,
+                            f"发现覆盖缺口，已自动补检 {len(gap_queries)} 组检索词。",
+                            kind="warning",
+                        )
                 except Exception as exc:  # noqa: BLE001 - keep guided search moving across query failures
                     failed_queries += 1
                     progress = {**progress, "failed_queries": failed_queries, "last_error": str(exc), "current_query": ""}
                     app_store.update_retrieval_guided_job(library_id, job_id, progress=progress, error=str(exc))
+                    app_store.append_retrieval_guided_event(
+                        library_id,
+                        job_id,
+                        f"检索失败 {index + 1}/{len(queries)}：{query_text}；{exc}",
+                        kind="error",
+                    )
                 index += 1
             latest = app_store.retrieval_guided_job(library_id, job_id)
             if latest.get("status") not in {"canceled", "paused"}:
@@ -9573,16 +11003,27 @@ def create_app() -> Flask:
                     progress={**(latest.get("progress") if isinstance(latest.get("progress"), dict) else {}), "stage": status},
                     finished=True,
                 )
+                final_job = app_store.retrieval_guided_job(library_id, job_id)
+                final_progress = final_job.get("progress") if isinstance(final_job.get("progress"), dict) else {}
+                app_store.append_retrieval_guided_event(
+                    library_id,
+                    job_id,
+                    f"任务{('部分完成' if status == 'partial' else '完成')}：检索词 {safe_int(final_progress.get('completed_queries'))}/{safe_int(final_progress.get('total_queries'))}，候选 {safe_int(final_progress.get('candidate_count'))} 条。",
+                    kind="warning" if status == "partial" else "success",
+                )
         except Exception as exc:  # noqa: BLE001 - persist guided job systemic failure
             try:
+                existing_job = app_store.retrieval_guided_job(library_id, job_id)
+                existing_progress = existing_job.get("progress") if isinstance(existing_job.get("progress"), dict) else {}
                 app_store.update_retrieval_guided_job(
                     library_id,
                     job_id,
                     status="failed",
                     error=str(exc),
-                    progress={"stage": "failed", "error": str(exc)},
+                    progress={**existing_progress, "stage": "failed", "error": str(exc)},
                     finished=True,
                 )
+                app_store.append_retrieval_guided_event(library_id, job_id, f"任务失败：{exc}", kind="error")
             except Exception:
                 pass
         finally:
@@ -10230,35 +11671,109 @@ def create_app() -> Flask:
         except (SourceError, ValueError, MetadataImportError, OSError) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    def guided_search_request_from_payload(library_id: str, payload: dict[str, Any], *, default_route: str = "legacy") -> dict[str, Any]:
+        topic = str(payload.get("topic") or payload.get("query") or payload.get("input_text") or "").strip()
+        if not topic:
+            raise ValueError("检索主题不能为空。")
+        library_or_404(library_id)
+        mode = normalize_guided_search_mode(payload.get("mode"))
+        time_range = normalize_guided_time_range(payload.get("time_range"), mode)
+        material_types = normalize_guided_material_types(payload.get("material_types"))
+        route_was_provided = "search_route" in payload or "route" in payload
+        search_route = normalize_retrieval_search_route(
+            payload.get("search_route") or payload.get("route"),
+            default="natural_language" if route_was_provided else default_route,
+        )
+        expansion_level = normalize_retrieval_expansion_level(payload.get("expansion_level"))
+        language_policy = normalize_retrieval_language_policy(payload.get("language_policy"))
+        registry = retrieval_provider_registry_for_library(library_id)
+        source_names = [str(source or "").strip().lower() for source in payload.get("sources") or [] if str(source or "").strip()]
+        unknown = [source for source in source_names if source not in registry]
+        if unknown:
+            raise ValueError(f"未知数据源：{', '.join(unknown)}")
+        if not source_names:
+            source_names = default_guided_sources_for_materials(registry, material_types)
+        limit_per_source = normalize_guided_limit_per_source(payload.get("limit_per_source"), mode)
+        source_limits = normalize_retrieval_source_limits(payload.get("source_limits"), source_names, fallback=limit_per_source)
+        options = guided_search_options(
+            mode,
+            time_range,
+            material_types,
+            limit_per_source=limit_per_source,
+            source_limits=source_limits,
+        )
+        options.update(
+            {
+                "search_route": search_route,
+                "input_text": topic,
+                "planner_version": "v4" if search_route in {"keyword", "natural_language", "agent"} else "legacy",
+                "expansion_level": expansion_level,
+                "language_policy": language_policy,
+            }
+        )
+        if search_route == "agent":
+            raise ValueError("智能体检索实验入口已准备 skill/CLI 工具层，本接口暂不直接启动 agent。")
+        if search_route == "natural_language":
+            with use_ai_pixel_config(api_config_model_for_library(library_id)):
+                model_status = retrieval_model_status()
+            if not model_status.get("configured"):
+                raise ValueError("模型未配置，无法进行自然语言检索；请先配置模型，或切换为主题词检索。")
+        return {
+            "topic": topic,
+            "mode": mode,
+            "time_range": time_range,
+            "material_types": material_types,
+            "search_route": search_route,
+            "expansion_level": expansion_level,
+            "language_policy": language_policy,
+            "source_names": source_names,
+            "options": options,
+            "limit_per_source": limit_per_source,
+            "source_limits": source_limits,
+        }
+
+    @app.post("/api/library/<library_id>/retrieval/guided-search-plan")
+    def api_retrieval_guided_search_plan(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            parsed = guided_search_request_from_payload(library_id, payload, default_route="natural_language")
+            plan = guided_search_plan_for_library(
+                library_id,
+                topic=parsed["topic"],
+                mode=parsed["mode"],
+                sources=parsed["source_names"],
+                material_types=parsed["material_types"],
+                use_ai_planning=parsed["search_route"] != "keyword",
+                search_route=parsed["search_route"],
+                input_text=parsed["topic"],
+                expansion_level=parsed["expansion_level"],
+                language_policy=parsed["language_policy"],
+            )
+            apply_guided_plan_limit(plan, parsed["limit_per_source"], parsed["source_limits"])
+            return jsonify({"ok": True, "plan": plan})
+        except (SourceError, RetrievalError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.post("/api/library/<library_id>/retrieval/guided-search-jobs")
     def api_create_retrieval_guided_search_job(library_id: str):
         payload = request.get_json(silent=True) or {}
-        topic = str(payload.get("topic") or payload.get("query") or "").strip()
-        if not topic:
-            return jsonify({"ok": False, "error": "检索主题不能为空。"}), 400
         try:
-            library_or_404(library_id)
-            mode = normalize_guided_search_mode(payload.get("mode"))
-            time_range = normalize_guided_time_range(payload.get("time_range"), mode)
-            material_types = normalize_guided_material_types(payload.get("material_types"))
-            registry = retrieval_provider_registry_for_library(library_id)
-            source_names = [str(source or "").strip().lower() for source in payload.get("sources") or [] if str(source or "").strip()]
-            unknown = [source for source in source_names if source not in registry]
-            if unknown:
-                raise ValueError(f"未知数据源：{', '.join(unknown)}")
-            if not source_names:
-                source_names = default_guided_sources_for_materials(registry, material_types)
-            options = guided_search_options(mode, time_range, material_types)
+            parsed = guided_search_request_from_payload(library_id, payload, default_route="legacy")
+            use_ai_planning = payload.get("use_ai_planning") is not False and parsed["search_route"] != "keyword"
             job = app_store.create_retrieval_guided_job(
                 library_id,
-                topic=topic,
-                mode=mode,
-                time_range=time_range,
-                material_types=material_types,
-                sources=source_names,
-                options=options,
-                use_ai_planning=payload.get("use_ai_planning") is not False,
+                topic=parsed["topic"],
+                mode=parsed["mode"],
+                time_range=parsed["time_range"],
+                material_types=parsed["material_types"],
+                sources=parsed["source_names"],
+                options=parsed["options"],
+                use_ai_planning=use_ai_planning,
             )
+            plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else None
+            if plan and isinstance(plan.get("queries"), list) and plan.get("queries"):
+                apply_guided_plan_limit(plan, parsed["limit_per_source"], parsed["source_limits"])
+                job = app_store.update_retrieval_guided_job(library_id, str(job.get("job_id") or ""), plan=plan)
             start_retrieval_guided_worker(library_id, str(job.get("job_id") or ""))
             return jsonify({"ok": True, "job": app_store.retrieval_guided_job(library_id, str(job.get("job_id") or ""))})
         except (SourceError, RetrievalError, ValueError) as exc:

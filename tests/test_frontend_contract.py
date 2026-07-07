@@ -205,6 +205,55 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "function renderRetrievalPage" in app_js
     assert "function setupRetrievalPage" in app_js
     assert "function renderSimpleRetrievalMain" in app_js
+    assert "retrievalSearchRoute: \"natural_language\"" in app_js
+    assert "[\"keyword\", \"natural_language\", \"agent\"].includes(route)" in app_js
+    assert "[\"natural_language\", \"keyword\", \"agent\"].map" in app_js
+    assert "data-retrieval-route=\"${route}\"" in app_js
+    assert "search_route: searchRoute" in app_js
+    assert "planner_version: \"v4\"" in app_js
+    assert "use_ai_planning: searchRoute !== \"keyword\"" in app_js
+    assert "function renderRetrievalGuidedActionButtons" in app_js
+    assert "name=\"guided_action\" value=\"plan\"" in app_js
+    assert "name=\"guided_action\" value=\"search\"" in app_js
+    assert "guidedAction !== \"search\"" in app_js
+    assert "const showSearchAction = state.retrievalGuidedPlanDraft || guidedActive || state.addItemBusy" in app_js
+    assert "data-guided-limit-per-source" in app_js
+    assert "data-guided-source-limit" in app_js
+    assert "data-guided-query-limit" not in app_js
+    assert "currentGuidedQueryLimit" not in app_js
+    assert "limit_per_source: currentGuidedLimitPerSource()" in app_js
+    assert "source_limits: guidedSourceLimitsForSubmit(sources)" in app_js
+    assert "function renderGuidedSourceLimits" in app_js
+    assert "function retrievalSourceTypeLabels" in app_js
+    assert "[\"coverage\", \"全覆盖\"]" not in app_js
+    assert "/retrieval/guided-search-plan" in app_js
+    assert "function renderRetrievalSurface" in app_js
+    assert "function renderRetrievalGuidedPlanEditor" in app_js
+    assert "function renderRetrievalGuidedEvents" in app_js
+    assert "data-guided-event-list" in app_js
+    assert "data-guided-plan-group-queries" in app_js
+    assert "function retrievalGuidedPlanAiStatus" in app_js
+    assert "AI 规划失败，当前使用规则兜底" not in app_js
+    assert "AI 已参与规划，部分类型规则补足" in app_js
+    assert "function retrievalGuidedGroupPlanningStatus" in app_js
+    assert "该源规则补足" not in app_js
+    assert "该类型规则补足" in app_js
+    assert "function retrievalGuidedGroupSourcesLabel" in app_js
+    assert "规则兜底生成" in app_js
+    assert "AI 检索计划已生成。请确认或编辑后再开始检索。" in app_js
+    assert "智能体检索实验入口已在下方说明" in app_js
+    assert "function renderAgentRetrievalPanel" in app_js
+    assert "网页端暂未启动 agent" in app_js
+    assert "retrieval-route-tabs" in app_css
+    assert "grid-template-columns: repeat(2, minmax(72px, 1fr));" in app_css
+    assert "guided-source-limit-grid" in app_css
+    assert ".guided-source-limit-grid em" in app_css
+    assert "guided-plan-ai-status" in app_css
+    assert "guided-plan-source-status" in app_css
+    assert "guided-event-list" in app_css
+    assert ".guided-event.success strong" in app_css
+    assert "guided-plan-editor" in app_css
+    assert "retrieval-agent-panel" in app_css
     assert "function delegatedRetrievalSubmitEvent" in app_js
     assert "currentTarget: form" in app_js
     assert "submitRetrievalSearch(delegatedEvent)" in app_js
@@ -219,34 +268,19 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "function renderRetrievalSourceConfigGuide" in app_js
     assert "function renderRetrievalSourceConfigHeader" in app_js
     assert "公共源按资料类型分类" in app_js
-    assert "source-httpjson-config" in app_js
     assert "url_template：检索接口" in app_js
     assert "保存配置" in app_js
     assert "data-retrieval-search-form" in app_js
     assert "data-retrieval-candidate-check" in app_js
     assert "data-select-retrieval-candidates" in app_js
     assert "function setRetrievalCandidateSelection" in app_js
+    assert "retrievalDeletedCandidateKeys: new Set()" in app_js
+    assert "function deleteSelectedRetrievalCandidates" in app_js
+    assert "data-delete-selected-retrieval-candidates" in app_js
+    assert "AI 自动决定检索词数量" not in app_js
     assert "data-import-retrieval-selected" in app_js
-    assert "[\"pubmed\", \"PubMed\"]" in app_js
-    assert "[\"biorxiv\", \"bioRxiv\"]" in app_js
-    assert "[\"medrxiv\", \"medRxiv\"]" in app_js
-    assert "[\"semanticscholar\", \"Semantic Scholar\"]" in app_js
-    assert "[\"datacite\", \"DataCite\"]" in app_js
-    assert "[\"github\", \"GitHub\"]" in app_js
-    assert "[\"huggingface\", \"HuggingFace\"]" in app_js
-    assert "[\"zenodo\", \"Zenodo\"]" in app_js
-    assert "[\"openlibrary\", \"OpenLibrary\"]" in app_js
-    assert "[\"ads\", \"NASA ADS\"]" in app_js
-    assert "[\"localfile\", \"Local CSV/JSONL\"]" in app_js
-    assert "[\"httpjson\", \"HTTP JSON\"]" in app_js
-    assert "[\"sqlite\", \"SQLite\"]" in app_js
-    assert "[\"manifest\", \"Object Manifest\"]" in app_js
-    assert "[\"openalex\", \"OpenAlex\"]" in app_js
-    assert "function renderRetrievalSourceOption" in app_js
     assert "function retrievalSourceSetupText" in app_js
-    assert "function retrievalSourceSetupTitle" in app_js
     assert "config_mode" in app_js
-    assert "global_rate_limit_env" in app_js
     assert "function formatRateLimitSeconds" in app_js
     assert "function renderCandidateAiEvaluation" in app_js
     assert "retrievalAiEvaluationSummary" in app_js
@@ -260,33 +294,22 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-stop-retrieval-ai-scoring" in app_js
     assert "function stopRetrievalAiScoring" in app_js
     assert "AbortController" in app_js
-    assert "data-simple-ai-query-plan" in app_js
-    assert "按计划批量检索" in app_js
+    assert "function renderRetrievalPanel" not in app_js
+    assert "function renderSimpleAiQueryPlan" not in app_js
+    assert "data-simple-ai-query-plan" not in app_js
+    assert "simplePlanBatchJobId" not in app_js
+    assert "retrievalBatchMode" not in app_js
+    assert "data-simple-batch-mode" not in app_js
+    assert "data-simple-source-limit" not in app_js
+    assert ".simple-ai-plan" not in app_css
+    assert ".simple-plan-source-limits" not in app_css
     assert "调用多源接口" not in app_js
-    assert "simplePlanBatchJobId" in app_js
-    assert "data-simple-plan-batch-status" in app_js
     assert 'data-select-retrieval-candidates="ai"' in app_js
-    assert "function simplePlanRecommendedSources" in app_js
-    assert "function simplePlanBatchSourceSelection" in app_js
-    assert "retrievalSimpleBatchLimit" in app_js
-    assert "retrievalSimpleSourceLimits" in app_js
-    assert "retrievalBatchMode" in app_js
-    assert "data-simple-batch-mode" in app_js
-    assert "快速模式" in app_js
-    assert "全量模式" in app_js
-    assert "意图：" in app_js
-    assert "data-simple-source-limit" in app_js
-    assert "function simplePlanBatchSourceLimits" in app_js
-    assert "function loadSimplePlanBatchCandidates" in app_js
     assert "function retrievalCandidateTypeMeta" in app_js
     assert "function renderRetrievalZoteroPreview" in app_js
     assert "retrieval-type-pill" in app_js
     assert "retrieval-zotero-preview" in app_js
-    assert "data-load-simple-batch-candidates" in app_js
-    assert "/candidates?${params.toString()}" in app_js
-    assert "function currentSimpleBatchLimit" in app_js
-    assert "draftRetrievalBatchQueries({ limit: 5 })" in app_js
-    assert "source_limits: sourceLimits" in app_js
+    assert "/retrieval/guided-search-jobs/${encodeURIComponent(cleanJobId)}/candidates" in app_js
     assert "retrievalRunId" in app_js
     assert "retrievalRuns" in app_js
     assert "retrievalSummary" in app_js
@@ -475,19 +498,9 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "/retrieval/http-json/templates" in app_js
     assert "/retrieval/http-json/field-map/suggest" in app_js
     assert "/retrieval/http-json/preview" in app_js
-    assert "/retrieval/sqlite" in app_js
-    assert "/retrieval/sqlite/templates" in app_js
-    assert "/retrieval/sqlite/field-map/suggest" in app_js
-    assert "/retrieval/sqlite/preview" in app_js
-    assert "/retrieval/manifest" in app_js
-    assert "/retrieval/manifest/templates" in app_js
-    assert "/retrieval/manifest/field-map/suggest" in app_js
-    assert "/retrieval/manifest/preview" in app_js
     assert "data-check-retrieval-sources" in app_js
     assert "data-setup-retrieval-rehearsal" in app_js
     assert "data-validate-retrieval-rehearsal" in app_js
-    assert "DEMO KIT" in app_js
-    assert "DEMO RUN" in app_js
     assert "data-download-retrieval-source-setup" in app_js
     assert "data-check-retrieval-readiness" in app_js
     assert "data-draft-retrieval-batch-queries" in app_js
@@ -505,7 +518,6 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-check-retrieval-onboarding" in app_js
     assert "data-download-retrieval-onboarding" in app_js
     assert "data-download-retrieval-onboarding-package" in app_js
-    assert "ONB ZIP" in app_js
     assert "PLAN coverage" in app_js
     assert "data-retrieval-onboarding-source-evidence" in app_js
     assert "data-download-retrieval-config-bundle" in app_js
@@ -575,21 +587,10 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-clear-retrieval-http-json" in app_js
     assert "data-suggest-retrieval-http-json-field-map" in app_js
     assert "data-refresh-retrieval-http-json-preview" in app_js
-    assert "data-retrieval-sqlite-form" in app_js
-    assert "data-apply-retrieval-sqlite-template" in app_js
-    assert "data-clear-retrieval-sqlite" in app_js
-    assert "data-suggest-retrieval-sqlite-field-map" in app_js
-    assert "data-refresh-retrieval-sqlite-preview" in app_js
-    assert "data-retrieval-manifest-form" in app_js
-    assert "data-apply-retrieval-manifest-template" in app_js
-    assert "data-clear-retrieval-manifest" in app_js
-    assert "data-suggest-retrieval-manifest-field-map" in app_js
-    assert "data-refresh-retrieval-manifest-preview" in app_js
     assert "elapsed_ms" in app_js
     assert "error_kind" in app_js
     assert "rate_limit_seconds" in app_js
     assert "rate_limit_wait_ms" in app_js
-    assert "rate_limit_note" in app_js
     assert "data-download-retrieval-report" in app_js
     assert "data-download-retrieval-summary" in app_js
     assert "data-report-format=\"csv\"" in app_js
@@ -655,8 +656,6 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".simple-source-option" in app_css
     assert ".simple-result-tools" in app_css
     assert ".retrieval-ai-row.evaluating" in app_css
-    assert ".simple-plan-source-limits" in app_css
-    assert ".simple-plan-source-limit-grid" in app_css
     assert ".retrieval-advanced" in app_css
     assert ".retrieval-source-config-guide" in app_css
     assert ".retrieval-public-source-category" in app_css
@@ -667,16 +666,11 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".retrieval-candidate" in app_css
     assert ".retrieval-type-pill" in app_css
     assert ".retrieval-zotero-preview" in app_css
-    assert ".simple-plan-mode-toggle" in app_css
     assert ".retrieval-stats" in app_css
     assert ".retrieval-actions" in app_css
     assert ".retrieval-local-config" in app_css
     assert ".retrieval-http-json-config" in app_css
     assert ".retrieval-http-json-templates" in app_css
-    assert ".retrieval-sqlite-config" in app_css
-    assert ".retrieval-sqlite-templates" in app_css
-    assert ".retrieval-manifest-config" in app_css
-    assert ".retrieval-manifest-templates" in app_css
     assert ".retrieval-local-preview" in app_css
     assert ".retrieval-local-preview-mappings" in app_css
     assert ".retrieval-local-preview-quality" in app_css
@@ -684,8 +678,6 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".retrieval-batch" in app_css
     assert ".retrieval-batch-actions" in app_css
     assert ".retrieval-batch-progress" in app_css
-    assert ".retrieval-source-status" in app_css
-    assert ".retrieval-source-setup" in app_css
     assert ".retrieval-source-message" in app_css
     assert ".retrieval-readiness" in app_css
     assert ".retrieval-readiness-grid" in app_css
@@ -694,7 +686,6 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert ".retrieval-config-bundle-result" in app_css
     assert ".retrieval-field-map-lab" in app_css
     assert ".retrieval-field-map-lab-result" in app_css
-    assert ".retrieval-source-row label.warning" in app_css
     assert ".retrieval-rank-row" in app_css
     assert ".retrieval-duplicate" in app_css
     assert ".retrieval-similarity" in app_css
@@ -902,7 +893,6 @@ def test_retrieval_deployment_document_records_source_setup() -> None:
     assert "/retrieval/model-status" in doc
     assert "/retrieval/field-map/suggest" in doc
     assert "/retrieval/field-map/report" in doc
-    assert "/retrieval/sqlite/field-map/report" in doc
     assert "source_setup" in doc
     assert "field_map_reports" in doc
     assert "/retrieval/source-intake" in doc
@@ -917,7 +907,6 @@ def test_retrieval_deployment_document_records_source_setup() -> None:
     assert "普通检索和批量检索" in doc
     assert "/retrieval/rehearsal/setup" in doc
     assert "/retrieval/rehearsal/validate" in doc
-    assert "DEMO RUN" in doc
     assert "AI_PIXEL_BASE_URL" in doc
     assert "AI_PIXEL_API_KEY" in doc
     assert "use_ai=true" in doc
