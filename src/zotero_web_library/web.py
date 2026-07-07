@@ -27,8 +27,28 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 from . import app_store
 from .citation_export import CitationExportError, export_citations, export_filename
+from .codex_agent import (
+    build_agentic_rag_chat_prompt,
+    run_codex_connectivity_probe as rag_codex_connectivity_probe,
+    run_codex_prompt as rag_codex_prompt,
+)
 from .metadata_import import MetadataImportError, parse_import_text, resolve_identifier
 from .paths import app_data_dir
+from .rag import (
+    add_knowledge_base_items as rag_add_knowledge_base_items,
+    chunk_read as rag_chunk_read,
+    create_knowledge_base as rag_create_knowledge_base,
+    delete_knowledge_base as rag_delete_knowledge_base,
+    index_library as rag_index_library,
+    index_mineru_results as rag_index_mineru_results,
+    index_status as rag_index_status,
+    keyword_search as rag_keyword_search,
+    knowledge_base as rag_knowledge_base,
+    list_knowledge_bases as rag_list_knowledge_bases,
+    metadata_search as rag_metadata_search,
+    remove_knowledge_base_items as rag_remove_knowledge_base_items,
+    retrieve as rag_retrieve,
+)
 from .retrieval import CandidateImportError, RetrievalError, imported_items_from_candidates, retrieval_source_statuses, search_retrieval
 from .retrieval.importing import imported_item_from_candidate
 from .retrieval.providers import (
@@ -8554,6 +8574,30 @@ def weak_similarity_matches(candidate: dict[str, Any], existing_items: list[dict
     return sorted(matches, key=lambda item: item["score"], reverse=True)[:3]
 
 
+def _rag_chat_sources(evidence_pack: dict[str, Any]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    for result in evidence_pack.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        sources.append(
+            {
+                "evidence_id": result.get("evidence_id", ""),
+                "source_type": result.get("source_type", ""),
+                "item_key": result.get("item_key", ""),
+                "attachment_key": result.get("attachment_key", ""),
+                "doc_id": result.get("doc_id", ""),
+                "chunk_id": result.get("chunk_id", ""),
+                "title": result.get("title", ""),
+                "section_title": result.get("section_title", ""),
+                "estimated_page": result.get("estimated_page"),
+                "excerpt": result.get("excerpt", ""),
+                "citation": result.get("citation", ""),
+                "rank": result.get("rank"),
+            }
+        )
+    return sources
+
+
 def create_app() -> Flask:
     mimetypes.add_type("application/javascript", ".js")
     mimetypes.add_type("application/javascript", ".mjs")
@@ -11001,6 +11045,252 @@ def create_app() -> Flask:
             summary = mineru_parse_selected_pdfs(library_or_404(library_id), [str(key) for key in item_keys])
             return jsonify({"ok": True, **summary})
         except (SourceError, ValueError, RuntimeError, OSError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/rag/knowledge-bases")
+    def api_rag_knowledge_bases(library_id: str):
+        try:
+            return jsonify({"ok": True, "knowledge_bases": rag_list_knowledge_bases(library_or_404(library_id))})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/knowledge-bases")
+    def api_rag_create_knowledge_base(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        item_keys = payload.get("item_keys") or []
+        if item_keys is None:
+            item_keys = []
+        if not isinstance(item_keys, list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+        try:
+            knowledge_base = rag_create_knowledge_base(
+                library_or_404(library_id),
+                name=str(payload.get("name") or ""),
+                description=str(payload.get("description") or ""),
+                item_keys=item_keys,
+                base_mode=str(payload.get("base_mode") or "manual"),
+                scope=scope,
+            )
+            return jsonify({"ok": True, "knowledge_base": knowledge_base})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/rag/knowledge-bases/<knowledge_base_id>")
+    def api_rag_knowledge_base(library_id: str, knowledge_base_id: str):
+        try:
+            return jsonify({"ok": True, "knowledge_base": rag_knowledge_base(library_or_404(library_id), knowledge_base_id)})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.delete("/api/library/<library_id>/rag/knowledge-bases/<knowledge_base_id>")
+    def api_rag_delete_knowledge_base(library_id: str, knowledge_base_id: str):
+        try:
+            return jsonify({"ok": True, **rag_delete_knowledge_base(library_or_404(library_id), knowledge_base_id)})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/knowledge-bases/<knowledge_base_id>/items")
+    def api_rag_add_knowledge_base_items(library_id: str, knowledge_base_id: str):
+        payload = request.get_json(silent=True) or {}
+        item_keys = payload.get("item_keys") or []
+        if not isinstance(item_keys, list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            knowledge_base = rag_add_knowledge_base_items(
+                library_or_404(library_id),
+                knowledge_base_id,
+                item_keys,
+                source=str(payload.get("source") or "manual"),
+            )
+            return jsonify({"ok": True, "knowledge_base": knowledge_base})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.delete("/api/library/<library_id>/rag/knowledge-bases/<knowledge_base_id>/items")
+    def api_rag_remove_knowledge_base_items(library_id: str, knowledge_base_id: str):
+        payload = request.get_json(silent=True) or {}
+        item_keys = payload.get("item_keys") or []
+        if not isinstance(item_keys, list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            knowledge_base = rag_remove_knowledge_base_items(library_or_404(library_id), knowledge_base_id, item_keys)
+            return jsonify({"ok": True, "knowledge_base": knowledge_base})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/index")
+    def api_rag_index_library(library_id: str):
+        try:
+            status = rag_index_library(library_or_404(library_id))
+            return jsonify({"ok": True, "status": status})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/index/mineru")
+    def api_rag_index_mineru(library_id: str):
+        try:
+            status = rag_index_mineru_results(library_or_404(library_id))
+            return jsonify({"ok": True, "status": status})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/rag/index/status")
+    def api_rag_index_status(library_id: str):
+        try:
+            return jsonify({"ok": True, "status": rag_index_status(library_or_404(library_id))})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/tools/retrieve")
+    def api_rag_retrieve(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            result = rag_retrieve(
+                library_or_404(library_id),
+                str(payload.get("query") or ""),
+                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                mode=str(payload.get("mode") or "auto"),
+                top_k=int(payload.get("top_k") or 8),
+                include_context=bool(payload.get("include_context", True)),
+                context_window=int(payload.get("context_window") or 1),
+            )
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/agent/check")
+    def api_rag_agent_check(library_id: str):
+        try:
+            library = library_or_404(library_id)
+            result = rag_codex_connectivity_probe(
+                library=library,
+                codex_config=api_config_codex_for_library(library_id),
+            )
+            return jsonify(result)
+        except SourceError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/chat")
+    def api_rag_chat(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        question = str(payload.get("question") or payload.get("query") or "").strip()
+        if not question:
+            return jsonify({"ok": False, "error": "question 不能为空。"}), 400
+        try:
+            library = library_or_404(library_id)
+            evidence_pack = rag_retrieve(
+                library,
+                question,
+                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                mode=str(payload.get("mode") or "auto"),
+                top_k=int(payload.get("top_k") or 8),
+                include_context=bool(payload.get("include_context", True)),
+                context_window=int(payload.get("context_window") or 1),
+            )
+            sources = _rag_chat_sources(evidence_pack)
+            if not evidence_pack.get("results"):
+                return jsonify(
+                    {
+                        "ok": True,
+                        "answer": "当前知识库没有检索到足够证据，无法基于文库内容回答这个问题。请先刷新 RAG 索引、扩大知识库范围，或换一个更具体的检索问题。",
+                        "sources": [],
+                        "evidence_pack": evidence_pack,
+                        "tool_calls": evidence_pack.get("tool_calls") or [],
+                        "warnings": evidence_pack.get("warnings") or [],
+                    }
+                )
+            prompt = build_agentic_rag_chat_prompt(question=question, evidence_pack=evidence_pack)
+            codex_result = rag_codex_prompt(
+                library=library,
+                codex_config=api_config_codex_for_library(library_id),
+                prompt=prompt,
+                include_agentic_rag_skill=True,
+                ephemeral=True,
+            )
+            if not codex_result.get("ok"):
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error": codex_result.get("message") or codex_result.get("assistant_text") or "Codex Agent 调用失败。",
+                        "sources": sources,
+                        "evidence_pack": evidence_pack,
+                        "tool_calls": evidence_pack.get("tool_calls") or [],
+                        "diagnostics": codex_result.get("diagnostics") or {},
+                    }
+                ), 400
+            return jsonify(
+                {
+                    "ok": True,
+                    "answer": codex_result.get("assistant_text") or "",
+                    "sources": sources,
+                    "evidence_pack": evidence_pack,
+                    "tool_calls": evidence_pack.get("tool_calls") or [],
+                    "warnings": evidence_pack.get("warnings") or [],
+                    "usage": codex_result.get("usage"),
+                    "diagnostics": codex_result.get("diagnostics") or {},
+                    "turn_id": codex_result.get("turn_id", ""),
+                    "turn_status": codex_result.get("turn_status", ""),
+                }
+            )
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/tools/keyword_search")
+    def api_rag_keyword_search(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            result = rag_keyword_search(
+                library_or_404(library_id),
+                str(payload.get("query") or ""),
+                top_k=int(payload.get("top_k") or 10),
+                chunk_type=str(payload.get("chunk_type") or ""),
+                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+            )
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/tools/metadata_search")
+    def api_rag_metadata_search(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            result = rag_metadata_search(
+                library_or_404(library_id),
+                str(payload.get("query") or ""),
+                top_k=int(payload.get("top_k") or 10),
+                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+            )
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/tools/chunk_read")
+    def api_rag_chunk_read(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = rag_chunk_read(
+                library_or_404(library_id),
+                str(payload.get("chunk_id") or ""),
+                doc_id=str(payload.get("doc_id") or ""),
+                window_size=int(payload.get("window_size") or 2),
+            )
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.get("/api/library/<library_id>/semantic-rules")

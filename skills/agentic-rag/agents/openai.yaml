@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agentic RAG"
+  short_description: "Use local library Evidence Packs for grounded RAG answers."
+  default_prompt: "Use $agentic-rag to answer from the current library Evidence Pack with citations."

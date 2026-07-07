@@ -24,6 +24,7 @@
       <div class="topbar-actions">
         <span class="mode-pill">{{ library.name }}</span>
         <span class="mode-pill">界面占位版</span>
+        <button class="ghost-btn" type="button" data-rag-index-library>刷新 RAG 索引</button>
         <a class="nav-action-btn" href="{{ url_for('library_page', library_id=library.library_id) }}">返回文库</a>
       </div>
     </header>
@@ -35,7 +36,10 @@
           <button type="button" class="workbench-collapse-btn" data-toggle-knowledge-sidebar title="折叠列表" aria-label="折叠列表">◀</button>
         </div>
         <div class="workbench-panel-body">
-          <button type="button" class="ghost-btn knowledge-create-btn" data-knowledge-placeholder-action="create">新建知识库</button>
+          <div class="knowledge-sidebar-actions">
+            <button type="button" class="ghost-btn knowledge-create-btn" data-knowledge-placeholder-action="create">新建知识库</button>
+            <button type="button" class="danger-btn knowledge-delete-btn" data-delete-knowledge-base>删除知识库</button>
+          </div>
           <div class="compact-list" data-knowledge-list></div>
         </div>
       </aside>
@@ -60,6 +64,7 @@
           <div class="matrix-status" data-reading-matrix-status>
             <span>当前仅提供知识库界面骨架，后续再接入真实导入、字段保存和矩阵生成。</span>
           </div>
+          <div class="knowledge-search-panel" data-knowledge-search-panel></div>
           <div class="matrix-table-card">
             <div class="matrix-table-head">
               <strong>矩阵表格</strong>
@@ -82,6 +87,7 @@
           <h2>智能体对话</h2>
         </div>
         <div class="workbench-panel-body knowledge-agent-body">
+          <div class="knowledge-chat-messages" data-knowledge-chat-messages></div>
           <textarea rows="6" class="knowledge-chat-input" placeholder="围绕当前知识库、矩阵字段或勾选条目继续提问。"></textarea>
           <div class="knowledge-chat-actions">
             <button type="button" class="ghost-btn" data-knowledge-placeholder-action="compress">压缩记忆</button>

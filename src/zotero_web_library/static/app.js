@@ -193,6 +193,13 @@ const state = {
   pdfParseMessage: "",
   pdfParseBusy: false,
   pdfParseResult: null,
+  knowledgeBases: [],
+  knowledgeImportMode: "existing",
+  knowledgeImportTargetId: "",
+  knowledgeImportNewName: "",
+  knowledgeImportDescription: "",
+  knowledgeImportMessage: "",
+  knowledgeImportBusy: false,
   deleteItemsMode: "trash",
   deleteItemsMessage: "",
   deleteItemsBusy: false,
@@ -766,7 +773,7 @@ function bulkActionState(action) {
       if (!editable) return { enabled: false, title: localCopyRequired };
       return checkedCount ? { enabled: true, title: "用 MinerU 解析已勾选条目的 PDF" } : { enabled: false, title: checkedRequired };
     case "import-knowledge":
-      return checkedCount ? { enabled: false, title: pending } : { enabled: false, title: checkedRequired };
+      return checkedCount ? { enabled: true, title: "将已勾选条目加入知识库" } : { enabled: false, title: checkedRequired };
     case "export-citation":
       return checkedCount ? { enabled: true, title: "导出已勾选条目引用" } : { enabled: false, title: checkedRequired };
     case "download-papers":
@@ -6136,6 +6143,140 @@ async function submitPdfParse() {
   }
 }
 
+function renderKnowledgeImportModal() {
+  const panel = document.querySelector("[data-knowledge-import-modal]");
+  if (!panel) return;
+  const selectedCount = selectedItemKeys().length;
+  const bases = state.knowledgeBases || [];
+  const hasBases = bases.length > 0;
+  if (!hasBases && state.knowledgeImportMode === "existing") state.knowledgeImportMode = "new";
+  const options = bases
+    .map((item) => `<option value="${escapeHtml(item.knowledge_base_id)}" ${state.knowledgeImportTargetId === item.knowledge_base_id ? "selected" : ""}>${escapeHtml(item.name || item.knowledge_base_id)} (${Number(item.item_count || 0)})</option>`)
+    .join("");
+  panel.innerHTML = `
+    <section class="floating-card knowledge-import-card" data-knowledge-import-card>
+      <div class="pane-head">
+        <div>
+          <h2>导入知识库</h2>
+          <p>已选择 ${selectedCount} 条文献</p>
+        </div>
+        <button type="button" class="icon-btn" data-close-knowledge-import>×</button>
+      </div>
+      <form class="bulk-modal-form" data-knowledge-import-form>
+        <label class="choice-row">
+          <input type="radio" name="mode" value="existing" ${state.knowledgeImportMode === "existing" ? "checked" : ""} ${hasBases ? "" : "disabled"}>
+          <span><strong>加入已有知识库</strong><small>${hasBases ? "把已勾选条目追加到选中的知识库。" : "当前还没有知识库，请先新建。"}</small></span>
+        </label>
+        ${hasBases ? `
+          <label>
+            <span>目标知识库</span>
+            <select name="knowledge_base_id" data-knowledge-import-target ${state.knowledgeImportMode === "existing" ? "" : "disabled"}>
+              ${options}
+            </select>
+          </label>
+        ` : ""}
+        <label class="choice-row">
+          <input type="radio" name="mode" value="new" ${state.knowledgeImportMode === "new" ? "checked" : ""}>
+          <span><strong>新建知识库</strong><small>创建一个知识库，并立即加入已勾选条目。</small></span>
+        </label>
+        <label>
+          <span>新知识库名称</span>
+          <input name="name" value="${escapeHtml(state.knowledgeImportNewName)}" placeholder="例如：VLA 核心论文" ${state.knowledgeImportMode === "new" ? "" : "disabled"}>
+        </label>
+        <label>
+          <span>描述</span>
+          <textarea name="description" rows="3" placeholder="可选：这个知识库的研究主题、筛选标准或用途" ${state.knowledgeImportMode === "new" ? "" : "disabled"}>${escapeHtml(state.knowledgeImportDescription)}</textarea>
+        </label>
+        <div class="bulk-modal-actions">
+          <button type="submit" class="form-action-btn" ${state.knowledgeImportBusy || !selectedCount ? "disabled" : ""}>${state.knowledgeImportBusy ? "导入中..." : "确认导入"}</button>
+          <button type="button" class="ghost-btn" data-close-knowledge-import>取消</button>
+        </div>
+      </form>
+      ${state.knowledgeImportMessage ? `<p class="import-message" data-knowledge-import-message>${escapeHtml(state.knowledgeImportMessage)}</p>` : ""}
+    </section>
+  `;
+  panel.querySelectorAll("[data-close-knowledge-import]").forEach((button) => button.addEventListener("click", closeKnowledgeImportModal));
+  panel.querySelectorAll("input[name='mode']").forEach((input) => input.addEventListener("change", () => {
+    state.knowledgeImportMode = input.value;
+    state.knowledgeImportMessage = "";
+    renderKnowledgeImportModal();
+  }));
+  panel.querySelector("[data-knowledge-import-target]")?.addEventListener("change", (event) => {
+    state.knowledgeImportTargetId = event.target.value;
+  });
+  panel.querySelector("[data-knowledge-import-form]")?.addEventListener("submit", submitKnowledgeImport);
+}
+
+async function loadKnowledgeBasesForImport() {
+  const response = await fetch(`/api/library/${state.libraryId}/rag/knowledge-bases`);
+  const data = await parseJSONResponse(response);
+  if (!response.ok || data.ok === false) throw new Error(data.error || "知识库列表加载失败");
+  state.knowledgeBases = data.knowledge_bases || [];
+  if (!state.knowledgeImportTargetId && state.knowledgeBases.length) {
+    state.knowledgeImportTargetId = state.knowledgeBases[0].knowledge_base_id;
+  }
+  if (!state.knowledgeBases.length) state.knowledgeImportMode = "new";
+}
+
+async function openKnowledgeImportModal() {
+  if (!bulkActionState("import-knowledge").enabled) return;
+  state.knowledgeImportMessage = "";
+  state.knowledgeImportBusy = false;
+  state.knowledgeImportNewName = "";
+  state.knowledgeImportDescription = "";
+  const panel = document.querySelector("[data-knowledge-import-modal]");
+  if (panel) panel.hidden = false;
+  try {
+    await loadKnowledgeBasesForImport();
+  } catch (error) {
+    state.knowledgeImportMessage = error.message;
+  }
+  renderKnowledgeImportModal();
+}
+
+function closeKnowledgeImportModal() {
+  const panel = document.querySelector("[data-knowledge-import-modal]");
+  if (panel) panel.hidden = true;
+}
+
+async function submitKnowledgeImport(event) {
+  event.preventDefault();
+  const keys = selectedItemKeys();
+  if (!keys.length) return;
+  const form = new FormData(event.currentTarget);
+  state.knowledgeImportMode = String(form.get("mode") || state.knowledgeImportMode || "existing");
+  state.knowledgeImportTargetId = String(form.get("knowledge_base_id") || state.knowledgeImportTargetId || "").trim();
+  state.knowledgeImportNewName = String(form.get("name") || state.knowledgeImportNewName || "").trim();
+  state.knowledgeImportDescription = String(form.get("description") || state.knowledgeImportDescription || "").trim();
+  try {
+    state.knowledgeImportBusy = true;
+    state.knowledgeImportMessage = "";
+    renderKnowledgeImportModal();
+    let knowledgeBaseId = state.knowledgeImportTargetId;
+    if (state.knowledgeImportMode === "new") {
+      const created = await postJSON(`/api/library/${state.libraryId}/rag/knowledge-bases`, {
+        name: state.knowledgeImportNewName,
+        description: state.knowledgeImportDescription,
+        item_keys: keys,
+      });
+      knowledgeBaseId = created.knowledge_base?.knowledge_base_id || "";
+    } else {
+      if (!knowledgeBaseId) throw new Error("请选择目标知识库");
+      await postJSON(`/api/library/${state.libraryId}/rag/knowledge-bases/${knowledgeBaseId}/items`, { item_keys: keys });
+    }
+    await postJSON(`/api/library/${state.libraryId}/rag/index`, {});
+    state.knowledgeImportMessage = `已导入 ${keys.length} 条文献，并刷新 RAG 索引。`;
+    await loadKnowledgeBasesForImport();
+    renderKnowledgeImportModal();
+  } catch (error) {
+    state.knowledgeImportMessage = error.message;
+    renderKnowledgeImportModal();
+  } finally {
+    state.knowledgeImportBusy = false;
+    renderKnowledgeImportModal();
+  }
+}
+
 function renderDeleteItemsModal() {
   const panel = document.querySelector("[data-delete-items-modal]");
   if (!panel) return;
@@ -7902,6 +8043,7 @@ function setupLibraryPage() {
     else if (action === "edit-attachments") openAttachmentEditorModal();
     else if (action === "read-paper") openReadPaper();
     else if (action === "parse-pdfs") openPdfParseModal();
+    else if (action === "import-knowledge") openKnowledgeImportModal();
     else if (action === "export-citation") openCitationExportModal();
     else notifyFeatureInProgress(action);
   }));
