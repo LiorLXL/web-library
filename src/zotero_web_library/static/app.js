@@ -99,11 +99,24 @@ const state = {
   addItemResults: [],
   addItemBusy: false,
   retrievalQuery: "",
-  retrievalSources: new Set(["crossref", "arxiv", "pubmed", "semanticscholar", "datacite", "github", "huggingface", "zenodo"]),
+  retrievalSearchRoute: "natural_language",
+  retrievalGuidedPlanDraft: null,
+  retrievalGuidedPlanBusy: false,
+  retrievalSources: new Set(["crossref", "arxiv", "pubmed", "semanticscholar", "datacite", "europepmc", "dblp", "openreview", "figshare", "osf", "openml", "github", "gitlab", "huggingface", "zenodo", "brave"]),
   retrievalCandidates: [],
   retrievalSelectedKeys: new Set(),
+  retrievalDeletedCandidateKeys: new Set(),
   retrievalStats: null,
   retrievalSearchJobId: "",
+  retrievalGuidedJobId: "",
+  retrievalGuidedJob: null,
+  retrievalGuidedMode: "quality",
+  retrievalGuidedTimePreset: "10y",
+  retrievalGuidedLimitPerSource: 8,
+  retrievalGuidedSourceLimits: {},
+  retrievalGuidedMaterialTypes: new Set(["paper", "code", "model", "dataset", "benchmark", "website"]),
+  retrievalGuidedCoverage: null,
+  retrievalGuidedBusy: false,
   retrievalAiEvaluationSummary: null,
   retrievalAiEvaluationBusy: false,
   retrievalAiEvaluationStopRequested: false,
@@ -116,6 +129,10 @@ const state = {
   retrievalSummaryBusy: false,
   retrievalSummaryMessage: "",
   retrievalSourceInfo: {},
+  retrievalCustomSources: [],
+  retrievalCustomSourceDraft: "",
+  retrievalCustomSourceBusy: false,
+  retrievalCustomSourceMessage: "",
   retrievalSourcesBusy: false,
   retrievalSourcesChecking: false,
   retrievalSourcesMessage: "",
@@ -181,12 +198,6 @@ const state = {
   retrievalBatchJobs: [],
   retrievalBatchBusy: false,
   retrievalBatchMessage: "",
-  simplePlanBatchJobId: "",
-  simplePlanBatchLoadedJobId: "",
-  simplePlanBatchCandidatesBusy: false,
-  retrievalBatchMode: "quick",
-  retrievalSimpleBatchLimit: 5,
-  retrievalSimpleSourceLimits: {},
   citationExportFormat: "bibtex",
   citationExportMessage: "",
   citationExportBusy: false,
@@ -228,6 +239,7 @@ const state = {
 
 let retrievalBatchRefreshTimer = null;
 let retrievalSearchPollTimer = null;
+let retrievalGuidedPollTimer = null;
 let retrievalAiEvaluationAbortController = null;
 let retrievalAiScoringPollTimer = null;
 let retrievalQueryPlanPollTimer = null;
@@ -377,6 +389,8 @@ function renderApiConfigPage() {
   const github = config.code_sources?.github || {};
   const huggingface = config.code_sources?.huggingface || {};
   const zenodo = config.code_sources?.zenodo || {};
+  const gitlab = config.code_sources?.gitlab || {};
+  const brave = config.code_sources?.brave || {};
   const mineru = config.mineru || {};
   const codex = ensureCodexConfigState();
   const codexApiKeyValue = state.apiConfigShowCodexSecrets ? String(codex.api_key || "") : "";
@@ -392,8 +406,10 @@ function renderApiConfigPage() {
     : "未配置";
   const serviceRows = [
     ["github", "GitHub Token", "github_token", github, "公开仓库搜索；可选，未填也能搜公开资源"],
+    ["gitlab", "GitLab Token", "gitlab_token", gitlab, "GitLab 项目搜索；可选"],
     ["huggingface", "HuggingFace Token", "huggingface_token", huggingface, "Hub models / datasets；可选"],
     ["zenodo", "Zenodo Token", "zenodo_token", zenodo, "公开 records；可选"],
+    ["brave", "Brave Search API Key", "brave_search_token", brave, "相关网址搜索；必填"],
   ];
   host.innerHTML = `
     <section class="api-config-card">
@@ -473,7 +489,7 @@ function renderApiConfigPage() {
         <div class="api-config-field-grid">
           <label>
             <span>模型名</span>
-            <input name="codex_model" value="${escapeHtml(codex.model || "")}" placeholder="codex-mini-latest">
+            <input name="codex_model" value="${escapeHtml(codex.model || "")}" placeholder="openai-codex">
           </label>
           <label>
             <span>API 请求地址</span>
@@ -545,8 +561,10 @@ async function saveApiConfig(event) {
     },
     code_sources: {
       github_token: apiConfigSecretPayload(formData, "github_token", code.github?.configured, code.github?.source),
+      gitlab_token: apiConfigSecretPayload(formData, "gitlab_token", code.gitlab?.configured, code.gitlab?.source),
       huggingface_token: apiConfigSecretPayload(formData, "huggingface_token", code.huggingface?.configured, code.huggingface?.source),
       zenodo_token: apiConfigSecretPayload(formData, "zenodo_token", code.zenodo?.configured, code.zenodo?.source),
+      brave_search_token: apiConfigSecretPayload(formData, "brave_search_token", code.brave?.configured, code.brave?.source),
     },
   };
   try {
@@ -874,10 +892,12 @@ function retrievalCandidateKey(candidate, index) {
 }
 
 function normalizeRetrievalCandidates(candidates) {
-  return (candidates || []).map((candidate, index) => ({
-    ...candidate,
-    client_key: candidate.client_key || retrievalCandidateKey(candidate, index),
-  }));
+  return (candidates || [])
+    .map((candidate, index) => ({
+      ...candidate,
+      client_key: candidate.client_key || retrievalCandidateKey(candidate, index),
+    }))
+    .filter((candidate) => !state.retrievalDeletedCandidateKeys.has(candidate.client_key));
 }
 
 function retrievalCandidateRuleConfidence(candidate) {
@@ -1100,36 +1120,62 @@ function aiScoreValue(ai, key, legacyKey = "") {
   return null;
 }
 
-const SIMPLE_PLAN_SOURCE_LIMITS_BY_MODE = {
-  quick: {
-    default: 4,
+const GUIDED_SOURCE_LIMITS_BY_MODE = {
+  fast: {
+    default: 5,
     crossref: 5,
-    arxiv: 5,
-    pubmed: 5,
     semanticscholar: 5,
-    datacite: 4,
-    github: 2,
-    huggingface: 2,
+    openalex: 5,
+    europepmc: 5,
+    dblp: 5,
+    openreview: 4,
+    arxiv: 5,
+    biorxiv: 5,
+    medrxiv: 5,
+    pubmed: 5,
+    ads: 5,
+    datacite: 3,
+    github: 3,
+    gitlab: 3,
+    huggingface: 3,
     zenodo: 3,
-    localfile: 5,
-    httpjson: 5,
-    sqlite: 5,
+    figshare: 3,
+    osf: 3,
+    openml: 3,
     manifest: 5,
+    localfile: 8,
+    httpjson: 8,
+    sqlite: 8,
+    brave: 5,
+    openlibrary: 3,
   },
-  full: {
+  quality: {
     default: 8,
-    crossref: 10,
-    arxiv: 10,
-    pubmed: 10,
-    semanticscholar: 10,
+    crossref: 12,
+    semanticscholar: 12,
+    openalex: 12,
+    europepmc: 12,
+    dblp: 10,
+    openreview: 10,
+    arxiv: 12,
+    biorxiv: 10,
+    medrxiv: 10,
+    pubmed: 12,
+    ads: 10,
     datacite: 8,
-    github: 5,
-    huggingface: 5,
-    zenodo: 6,
-    localfile: 10,
-    httpjson: 10,
-    sqlite: 10,
+    github: 6,
+    gitlab: 6,
+    huggingface: 6,
+    zenodo: 8,
+    figshare: 8,
+    osf: 8,
+    openml: 8,
     manifest: 10,
+    localfile: 15,
+    httpjson: 12,
+    sqlite: 12,
+    brave: 10,
+    openlibrary: 5,
   },
 };
 
@@ -1376,6 +1422,22 @@ function setRetrievalCandidateSelection(mode) {
   renderRetrievalPage();
 }
 
+function deleteSelectedRetrievalCandidates() {
+  const selectedKeys = new Set([...state.retrievalSelectedKeys].filter(Boolean));
+  if (!selectedKeys.size) {
+    state.addItemMessage = "请先选择要删除的候选。";
+    renderRetrievalPage();
+    return;
+  }
+  selectedKeys.forEach((key) => state.retrievalDeletedCandidateKeys.add(key));
+  const before = state.retrievalCandidates.length;
+  state.retrievalCandidates = state.retrievalCandidates.filter((candidate) => !selectedKeys.has(candidate.client_key));
+  state.retrievalSelectedKeys = new Set();
+  const removedCount = before - state.retrievalCandidates.length;
+  state.addItemMessage = `已从候选区删除 ${removedCount} 条候选。`;
+  renderRetrievalPage();
+}
+
 function retrievalSourceSetupText(info) {
   const setup = info.setup || {};
   const configEnv = setup.config_env || "";
@@ -1385,42 +1447,6 @@ function retrievalSourceSetupText(info) {
   if (setup.config_mode === "required_env" && configEnv) return `配置：${configEnv}`;
   if (setup.config_mode === "optional_env" && configEnv) return `可选：${configEnv}`;
   return "";
-}
-
-function retrievalSourceSetupTitle(info) {
-  const setup = info.setup || {};
-  const parts = [];
-  const setupText = retrievalSourceSetupText(info);
-  if (setupText) parts.push(setupText);
-  if (setup.preference_api) parts.push(`文库配置 API：${setup.preference_api}`);
-  if (setup.rate_limit_env) parts.push(`源级限流：${setup.rate_limit_env}`);
-  if (setup.global_rate_limit_env) parts.push(`全局限流：${setup.global_rate_limit_env}`);
-  (setup.notes || []).forEach((note) => {
-    if (note) parts.push(note);
-  });
-  return parts.join("\n");
-}
-
-function renderRetrievalSourceOption(name, fallbackLabel) {
-  const info = state.retrievalSourceInfo[name] || {};
-  const label = info.label || fallbackLabel;
-  const unavailable = info.available === false;
-  const checked = !unavailable && state.retrievalSources.has(name);
-  const health = info.health || null;
-  const healthText = health ? (health.ok ? `健康 ${health.elapsed_ms || 0}ms` : `${health.error_kind || "异常"}：${health.action || health.error || ""}`) : "";
-  const rateText = formatRateLimitSeconds(info.rate_limit_seconds);
-  const note = info.rate_limit_note || "";
-  const setupText = retrievalSourceSetupText(info);
-  const setupTitle = retrievalSourceSetupTitle(info);
-  const title = [note, setupTitle].filter(Boolean).join("\n");
-  const status = [info.message || (state.retrievalSourcesBusy ? "检查中" : ""), rateText, healthText].filter(Boolean).join("；");
-  const showSetup = Boolean(setupText && (unavailable || info.optional_config));
-  return `<label class="${unavailable ? "unavailable" : ""} ${health && health.ok === false ? "warning" : ""}" title="${escapeHtml(title)}">
-    <input type="checkbox" name="sources" value="${escapeHtml(name)}" ${checked ? "checked" : ""} ${unavailable ? "disabled" : ""}>
-    <span>${escapeHtml(label)}</span>
-    ${status ? `<em class="retrieval-source-status">${escapeHtml(status)}</em>` : ""}
-    ${showSetup ? `<small class="retrieval-source-setup">${escapeHtml(setupText)}</small>` : ""}
-  </label>`;
 }
 
 function retrievalReadinessStatusLabel(status) {
@@ -2479,6 +2505,9 @@ const SIMPLE_RETRIEVAL_SOURCE_CATEGORIES = [
       ["crossref", "Crossref", "论文 DOI"],
       ["semanticscholar", "Semantic Scholar", "论文补充"],
       ["openalex", "OpenAlex", "开放学术图谱"],
+      ["europepmc", "Europe PMC", "生医论文"],
+      ["dblp", "DBLP", "计算机论文"],
+      ["openreview", "OpenReview", "评审/投稿"],
     ],
   },
   {
@@ -2510,8 +2539,12 @@ const SIMPLE_RETRIEVAL_SOURCE_CATEGORIES = [
     sources: [
       ["datacite", "DataCite", "数据/软件 DOI"],
       ["github", "GitHub", "代码仓库"],
+      ["gitlab", "GitLab", "代码仓库"],
       ["huggingface", "HuggingFace", "模型/数据集"],
       ["zenodo", "Zenodo", "软件/数据/报告 DOI"],
+      ["figshare", "Figshare", "数据/对象"],
+      ["osf", "OSF", "项目/数据"],
+      ["openml", "OpenML", "数据/基准"],
       ["manifest", "Manifest", "代码包/对象清单"],
     ],
   },
@@ -2527,6 +2560,15 @@ const SIMPLE_RETRIEVAL_SOURCE_CATEGORIES = [
     ],
   },
   {
+    title: "相关网址",
+    tag: "Web",
+    description: "项目主页、文档、榜单和相关网页。",
+    defaultOpen: false,
+    sources: [
+      ["brave", "Brave Search", "相关网址"],
+    ],
+  },
+  {
     title: "图书 / 其他资料",
     tag: "Books",
     description: "图书、章节或其他非论文资料。",
@@ -2536,6 +2578,25 @@ const SIMPLE_RETRIEVAL_SOURCE_CATEGORIES = [
     ],
   },
 ];
+
+function simpleRetrievalSourceCategories() {
+  const customSources = Array.isArray(state.retrievalCustomSources) ? state.retrievalCustomSources : [];
+  const customOptions = customSources.map((source) => {
+    const name = String(source.source_id || source.id || "");
+    return [name, source.name || name, `${source.kind || "custom"}${source.enabled === false ? " / 已停用" : ""}`];
+  }).filter(([name]) => name);
+  if (!customOptions.length) return SIMPLE_RETRIEVAL_SOURCE_CATEGORIES;
+  return [
+    ...SIMPLE_RETRIEVAL_SOURCE_CATEGORIES,
+    {
+      title: "自定义源",
+      tag: "Custom",
+      description: "文库级自定义 HTTP、文件或 Manifest 来源。",
+      defaultOpen: false,
+      sources: customOptions,
+    },
+  ];
+}
 
 function renderSimpleRetrievalSourceOption(name, fallbackLabel, hint) {
   const info = state.retrievalSourceInfo[name] || {};
@@ -2588,196 +2649,542 @@ function renderSimpleRetrievalSourceCategory(category) {
   </details>`;
 }
 
-function currentSimplePlanBatchJob() {
-  const jobId = String(state.simplePlanBatchJobId || "").trim();
-  if (!jobId) return null;
-  return (state.retrievalBatchJobs || []).find((job) => String(job.job_id || "") === jobId) || null;
+function defaultCustomSourceConfigText() {
+  return JSON.stringify({
+    label: "My HTTP JSON",
+    url_template: "https://example.com/search?q={query}&limit={limit}",
+    items_path: "items",
+    field_map: {
+      title: "title",
+      abstract: "description",
+      url: "url",
+      date: "year",
+    },
+    resource_types: ["paper"],
+  }, null, 2);
 }
 
-function simplePlanRecommendedSources() {
-  const selected = new Set(currentRetrievalSourceSelection());
-  const recommended = [];
-  const queries = Array.isArray(state.retrievalQueryPlan?.queries) ? state.retrievalQueryPlan.queries : [];
-  queries.forEach((item) => {
-    (item.sources || []).forEach((source) => {
-      const cleanSource = String(source || "").trim().toLowerCase();
-      if (cleanSource && selected.has(cleanSource) && !recommended.includes(cleanSource)) {
-        recommended.push(cleanSource);
-      }
-    });
-  });
-  return recommended;
-}
-
-function simplePlanBatchSourceSelection() {
-  const recommended = simplePlanRecommendedSources();
-  const selected = currentRetrievalSourceSelection();
-  const sourceNames = recommended.length ? recommended : selected;
-  return {
-    recommended: recommended.length > 0,
-    selected: sourceNames,
-    unavailable: unavailableRetrievalSources(sourceNames),
-    available: availableRetrievalSources(sourceNames),
+function renderRetrievalSourceManager() {
+  const customSources = Array.isArray(state.retrievalCustomSources) ? state.retrievalCustomSources : [];
+  const builtInStatuses = Object.values(state.retrievalSourceInfo || {}).filter((source) => source && !source.custom);
+  const sourceStats = {
+    total: builtInStatuses.length,
+    available: builtInStatuses.filter((source) => source.available !== false).length,
+    needConfig: builtInStatuses.filter((source) => source.requires_config && !source.configured).length,
   };
+  const draft = state.retrievalCustomSourceDraft || defaultCustomSourceConfigText();
+  const rows = customSources.length ? customSources.map((source) => {
+    const id = String(source.source_id || source.id || "");
+    const status = source.status || {};
+    const ok = status.ok === true || status.available === true;
+    return `<article class="retrieval-source-instance">
+      <div>
+        <strong>${escapeHtml(source.name || id)}</strong>
+        <span>${escapeHtml(source.kind || "custom")} · ${source.enabled === false ? "已停用" : "已启用"} · ${ok ? "检测通过" : (status.error || "未检测")}</span>
+      </div>
+      <div class="simple-result-tools">
+        <button type="button" class="mini-icon retrieval-report-btn" data-check-custom-source="${escapeHtml(id)}" ${state.retrievalCustomSourceBusy ? "disabled" : ""}>检测</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-toggle-custom-source="${escapeHtml(id)}" data-enabled="${source.enabled === false ? "1" : "0"}">${source.enabled === false ? "启用" : "停用"}</button>
+        <button type="button" class="mini-icon retrieval-report-btn danger" data-delete-custom-source="${escapeHtml(id)}">删除</button>
+      </div>
+    </article>`;
+  }).join("") : `<div class="simple-result-placeholder compact">暂无自定义源。</div>`;
+  return `
+    <section class="retrieval-source-manager">
+      <div class="retrieval-source-manager-head">
+        <div>
+          <strong>源管理中心</strong>
+          <span>内置源 ${sourceStats.available}/${sourceStats.total} 可用${sourceStats.needConfig ? `，${sourceStats.needConfig} 个需配置` : ""}</span>
+        </div>
+        <a class="mini-icon retrieval-report-btn" href="/library/${encodeURIComponent(state.libraryId)}/api-config">配置 Key</a>
+      </div>
+      <div class="retrieval-custom-source-list">${rows}</div>
+      <details class="retrieval-custom-source-form">
+        <summary>添加自定义源</summary>
+        <div data-custom-source-form class="retrieval-custom-source-fields">
+          <div class="guided-control-row">
+            <label class="guided-select">
+              <span>名称</span>
+              <input name="name" placeholder="团队内部论文库">
+            </label>
+            <label class="guided-select">
+              <span>类型</span>
+              <select name="kind">
+                <option value="httpjson">HTTP JSON</option>
+                <option value="localfile">CSV/JSONL 文件</option>
+                <option value="manifest">Object Manifest</option>
+                <option value="sqlite">SQLite（高级）</option>
+              </select>
+            </label>
+          </div>
+          <textarea name="config_text" data-custom-source-config rows="8">${escapeHtml(draft)}</textarea>
+          <div class="simple-composer-actions">
+            <button type="button" class="form-action-btn" data-save-custom-source ${state.retrievalCustomSourceBusy ? "disabled" : ""}>保存自定义源</button>
+            <span>${escapeHtml(state.retrievalCustomSourceMessage || "保存后可检测并勾选参与检索。")}</span>
+          </div>
+        </div>
+      </details>
+    </section>`;
 }
 
-function currentSimpleBatchLimit() {
-  const value = Number(state.retrievalSimpleBatchLimit || 5);
-  return Math.max(1, Math.min(Number.isFinite(value) ? Math.round(value) : 5, 20));
+function guidedModeLabel(mode) {
+  return {
+    fast: "快速",
+    quality: "高质量",
+    coverage: "全覆盖",
+  }[String(mode || "")] || "高质量";
 }
 
-function currentSimpleBatchLimitFromInput(value) {
-  const numeric = Number(value || 5);
-  return Math.max(1, Math.min(Number.isFinite(numeric) ? Math.round(numeric) : 5, 20));
+function guidedTimeLabel(preset) {
+  return {
+    "3y": "近 3 年",
+    "5y": "近 5 年",
+    "10y": "近 10 年",
+    all: "不限",
+  }[String(preset || "")] || "近 10 年";
 }
 
-function currentSimpleBatchMode() {
-  return state.retrievalBatchMode === "full" ? "full" : "quick";
+function guidedMaterialLabel(value) {
+  return {
+    paper: "论文",
+    code: "代码",
+    data: "数据集",
+    dataset: "数据集",
+    model: "模型",
+    benchmark: "基准/榜单",
+    website: "网址",
+  }[String(value || "")] || value;
 }
 
-function defaultSimpleSourceLimit(source) {
-  const mode = currentSimpleBatchMode();
-  const table = SIMPLE_PLAN_SOURCE_LIMITS_BY_MODE[mode] || SIMPLE_PLAN_SOURCE_LIMITS_BY_MODE.quick;
+function retrievalSourceCategoryForSource(source) {
+  const clean = String(source || "").trim();
+  for (const category of simpleRetrievalSourceCategories()) {
+    if ((category.sources || []).some(([name]) => String(name || "") === clean)) return category;
+  }
+  return null;
+}
+
+function retrievalSourceTypeLabels(source) {
+  const clean = String(source || "").trim();
+  const info = state.retrievalSourceInfo[clean] || {};
+  const values = Array.isArray(info.resource_types) ? info.resource_types : [];
+  const labels = values
+    .map((value) => guidedMaterialLabel(value))
+    .filter(Boolean);
+  if (labels.length) return [...new Set(labels)];
+  const category = retrievalSourceCategoryForSource(clean);
+  if (!category) return ["资料源"];
+  if (category.tag === "Paper" || category.tag === "Preprint" || category.tag === "Domain") return ["论文"];
+  if (category.tag === "Data & Code") return ["代码", "模型", "数据集"];
+  if (category.tag === "Web") return ["网址"];
+  if (category.tag === "Books") return ["图书"];
+  if (category.tag === "Internal") return ["本地/内部"];
+  return [category.title || "资料源"];
+}
+
+function currentGuidedLimitPerSource(value = state.retrievalGuidedLimitPerSource) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return state.retrievalGuidedMode === "fast" ? 5 : 8;
+  return Math.max(1, Math.min(parsed, 50));
+}
+
+function currentGuidedMode() {
+  return state.retrievalGuidedMode === "fast" ? "fast" : "quality";
+}
+
+function defaultGuidedSourceLimit(source) {
+  const mode = currentGuidedMode();
+  const table = GUIDED_SOURCE_LIMITS_BY_MODE[mode] || GUIDED_SOURCE_LIMITS_BY_MODE.quality;
   const key = String(source || "").trim().toLowerCase();
-  return currentSimpleBatchLimitFromInput(table[key] || table.default || state.retrievalSimpleBatchLimit || 5);
+  return currentGuidedLimitPerSource(table[key] || table.default || state.retrievalGuidedLimitPerSource || 8);
 }
 
-function currentSimpleSourceLimit(source) {
-  const limits = state.retrievalSimpleSourceLimits || {};
+function currentGuidedSourceLimit(source, value = undefined) {
+  if (value !== undefined) return currentGuidedLimitPerSource(value);
+  const limits = state.retrievalGuidedSourceLimits || {};
   const key = String(source || "").trim().toLowerCase();
-  if (Object.prototype.hasOwnProperty.call(limits, key)) return currentSimpleBatchLimitFromInput(limits[key]);
-  return defaultSimpleSourceLimit(key);
+  if (Object.prototype.hasOwnProperty.call(limits, key)) return currentGuidedLimitPerSource(limits[key]);
+  return defaultGuidedSourceLimit(key);
 }
 
-function simplePlanBatchSourceLimits(sources) {
+function guidedSourceLimitsForSubmit(sources = currentRetrievalSourceSelection()) {
   const limits = {};
   (sources || []).forEach((source) => {
     const key = String(source || "").trim().toLowerCase();
-    if (key) limits[key] = currentSimpleSourceLimit(key);
+    if (key) limits[key] = currentGuidedSourceLimit(key);
   });
   return limits;
 }
 
-function renderSimplePlanSourceLimits() {
-  const sourceSelection = simplePlanBatchSourceSelection();
-  const sources = sourceSelection.selected;
+function renderGuidedSourceLimits() {
+  const sources = currentRetrievalSourceSelection();
   if (!sources.length) return "";
-  const mode = currentSimpleBatchMode();
-  return `<div class="simple-plan-source-limits">
-    <div>
-      <strong>每个源取多少条</strong>
-      <span>数量越小越快；论文源可稍大，代码/模型/数据源建议小一点。</span>
-    </div>
-    <div class="simple-plan-mode-toggle" aria-label="计划检索模式">
-      <button type="button" data-simple-batch-mode="quick" class="${mode === "quick" ? "active" : ""}">快速模式</button>
-      <button type="button" data-simple-batch-mode="full" class="${mode === "full" ? "active" : ""}">全量模式</button>
-      <span>${mode === "quick" ? "默认减少 GitHub/HuggingFace/Zenodo 数量，适合演示和快速判断。" : "每源取更多候选，覆盖更全但会更慢。"}</span>
-    </div>
-    <div class="simple-plan-source-limit-grid">
+  const preview = sources.slice(0, 4).map((source) => `${retrievalSourceLabel(source)} ${currentGuidedSourceLimit(source)}`).join(" / ");
+  return `<details class="guided-source-limit-panel" open>
+    <summary>
+      <strong>每源数量</strong>
+      <span>${escapeHtml(preview)}${sources.length > 4 ? " ..." : ""}</span>
+    </summary>
+    <div class="guided-source-limit-grid">
       ${sources.map((source) => {
         const unavailable = unavailableRetrievalSources([source]).length > 0;
+        const typeText = retrievalSourceTypeLabels(source).slice(0, 4).join(" / ");
         return `<label class="${unavailable ? "unavailable" : ""}">
-          <span>${escapeHtml(retrievalSourceLabel(source))}</span>
-          <input type="number" min="1" max="20" step="1" data-simple-source-limit="${escapeHtml(source)}" value="${currentSimpleSourceLimit(source)}" ${unavailable ? "disabled" : ""}>
+          <span>
+            <strong>${escapeHtml(retrievalSourceLabel(source))}</strong>
+            <em>${escapeHtml(typeText)}</em>
+          </span>
+          <input type="number" min="1" max="50" step="1" data-guided-source-limit="${escapeHtml(source)}" value="${currentGuidedSourceLimit(source)}" ${unavailable ? "disabled" : ""}>
         </label>`;
       }).join("")}
     </div>
-  </div>`;
+  </details>`;
 }
 
-function renderSimplePlanBatchStatus() {
-  const job = currentSimplePlanBatchJob();
-  if (!job) return "";
-  const total = Number(job.total_queries || 0);
-  const completed = Number(job.completed_queries || 0);
-  const failed = Number(job.failed_queries || 0);
-  const candidates = Number(job.total_candidates || 0);
-  const percent = total ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 0;
-  const status = String(job.status || "queued");
-  const active = retrievalBatchIsActive(job);
-  const eta = formatRetrievalEta(job.eta_seconds);
-  const statusText = active
-    ? `正在按计划检索：${completed}/${total}`
-    : status === "completed"
-      ? `批量检索完成：${completed}/${total}`
-      : `批量检索${status}：${completed}/${total}`;
-  const note = active
-    ? "页面会自动刷新进度；完成后会把合并候选显示到下方候选结果。"
-    : "批量结果已进入下方候选结果；如果没有显示，可重新加载。";
-  const loadButton = !active && candidates
-    ? `<button type="button" class="mini-icon retrieval-report-btn" data-load-simple-batch-candidates="${escapeHtml(job.job_id || "")}" ${state.simplePlanBatchCandidatesBusy ? "disabled" : ""}>${state.simplePlanBatchCandidatesBusy ? "加载中..." : "查看批量结果"}</button>`
-    : "";
-  const items = (job.items || []).slice(0, 5).map((item) => {
-    const itemStatus = String(item.status || "");
-    const itemCandidateCount = Number(item.candidate_count || 0);
-    const suffix = [
-      itemStatus || "queued",
-      itemCandidateCount ? `${itemCandidateCount} 条候选` : "",
-      item.error ? "有错误" : "",
-    ].filter(Boolean).join(" / ");
-    return `<span class="${escapeHtml(itemStatus)}" title="${escapeHtml(item.error || item.run_id || "")}">
-      <strong>${escapeHtml(item.query || "")}</strong>
-      <em>${escapeHtml(suffix)}</em>
-    </span>`;
-  }).join("");
-  return `<div class="simple-plan-batch-status" data-simple-plan-batch-status>
-    <div class="simple-plan-batch-status-head">
-      <div>
-        <strong>${escapeHtml(statusText)}</strong>
-        <span>${candidates} 条候选${failed ? `，${failed} 条失败` : ""}${eta ? `，${eta}` : ""}</span>
+function renderGuidedSearchControls(aiConfigured) {
+  const activeMode = currentGuidedMode();
+  const timePreset = state.retrievalGuidedTimePreset || (activeMode === "fast" ? "5y" : "10y");
+  const limitPerSource = currentGuidedLimitPerSource();
+  const defaultMaterials = ["paper", "code", "model", "dataset", "benchmark", "website"];
+  const materials = state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : new Set(defaultMaterials);
+  const modeButtons = [
+    ["fast", "快速"],
+    ["quality", "高质量"],
+  ].map(([mode, label]) => `<button type="button" class="${activeMode === mode ? "active" : ""}" data-guided-search-mode="${mode}">${label}</button>`).join("");
+  const materialChecks = defaultMaterials.map((name) => `
+    <label class="guided-material-option">
+      <input type="checkbox" name="material_types" value="${name}" data-guided-material-type ${materials.has(name) ? "checked" : ""}>
+      <span>${guidedMaterialLabel(name)}</span>
+    </label>`).join("");
+  return `
+    <div class="guided-search-controls">
+      <div class="guided-control-row">
+        <label class="guided-strength">
+          <span>检索强度</span>
+          <div class="guided-segment" aria-label="检索强度">${modeButtons}</div>
+        </label>
+        <label class="guided-select">
+          <span>时间</span>
+          <select name="time_preset" data-guided-time-preset>
+            ${["3y", "5y", "10y", "all"].map((value) => `<option value="${value}" ${timePreset === value ? "selected" : ""}>${guidedTimeLabel(value)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="guided-select guided-limit">
+          <span>每源兜底</span>
+          <input type="number" name="limit_per_source" min="1" max="50" step="1" value="${limitPerSource}" data-guided-limit-per-source>
+        </label>
       </div>
-      ${loadButton}
-    </div>
-    <div class="retrieval-batch-progress" aria-hidden="true"><span style="width:${percent}%"></span></div>
-    <p>${escapeHtml(note)}</p>
-    ${items ? `<div class="simple-plan-batch-items">${items}</div>` : ""}
+      <div class="guided-control-row compact">
+        <div class="guided-materials">${materialChecks}</div>
+      </div>
+    </div>`;
+}
+
+function retrievalGuidedJobEvents(job) {
+  const progress = job?.progress && typeof job.progress === "object" ? job.progress : {};
+  const events = Array.isArray(job?.events) ? job.events : (Array.isArray(progress.events) ? progress.events : []);
+  return events.filter((event) => event && typeof event === "object");
+}
+
+function retrievalGuidedEventLabel(kind) {
+  return {
+    queued: "排队",
+    progress: "进度",
+    success: "完成",
+    warning: "提醒",
+    error: "失败",
+  }[String(kind || "progress")] || "进度";
+}
+
+function renderRetrievalGuidedEvents(job) {
+  const events = retrievalGuidedJobEvents(job).slice(-8).reverse();
+  if (!events.length) return "";
+  return `<div class="guided-event-list" data-guided-event-list>
+    ${events.map((event) => {
+      const kind = String(event.kind || "progress").trim() || "progress";
+      const message = String(event.message || "").trim();
+      const time = event.created_at ? formatRetrievalTime(event.created_at) : "";
+      return `<article class="guided-event ${escapeHtml(kind)}">
+        <strong>${escapeHtml(retrievalGuidedEventLabel(kind))}</strong>
+        <span>${escapeHtml(message)}</span>
+        ${time ? `<em>${escapeHtml(time)}</em>` : ""}
+      </article>`;
+    }).join("")}
   </div>`;
 }
 
-function renderSimpleAiQueryPlan() {
-  const plan = state.retrievalQueryPlan || null;
-  const queries = Array.isArray(plan?.queries) ? plan.queries : [];
-  const aiConfigured = state.retrievalModelStatus?.configured === true;
-  const batchJob = currentSimplePlanBatchJob();
-  const batchActive = retrievalBatchIsActive(batchJob);
-  const batchButtonDisabled = state.retrievalBatchBusy || state.simplePlanBatchCandidatesBusy || batchActive;
-  const batchButtonText = batchActive ? "批量检索中..." : "按计划批量检索";
-  const statusText = queries.length
-    ? `${queries.length} 条检索词已准备好，确认后按计划批量检索。`
-    : aiConfigured
-      ? "AI 会先拆解主题，再批量检索。"
-      : "模型未配置，当前只能生成规则计划草案。";
-  if (!queries.length && !batchJob && !state.retrievalBatchMessage) return "";
-  return `<section class="simple-ai-plan ${queries.length ? "has-plan" : "empty"}">
-    <div class="simple-ai-plan-head">
+function renderGuidedSearchStatus() {
+  const job = state.retrievalGuidedJob;
+  const coverage = state.retrievalGuidedCoverage || job?.coverage || null;
+  if (!job && !coverage) return "";
+  const progress = job?.progress || {};
+  const status = String(job?.status || "");
+  const total = Number(progress.total_queries || 0);
+  const completed = Number(progress.completed_queries || 0);
+  const failed = Number(progress.failed_queries || 0);
+  const ratio = total ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 0;
+  const active = retrievalBackgroundJobIsActive(job);
+  const routeLabel = retrievalSearchRouteLabel(job?.search_route || job?.options?.search_route || state.retrievalSearchRoute);
+  const missing = Array.isArray(coverage?.missing) ? coverage.missing : [];
+  const missingHtml = missing.slice(0, 5).map((item) => `<span>${escapeHtml(item.reason || item.area || "")}</span>`).join("");
+  const materials = coverage?.material_counts || {};
+  return `
+    <section class="guided-status-panel">
+      <div class="guided-status-head">
+        <div>
+          <strong>${escapeHtml(job ? `${routeLabel} · ${guidedModeLabel(job.mode)}` : "覆盖报告")}</strong>
+          <span>${escapeHtml(progress.current_query || coverage?.message || "任务进度和覆盖情况")}</span>
+        </div>
+        <div class="simple-result-tools">
+          ${active ? `<button type="button" class="mini-icon retrieval-report-btn" data-pause-guided-search>暂停</button>` : ""}
+          ${status === "paused" ? `<button type="button" class="mini-icon retrieval-report-btn" data-resume-guided-search>继续</button>` : ""}
+          ${active || status === "paused" ? `<button type="button" class="mini-icon retrieval-report-btn danger" data-cancel-guided-search>停止</button>` : ""}
+        </div>
+      </div>
+      ${total ? `<div class="guided-progress"><span style="width:${ratio}%"></span></div>` : ""}
+      <div class="guided-coverage-grid">
+        <span>检索词 ${completed}/${total || 0}${failed ? `，失败 ${failed}` : ""}</span>
+        <span>候选 ${Number(progress.candidate_count || state.retrievalCandidates.length || 0)}</span>
+        <span>论文 ${Number(materials.paper || 0)}</span>
+        <span>代码 ${Number(materials.code || 0)}</span>
+        <span>模型 ${Number(materials.model || 0)}</span>
+        <span>数据集 ${Number(materials.dataset || materials.data || 0)}</span>
+        <span>基准 ${Number(materials.benchmark || 0)}</span>
+        <span>网址 ${Number(materials.website || 0)}</span>
+      </div>
+      ${missingHtml ? `<div class="guided-missing">${missingHtml}</div>` : ""}
+      ${renderRetrievalGuidedEvents(job)}
+    </section>`;
+}
+
+function normalizeRetrievalSearchRoute(value) {
+  const route = String(value || "").trim();
+  return ["keyword", "natural_language", "agent"].includes(route) ? route : "natural_language";
+}
+
+function retrievalSearchRouteLabel(route) {
+  return {
+    keyword: "主题词检索",
+    natural_language: "自然语言检索",
+    agent: "智能体检索（实验）",
+  }[normalizeRetrievalSearchRoute(route)];
+}
+
+function retrievalSearchRouteConfig(route, aiConfigured) {
+  const normalized = normalizeRetrievalSearchRoute(route);
+  const configs = {
+    natural_language: {
+      title: "自然语言检索",
+      subtitle: aiConfigured ? "先生成可编辑计划，确认后再检索。" : "需配置模型；也可切到主题词检索。",
+      inputLabel: "检索需求",
+      placeholder: "例如：找机器人双臂操作近三年顶会论文和代码",
+      action: "生成 AI 检索计划",
+      status: aiConfigured ? "AI Planner" : "模型未配置",
+    },
+    keyword: {
+      title: "主题词检索",
+      subtitle: "直接用输入词检索，不做 AI 拆解。",
+      inputLabel: "关键词",
+      placeholder: "dual-arm robot bimanual manipulation",
+      action: "开始检索",
+      status: "精准检索",
+    },
+    agent: {
+      title: "智能体检索（实验）",
+      subtitle: "通过 Codex skill/CLI 多轮检索，不自动导入。",
+      inputLabel: "智能体任务",
+      placeholder: "例如：机器人相关顶会，强调双臂操作，补充代码和数据集",
+      action: "查看入口",
+      status: "Skill/CLI",
+    },
+  };
+  return configs[normalized];
+}
+
+function renderRetrievalSearchRouteTabs(aiConfigured) {
+  const activeRoute = normalizeRetrievalSearchRoute(state.retrievalSearchRoute);
+  return `<div class="retrieval-route-tabs" aria-label="检索路线">
+    ${["natural_language", "keyword", "agent"].map((route) => {
+      const config = retrievalSearchRouteConfig(route, aiConfigured);
+      return `<button type="button" class="${activeRoute === route ? "active" : ""}" data-retrieval-route="${route}">
+        <strong>${config.title}</strong>
+        <span>${config.status}</span>
+      </button>`;
+    }).join("")}
+  </div>`;
+}
+
+function resetRetrievalGuidedPlanDraft() {
+  state.retrievalGuidedPlanDraft = null;
+}
+
+function retrievalGuidedPlanDraftGroups() {
+  const plan = state.retrievalGuidedPlanDraft;
+  return Array.isArray(plan?.query_groups) ? plan.query_groups : [];
+}
+
+function retrievalGuidedPlanAiStatus(plan) {
+  const ai = plan?.ai_enhancement && typeof plan.ai_enhancement === "object" ? plan.ai_enhancement : {};
+  const status = String(ai.status || "").trim();
+  const message = String(ai.message || "").trim();
+  if (status === "applied") {
+    const model = [ai.provider, ai.model].filter(Boolean).join(" / ");
+    return { tone: "ok", label: "AI 已参与规划", detail: model || message };
+  }
+  if (status === "partial") return { tone: "warning", label: "AI 已参与规划，部分类型规则补足", detail: message };
+  if (status === "fallback") return { tone: "warning", label: "已生成可编辑计划，逐源查看兜底状态", detail: message };
+  if (status === "error") return { tone: "warning", label: "已生成可编辑计划，逐源查看状态", detail: message };
+  if (status === "empty") return { tone: "warning", label: "已生成可编辑计划，逐源查看状态", detail: message };
+  if (status === "skipped") return { tone: "muted", label: "未使用 AI 规划", detail: message };
+  return { tone: "muted", label: "规划状态未知", detail: message };
+}
+
+function renderRetrievalGuidedActionButtons(activeRoute, submitBusy, guidedActive) {
+  const route = normalizeRetrievalSearchRoute(activeRoute);
+  if (route === "natural_language") {
+    const planText = state.retrievalGuidedPlanBusy ? "生成中..." : "生成 AI 检索计划";
+    const searchText = guidedActive || state.addItemBusy ? "检索中..." : "开始检索";
+    const showSearchAction = state.retrievalGuidedPlanDraft || guidedActive || state.addItemBusy;
+    return `<div class="simple-composer-buttons">
+      <button type="button" class="form-action-btn" data-submit-retrieval-search name="guided_action" value="plan" ${submitBusy ? "disabled" : ""}>${planText}</button>
+      ${showSearchAction ? `<button type="button" class="form-action-btn secondary-action" data-submit-retrieval-search name="guided_action" value="search" ${submitBusy ? "disabled" : ""}>${searchText}</button>` : ""}
+    </div>`;
+  }
+  const routeConfig = retrievalSearchRouteConfig(route, state.retrievalModelStatus?.configured === true);
+  const actionText = guidedActive || state.addItemBusy ? "检索中..." : routeConfig.action;
+  return `<div class="simple-composer-buttons">
+    <button type="button" class="form-action-btn" data-submit-retrieval-search name="guided_action" value="search" ${submitBusy ? "disabled" : ""}>${actionText}</button>
+  </div>`;
+}
+
+function retrievalGuidedReasonLabel(reason) {
+  const value = String(reason || "").trim();
+  if (value === "deterministic_v4_fallback") return "规则兜底生成";
+  if (value === "deterministic_v4_material_fallback") return "规则兜底生成";
+  if (value === "missing_source_fallback") return "AI 未覆盖，规则补足";
+  if (value === "missing_material_fallback") return "AI 未覆盖，规则补足";
+  if (value === "material_retry") return "按资料类型重试生成";
+  if (value === "material_retry_missing_source_fallback") return "小批规划未覆盖，规则补足";
+  if (value === "material_retry_missing_material_fallback") return "小批规划未覆盖，规则补足";
+  if (value === "material_retry_error_fallback") return "小批规划未返回，规则补足";
+  if (value === "natural_language_planner") return "AI Planner 生成";
+  if (value === "keyword_exact_match") return "关键词直连检索";
+  return value;
+}
+
+function retrievalGuidedGroupPlanningStatus(group) {
+  const status = String(group?.planning_status || "").trim().toLowerCase();
+  const message = String(group?.planning_message || "").trim();
+  if (status === "ai") return { tone: "ok", label: "该类型 AI 生成", detail: message };
+  if (status === "fallback") return { tone: "warning", label: "该类型规则补足", detail: message };
+  return { tone: "muted", label: "该类型状态未标记", detail: message };
+}
+
+function retrievalGuidedGroupSourcesLabel(group) {
+  const values = Array.isArray(group?.sources) ? group.sources : [];
+  const source = String(group?.source || "").trim();
+  const sources = [...new Set([source, ...values].map((item) => String(item || "").trim()).filter(Boolean))];
+  if (!sources.length) return "按资料类型自动匹配";
+  const labels = sources.slice(0, 5).map((item) => retrievalSourceLabel(item));
+  return sources.length > 5 ? `${labels.join(" / ")} ...` : labels.join(" / ");
+}
+
+function renderRetrievalGuidedPlanEditor() {
+  const plan = state.retrievalGuidedPlanDraft;
+  if (!plan) return "";
+  const groups = retrievalGuidedPlanDraftGroups();
+  const normalizedTopic = String(plan.normalized_topic || "").trim();
+  const detectedLanguage = String(plan.detected_language || "").trim();
+  const aiStatus = retrievalGuidedPlanAiStatus(plan);
+  return `<section class="guided-plan-editor">
+    <div class="guided-plan-editor-head">
       <div>
-        <strong>${queries.length ? "AI 检索计划" : "深度检索状态"}</strong>
-        <span>${escapeHtml(statusText)}</span>
+        <strong>AI 检索计划</strong>
+        <span>${escapeHtml([normalizedTopic, detectedLanguage ? `语言：${detectedLanguage}` : "", aiStatus.label].filter(Boolean).join(" / ") || "确认后开始检索")}</span>
       </div>
       <div class="simple-result-tools">
-        ${queries.length ? `<button type="button" class="mini-icon retrieval-report-btn" data-simple-plan-batch ${batchButtonDisabled ? "disabled" : ""} title="按计划批量检索">${batchButtonText}</button>` : ""}
+        <button type="button" class="mini-icon retrieval-report-btn" data-add-guided-plan-group>添加一组</button>
+        <button type="button" class="mini-icon retrieval-report-btn" data-clear-guided-plan-draft>重新生成</button>
       </div>
     </div>
-    ${state.retrievalBatchMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalBatchMessage)}</p>` : ""}
-    ${renderSimplePlanBatchStatus()}
-    ${queries.length ? `<details class="simple-plan-settings">
-      <summary>检索数量设置</summary>
-      ${renderSimplePlanSourceLimits()}
-    </details>` : ""}
-    ${queries.length ? `<div class="simple-ai-plan-list">
-      ${queries.map((item, index) => `<article>
-        <em>${index + 1}</em>
-        <div>
-          <strong title="${escapeHtml(item.query || "")}">${escapeHtml(item.query || "")}</strong>
-          <div class="simple-ai-plan-meta">
-            ${item.intent ? `<small>意图：${escapeHtml(item.intent)}</small>` : ""}
-            ${(item.sources || []).length ? `<small>源：${escapeHtml((item.sources || []).join(" / "))}</small>` : ""}
+    <p class="retrieval-source-message guided-plan-ai-status ${escapeHtml(aiStatus.tone)}">
+      <strong>${escapeHtml(aiStatus.label)}</strong>${aiStatus.detail ? `：${escapeHtml(aiStatus.detail)}` : ""}
+    </p>
+    ${plan.ambiguities?.length ? `<p class="retrieval-source-message">${escapeHtml(plan.ambiguities.join("；"))}</p>` : ""}
+    <div class="guided-plan-editor-list">
+      ${groups.map((group, index) => {
+        const queries = Array.isArray(group.queries) ? group.queries : [];
+        const groupStatus = retrievalGuidedGroupPlanningStatus(group);
+        const groupReason = retrievalGuidedReasonLabel(group.reason);
+        return `<article>
+          <div class="guided-plan-editor-row">
+            <label>
+              <span>资料类型</span>
+              <input value="${escapeHtml(guidedMaterialLabel(group.resource_type || "paper"))}" readonly>
+            </label>
+            <label>
+              <span>数据源</span>
+              <input value="${escapeHtml(retrievalGuidedGroupSourcesLabel(group))}" readonly>
+            </label>
+            <label>
+              <span>语言</span>
+              <input value="${escapeHtml(group.language || "")}" readonly>
+            </label>
+            <button type="button" class="mini-icon retrieval-report-btn danger" data-remove-guided-plan-group="${index}">删除</button>
           </div>
-          <span title="${escapeHtml(item.model_reason || item.reason || "")}">${escapeHtml(item.model_reason || item.reason || "覆盖不同数据源表达方式")}</span>
-        </div>
-      </article>`).join("")}
-    </div>` : `<div class="simple-result-placeholder">输入左侧主题后，先拆解检索词；确认 query 和源后按计划批量检索。</div>`}
+          <label class="guided-plan-query-editor">
+            <span>检索关键词，每行一条</span>
+            <textarea rows="3" data-guided-plan-group-queries="${index}">${escapeHtml(queries.join("\n"))}</textarea>
+          </label>
+          <small class="guided-plan-source-status ${escapeHtml(groupStatus.tone)}">
+            <strong>${escapeHtml(groupStatus.label)}</strong>
+            ${groupReason ? `<span>${escapeHtml(groupReason)}</span>` : ""}
+            ${groupStatus.detail ? `<span>${escapeHtml(groupStatus.detail)}</span>` : ""}
+          </small>
+        </article>`;
+      }).join("")}
+    </div>
   </section>`;
+}
+
+function renderAgentRetrievalPanel() {
+  return `<section class="retrieval-agent-panel">
+    <div>
+      <strong>实验功能：网页端暂未启动 agent</strong>
+      <span>当前已具备 Codex skill 和 JSON CLI，后续可接入网页端对话式智能体。</span>
+    </div>
+    <div class="retrieval-agent-grid">
+      <span>会读取历史要求并持续修正检索目标</span>
+      <span>会循环调用多源检索 CLI 获取候选</span>
+      <span>会输出候选表和覆盖缺口</span>
+      <span>不会自动导入 Zotero</span>
+    </div>
+    <code>.venv\\Scripts\\python.exe -m zotero_web_library.retrieval_cli plan --route natural_language --input "你的需求"</code>
+    <code>skills/multi-source-retrieval/SKILL.md</code>
+  </section>`;
+}
+
+function renderGuidedJobPlanPreview() {
+  const plan = state.retrievalGuidedJob?.plan && typeof state.retrievalGuidedJob.plan === "object"
+    ? state.retrievalGuidedJob.plan
+    : null;
+  const groups = Array.isArray(plan?.query_groups) ? plan.query_groups : [];
+  if (!groups.length) return "";
+  return `<details class="guided-plan-preview">
+    <summary>
+      <strong>检索词计划</strong>
+      <span>${groups.length} 组检索关键词</span>
+    </summary>
+    <div class="guided-plan-group-list">
+      ${groups.slice(0, 8).map((group) => {
+        const queries = Array.isArray(group.queries) ? group.queries : [];
+        return `<article>
+          <strong>${escapeHtml(guidedMaterialLabel(group.resource_type || ""))} · ${escapeHtml(retrievalGuidedGroupSourcesLabel(group))}</strong>
+          <span>${escapeHtml(queries.slice(0, 3).join(" / "))}</span>
+        </article>`;
+      }).join("")}
+    </div>
+  </details>`;
 }
 
 function renderSimpleRetrievalMain() {
@@ -2793,31 +3200,40 @@ function renderSimpleRetrievalMain() {
     ? `已选 ${selectedSourceNames.length} 个源${selectedSourcePreview ? `：${selectedSourcePreview}${selectedSourceNames.length > 4 ? " ..." : ""}` : ""}`
     : "未选择数据源";
   const aiConfigured = state.retrievalModelStatus?.configured === true;
-  const aiPlanButtonText = state.retrievalQueryPlanBusy ? "拆解中..." : "AI 深度检索";
+  const activeRoute = normalizeRetrievalSearchRoute(state.retrievalSearchRoute);
+  const routeConfig = retrievalSearchRouteConfig(activeRoute, aiConfigured);
   const hasAiScoring = ["ai_model", "mixed_ai_rules"].includes(aiSummarySource);
   const aiScoreButtonText = state.retrievalAiEvaluationBusy
     ? "AI 排序中..."
     : hasAiScoring ? "重新 AI 排序" : "AI 推荐排序";
+  const guidedActive = retrievalBackgroundJobIsActive(state.retrievalGuidedJob);
+  const submitBusy = guidedActive || state.addItemBusy || state.retrievalGuidedPlanBusy;
   return `
     <section class="simple-retrieval-workbench">
       <form class="add-item-form simple-search-form simple-search-composer retrieval-search-form" data-retrieval-search-form>
         <section class="simple-retrieval-guide" aria-label="三步使用流程" hidden></section>
         <div class="simple-composer-head">
           <div>
-            <strong>检索</strong>
+            <strong>${routeConfig.title}</strong>
+            <span>${routeConfig.subtitle}</span>
           </div>
-          <span class="simple-composer-status">${escapeHtml(aiConfigured ? "AI 已配置" : "模型未配置")}</span>
+          <span class="simple-composer-status">${escapeHtml(routeConfig.status)}</span>
         </div>
+        ${renderRetrievalSearchRouteTabs(aiConfigured)}
         <label class="simple-query-box simple-composer-query">
-          <span>主题 / 关键词</span>
-          <input name="query" data-retrieval-query-input value="${escapeHtml(state.retrievalQuery)}" placeholder="例如 speculative decoding LLM inference acceleration">
+          <span>${routeConfig.inputLabel}</span>
+          <input name="query" data-retrieval-query-input value="${escapeHtml(state.retrievalQuery)}" placeholder="${escapeHtml(routeConfig.placeholder)}">
         </label>
+        ${renderGuidedSearchControls(aiConfigured)}
+        ${renderGuidedSourceLimits()}
+        ${activeRoute === "agent" ? renderAgentRetrievalPanel() : ""}
         <div class="simple-composer-actions">
-          <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "检索中..." : "快速检索"}</button>
-          <button type="button" class="form-action-btn secondary-action" data-simple-ai-query-plan ${state.retrievalQueryPlanBusy ? "disabled" : ""}>${aiPlanButtonText}</button>
+          ${renderRetrievalGuidedActionButtons(activeRoute, submitBusy, guidedActive)}
           <span>${escapeHtml(selectedSourceSummary)}</span>
         </div>
-        ${renderSimpleAiQueryPlan()}
+        ${state.addItemMessage ? `<p class="retrieval-source-message">${escapeHtml(state.addItemMessage)}</p>` : ""}
+        ${activeRoute === "natural_language" ? renderRetrievalGuidedPlanEditor() : ""}
+        ${renderGuidedJobPlanPreview()}
         <details class="simple-source-drawer">
           <summary>
             <strong>数据源</strong>
@@ -2830,8 +3246,9 @@ function renderSimpleRetrievalMain() {
             <button type="button" class="mini-icon" data-check-retrieval-sources title="刷新数据源状态">${state.retrievalSourcesChecking ? "..." : "↻"}</button>
           </div>
           <div class="simple-source-categories">
-            ${SIMPLE_RETRIEVAL_SOURCE_CATEGORIES.map(renderSimpleRetrievalSourceCategory).join("")}
+            ${simpleRetrievalSourceCategories().map(renderSimpleRetrievalSourceCategory).join("")}
           </div>
+          ${renderRetrievalSourceManager()}
           ${state.retrievalSourcesMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSourcesMessage)}</p>` : ""}
         </details>
       </form>
@@ -2840,7 +3257,7 @@ function renderSimpleRetrievalMain() {
         <div class="simple-results-head">
           <div>
           <strong>候选结果</strong>
-          <span>勾选后点击导入所选。</span>
+          <span>检索过程中会陆续出现候选。</span>
           </div>
           ${candidateCount ? `<div class="simple-result-tools">
             <button type="button" class="mini-icon retrieval-report-btn" data-score-retrieval-candidates-ai ${state.retrievalAiEvaluationBusy || !aiConfigured ? "disabled" : ""}>${aiScoreButtonText}</button>
@@ -2848,8 +3265,10 @@ function renderSimpleRetrievalMain() {
             <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="ai" ${aiRecommendedCount ? "" : "disabled"}>全选${recommendationLabel}${aiRecommendedCount ? ` (${aiRecommendedCount})` : ""}</button>
             <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="all">全选候选</button>
             <button type="button" class="mini-icon retrieval-report-btn" data-select-retrieval-candidates="none">清空选择</button>
+            <button type="button" class="mini-icon retrieval-report-btn danger" data-delete-selected-retrieval-candidates ${selectedCount ? "" : "disabled"}>删除所选</button>
           </div>` : ""}
         </div>
+        ${renderGuidedSearchStatus()}
         ${renderRetrievalStats()}
         ${renderRetrievalAiSummary()}
         ${candidateHtml || `<div class="simple-result-placeholder">直接检索或计划检索完成后，这里会显示候选条目和推荐判断。</div>`}
@@ -2872,73 +3291,6 @@ function renderSimpleRetrievalMain() {
         </section>
       </details>
     </section>
-  `;
-}
-
-function renderRetrievalPanel() {
-  const selectedCount = selectedRetrievalCandidates().length;
-  const sourceOptions = [
-    ["crossref", "Crossref"],
-    ["arxiv", "arXiv"],
-    ["pubmed", "PubMed"],
-    ["biorxiv", "bioRxiv"],
-    ["medrxiv", "medRxiv"],
-    ["semanticscholar", "Semantic Scholar"],
-    ["datacite", "DataCite"],
-    ["github", "GitHub"],
-    ["huggingface", "HuggingFace"],
-    ["zenodo", "Zenodo"],
-    ["openlibrary", "OpenLibrary"],
-    ["ads", "NASA ADS"],
-    ["localfile", "Local CSV/JSONL"],
-    ["httpjson", "HTTP JSON"],
-    ["sqlite", "SQLite"],
-    ["manifest", "Object Manifest"],
-    ["openalex", "OpenAlex"],
-  ].map(([name, label]) => renderRetrievalSourceOption(name, label)).join("");
-  return `
-    <form class="add-item-form retrieval-search-form" data-retrieval-search-form>
-      <label>
-        <span>关键词</span>
-        <input name="query" data-retrieval-query-input value="${escapeHtml(state.retrievalQuery)}" placeholder="例如 vision language action robot manipulation">
-      </label>
-      <div class="retrieval-source-row">
-        ${sourceOptions}
-        <button type="button" class="mini-icon" data-check-retrieval-sources title="检查数据源健康">${state.retrievalSourcesChecking ? "..." : "↻"}</button>
-        <button type="button" class="mini-icon retrieval-report-btn" data-setup-retrieval-rehearsal title="Generate and configure rehearsal internal sources">DEMO KIT</button>
-        <button type="button" class="mini-icon retrieval-report-btn" data-validate-retrieval-rehearsal title="Generate rehearsal sources and start validation batch">${state.retrievalBatchBusy ? "..." : "DEMO RUN"}</button>
-        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-source-setup data-report-format="markdown" title="下载源配置 Markdown 报告">SETUP</button>
-        <button type="button" class="mini-icon retrieval-report-btn" data-check-retrieval-readiness title="Run internal source readiness preflight">${state.retrievalReadinessBusy ? "..." : "READY"}</button>
-        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-readiness data-report-format="markdown" title="Download readiness Markdown report">RPT</button>
-        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-tuning data-report-format="markdown" title="下载限流调优 Markdown 报告">TUNE</button>
-        <button type="button" class="mini-icon retrieval-report-btn" data-check-retrieval-onboarding title="Check onboarding handoff status">${state.retrievalOnboardingBusy ? "..." : "ONB CHECK"}</button>
-        <button type="button" class="mini-icon retrieval-report-btn"
-          data-download-retrieval-onboarding data-report-format="markdown"
-          title="下载多源检索接入验收报告">ONB</button>
-        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-onboarding-package title="Download onboarding handoff ZIP">ONB ZIP</button>
-        <button type="button" class="mini-icon retrieval-report-btn" data-download-retrieval-config-bundle title="下载脱敏检索源配置包">CFG</button>
-      </div>
-      ${state.retrievalSourcesMessage ? `<p class="retrieval-source-message">${escapeHtml(state.retrievalSourcesMessage)}</p>` : ""}
-      <button type="submit" class="form-action-btn" ${state.addItemBusy ? "disabled" : ""}>${state.addItemBusy ? "检索中..." : "检索候选"}</button>
-    </form>
-    ${renderRetrievalReadiness()}
-    ${renderRetrievalOnboarding()}
-    ${renderRetrievalConfigBundleImport()}
-    ${renderRetrievalSourceIntake()}
-    ${renderRetrievalFieldMapLab()}
-    ${renderRetrievalLocalConfigWithPreview()}
-    ${renderRetrievalHttpJsonConfig()}
-    ${renderRetrievalSqliteConfig()}
-    ${renderRetrievalManifestConfig()}
-    ${renderRetrievalStats()}
-    ${renderRetrievalCandidates()}
-    <div class="retrieval-actions">
-      <span>已选择 ${selectedCount} 条</span>
-      <button type="button" class="form-action-btn" data-import-retrieval-selected ${state.addItemBusy || !selectedCount ? "disabled" : ""}>${state.addItemBusy ? "导入中..." : "导入所选"}</button>
-    </div>
-    ${renderRetrievalBatchPanel()}
-    ${renderRetrievalSummary()}
-    ${renderRetrievalRuns()}
   `;
 }
 
@@ -3064,6 +3416,16 @@ function renderAddItemModal() {
   panel.querySelector("[data-import-retrieval-selected]")?.addEventListener("click", submitRetrievalImport);
   panel.querySelector("[data-refresh-retrieval-runs]")?.addEventListener("click", () => loadRetrievalRuns());
   panel.querySelector("[data-check-retrieval-sources]")?.addEventListener("click", () => loadRetrievalSources({ check: true }));
+  panel.querySelector("[data-save-custom-source]")?.addEventListener("click", saveRetrievalCustomSource);
+  panel.querySelectorAll("[data-check-custom-source]").forEach((button) => {
+    button.addEventListener("click", () => checkRetrievalCustomSource(button.dataset.checkCustomSource));
+  });
+  panel.querySelectorAll("[data-toggle-custom-source]").forEach((button) => {
+    button.addEventListener("click", () => toggleRetrievalCustomSource(button.dataset.toggleCustomSource, button.dataset.enabled === "1"));
+  });
+  panel.querySelectorAll("[data-delete-custom-source]").forEach((button) => {
+    button.addEventListener("click", () => deleteRetrievalCustomSource(button.dataset.deleteCustomSource));
+  });
   panel.querySelector("[data-setup-retrieval-rehearsal]")?.addEventListener("click", setupRetrievalRehearsalKit);
   panel.querySelector("[data-validate-retrieval-rehearsal]")?.addEventListener("click", validateRetrievalRehearsalRun);
   panel.querySelector("[data-check-retrieval-readiness]")?.addEventListener("click", () => loadRetrievalReadiness());
@@ -3152,6 +3514,14 @@ function renderAddItemModal() {
   }));
 }
 
+function renderRetrievalSurface() {
+  if (document.querySelector("[data-retrieval-page-panel]")) {
+    renderRetrievalPage();
+  } else {
+    renderAddItemModal();
+  }
+}
+
 function renderRetrievalPage() {
   const host = document.querySelector("[data-retrieval-page-panel]");
   if (!host) return;
@@ -3210,10 +3580,14 @@ function renderRetrievalPage() {
 
 function delegatedRetrievalSubmitEvent(event) {
   const form = event.target;
+  return retrievalSubmitEventFromForm(form, event);
+}
+
+function retrievalSubmitEventFromForm(form, event, submitter = null) {
   return {
     currentTarget: form,
     target: form,
-    submitter: event.submitter,
+    submitter: submitter || event?.submitter || null,
     preventDefault: () => event.preventDefault(),
     stopPropagation: () => event.stopPropagation(),
   };
@@ -3237,20 +3611,33 @@ function bindRetrievalPageEvents(host) {
       const nextQuery = String(event.target.value || "").trim();
       if (nextQuery !== state.retrievalQuery) {
         state.retrievalQuery = nextQuery;
+        resetRetrievalGuidedPlanDraft();
         state.retrievalQueryPlan = null;
         state.retrievalBatchQueries = "";
-        state.simplePlanBatchJobId = "";
-        state.simplePlanBatchLoadedJobId = "";
       }
-    } else if (event.target.matches("[data-simple-batch-limit]")) {
-      state.retrievalSimpleBatchLimit = currentSimpleBatchLimitFromInput(event.target.value);
-    } else if (event.target.matches("[data-simple-source-limit]")) {
-      const source = String(event.target.dataset.simpleSourceLimit || "").trim().toLowerCase();
+    } else if (event.target.matches("[data-guided-time-preset]")) {
+      resetRetrievalGuidedPlanDraft();
+      state.retrievalGuidedTimePreset = String(event.target.value || "10y");
+    } else if (event.target.matches("[data-guided-limit-per-source]")) {
+      resetRetrievalGuidedPlanDraft();
+      state.retrievalGuidedLimitPerSource = currentGuidedLimitPerSource(event.target.value);
+    } else if (event.target.matches("[data-guided-source-limit]")) {
+      resetRetrievalGuidedPlanDraft();
+      const source = String(event.target.dataset.guidedSourceLimit || "").trim().toLowerCase();
       if (source) {
-        state.retrievalSimpleSourceLimits = {
-          ...(state.retrievalSimpleSourceLimits || {}),
-          [source]: currentSimpleBatchLimitFromInput(event.target.value),
+        state.retrievalGuidedSourceLimits = {
+          ...(state.retrievalGuidedSourceLimits || {}),
+          [source]: currentGuidedSourceLimit(source, event.target.value),
         };
+      }
+    } else if (event.target.matches("[data-guided-plan-group-queries]")) {
+      const index = Number(event.target.dataset.guidedPlanGroupQueries);
+      const groups = retrievalGuidedPlanDraftGroups();
+      if (Number.isInteger(index) && groups[index]) {
+        groups[index].queries = String(event.target.value || "")
+          .split(/\r?\n/)
+          .map((value) => value.trim())
+          .filter(Boolean);
       }
     } else if (event.target.matches("[data-retrieval-config-bundle-input]")) {
       state.retrievalConfigBundleText = event.target.value;
@@ -3264,12 +3651,26 @@ function bindRetrievalPageEvents(host) {
     } else if (event.target.matches("[data-retrieval-field-map-lab-config]")) {
       state.retrievalFieldMapLabConfig = event.target.value;
       state.retrievalFieldMapLabResult = null;
+    } else if (event.target.matches("[data-custom-source-config]")) {
+      state.retrievalCustomSourceDraft = event.target.value;
     }
   });
   host.addEventListener("change", (event) => {
     if (event.target.matches("[data-retrieval-query-plan-ai]")) {
       state.retrievalQueryPlanUseAi = Boolean(event.target.checked);
       state.retrievalQueryPlan = null;
+      renderRetrievalPage();
+    } else if (event.target.matches("[data-guided-material-type]")) {
+      resetRetrievalGuidedPlanDraft();
+      const value = String(event.target.value || "").trim();
+      const next = new Set(state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : ["paper", "code", "model", "dataset", "benchmark", "website"]);
+      if (event.target.checked) next.add(value);
+      else next.delete(value);
+      state.retrievalGuidedMaterialTypes = next.size ? next : new Set(["paper", "code", "model", "dataset", "benchmark", "website"]);
+      renderRetrievalPage();
+    } else if (event.target.matches("input[name='sources']")) {
+      resetRetrievalGuidedPlanDraft();
+      state.retrievalSources = new Set(currentRetrievalSourceSelection());
       renderRetrievalPage();
     } else if (event.target.matches("[data-retrieval-source-intake-sample-url]")) {
       state.retrievalSourceIntakeSampleUrl = Boolean(event.target.checked);
@@ -3310,31 +3711,60 @@ function bindRetrievalPageEvents(host) {
     else if (button.matches("[data-clear-retrieval-manifest]")) clearRetrievalManifestConfig();
     else if (button.matches("[data-suggest-retrieval-manifest-field-map]")) suggestRetrievalManifestFieldMap();
     else if (button.matches("[data-refresh-retrieval-manifest-preview]")) loadRetrievalManifestPreview();
-    else if (button.matches("[data-simple-ai-query-plan]")) {
-      const queryInput = document.querySelector("[data-retrieval-query-input]");
-      state.retrievalQuery = String(queryInput?.value || state.retrievalQuery || "").trim();
-      state.retrievalQueryPlanUseAi = true;
-      draftRetrievalBatchQueries({ limit: 5 });
+    else if (button.matches("[data-submit-retrieval-search]")) {
+      event.preventDefault();
+      const form = button.closest("[data-retrieval-search-form]");
+      if (form) submitRetrievalSearch(retrievalSubmitEventFromForm(form, event, button));
     }
-    else if (button.matches("[data-simple-plan-batch]")) submitSimpleRetrievalPlanBatch();
-    else if (button.matches("[data-score-retrieval-candidates-ai]")) scoreRetrievalCandidatesWithAi();
-    else if (button.matches("[data-stop-retrieval-ai-scoring]")) stopRetrievalAiScoring();
-    else if (button.matches("[data-simple-batch-mode]")) {
-      state.retrievalBatchMode = button.dataset.simpleBatchMode === "full" ? "full" : "quick";
-      state.retrievalSimpleSourceLimits = {};
-      state.retrievalBatchMessage = state.retrievalBatchMode === "full"
-        ? "已切换到全量模式：每源候选更多，检索会更慢。"
-        : "已切换到快速模式：代码/模型/数据源默认取更少候选。";
+    else if (button.matches("[data-retrieval-route]")) {
+      state.retrievalSearchRoute = normalizeRetrievalSearchRoute(button.dataset.retrievalRoute);
+      resetRetrievalGuidedPlanDraft();
+      state.retrievalQueryPlan = null;
+      state.retrievalBatchQueries = "";
       renderRetrievalPage();
     }
-    else if (button.matches("[data-load-simple-batch-candidates]")) loadSimplePlanBatchCandidates(button.dataset.loadSimpleBatchCandidates);
+    else if (button.matches("[data-guided-search-mode]")) {
+      resetRetrievalGuidedPlanDraft();
+      const mode = String(button.dataset.guidedSearchMode || "quality");
+      state.retrievalGuidedMode = mode === "fast" ? "fast" : "quality";
+      state.retrievalGuidedTimePreset = state.retrievalGuidedMode === "fast" ? "5y" : "10y";
+      state.retrievalGuidedLimitPerSource = state.retrievalGuidedMode === "fast" ? 5 : 8;
+      state.retrievalGuidedSourceLimits = {};
+      renderRetrievalPage();
+    }
+    else if (button.matches("[data-clear-guided-plan-draft]")) {
+      resetRetrievalGuidedPlanDraft();
+      renderRetrievalPage();
+    }
+    else if (button.matches("[data-remove-guided-plan-group]")) {
+      const index = Number(button.dataset.removeGuidedPlanGroup);
+      const groups = retrievalGuidedPlanDraftGroups();
+      if (Number.isInteger(index) && groups[index]) {
+        groups.splice(index, 1);
+        renderRetrievalPage();
+      }
+    }
+    else if (button.matches("[data-add-guided-plan-group]")) {
+      addRetrievalGuidedPlanGroup();
+      renderRetrievalPage();
+    }
+    else if (button.matches("[data-score-retrieval-candidates-ai]")) scoreRetrievalCandidatesWithAi();
+    else if (button.matches("[data-stop-retrieval-ai-scoring]")) stopRetrievalAiScoring();
+    else if (button.matches("[data-pause-guided-search]")) pauseGuidedSearch();
+    else if (button.matches("[data-resume-guided-search]")) resumeGuidedSearch();
+    else if (button.matches("[data-cancel-guided-search]")) cancelGuidedSearch();
     else if (button.matches("[data-draft-retrieval-batch-queries]")) draftRetrievalBatchQueries();
     else if (button.matches("[data-refresh-retrieval-batches]")) loadRetrievalBatchJobs();
     else if (button.matches("[data-select-retrieval-candidates]")) setRetrievalCandidateSelection(button.dataset.selectRetrievalCandidates);
+    else if (button.matches("[data-delete-selected-retrieval-candidates]")) deleteSelectedRetrievalCandidates();
     else if (button.matches("[data-import-retrieval-selected]")) submitRetrievalImport();
     else if (button.matches("[data-refresh-retrieval-runs]")) loadRetrievalRuns();
     else if (button.matches("[data-load-retrieval-run-candidates]")) loadRetrievalRunCandidates(button.dataset.loadRetrievalRunCandidates);
     else if (button.matches("[data-check-retrieval-sources]")) loadRetrievalSources({ check: true });
+    else if (button.matches("[data-save-custom-source]")) saveRetrievalCustomSource(event);
+    else if (button.matches("[data-check-custom-source]")) checkRetrievalCustomSource(button.dataset.checkCustomSource);
+    else if (button.matches("[data-toggle-custom-source]")) toggleRetrievalCustomSource(button.dataset.toggleCustomSource, button.dataset.enabled === "1");
+    else if (button.matches("[data-delete-custom-source]")) deleteRetrievalCustomSource(button.dataset.deleteCustomSource);
     else if (button.matches("[data-setup-retrieval-rehearsal]")) setupRetrievalRehearsalKit();
     else if (button.matches("[data-validate-retrieval-rehearsal]")) validateRetrievalRehearsalRun();
     else if (button.matches("[data-check-retrieval-readiness]")) loadRetrievalReadiness();
@@ -3412,6 +3842,120 @@ async function finishImport(summary) {
   renderAddItemModal();
 }
 
+function currentGuidedMaterialTypes() {
+  return [...(state.retrievalGuidedMaterialTypes instanceof Set ? state.retrievalGuidedMaterialTypes : new Set(["paper", "code", "model", "dataset", "benchmark", "website"]))];
+}
+
+function addRetrievalGuidedPlanGroup() {
+  const plan = state.retrievalGuidedPlanDraft || {
+    input_text: state.retrievalQuery,
+    detected_language: "",
+    normalized_topic: state.retrievalQuery,
+    query_groups: [],
+    coverage_targets: [],
+    ambiguities: [],
+  };
+  if (!Array.isArray(plan.query_groups)) plan.query_groups = [];
+  const material = currentGuidedMaterialTypes()[0] || "paper";
+  plan.query_groups.push({
+    resource_type: material,
+    source: "",
+    sources: currentRetrievalSourceSelection(),
+    language: retrievalTextHasChinese(state.retrievalQuery) ? "zh/en" : "en",
+    queries: [state.retrievalQuery].filter(Boolean),
+    must_include: [],
+    optional_terms: [],
+    exclude_terms: [],
+    reason: "用户补充检索组。",
+    confidence: 0.6,
+  });
+  state.retrievalGuidedPlanDraft = plan;
+}
+
+function retrievalTextHasChinese(value) {
+  return /[\u3400-\u9fff]/.test(String(value || ""));
+}
+
+function buildRetrievalGuidedPlanForSubmit() {
+  const plan = JSON.parse(JSON.stringify(state.retrievalGuidedPlanDraft || {}));
+  const groups = (Array.isArray(plan.query_groups) ? plan.query_groups : [])
+    .map((group) => ({
+      ...group,
+      resource_type: String(group.resource_type || "paper").trim() || "paper",
+      source: String(group.source || "").trim().toLowerCase(),
+      sources: Array.isArray(group.sources)
+        ? [...new Set(group.sources.map((source) => String(source || "").trim().toLowerCase()).filter(Boolean))]
+        : [],
+      language: String(group.language || "").trim(),
+      queries: (Array.isArray(group.queries) ? group.queries : [])
+        .map((query) => String(query || "").trim())
+        .filter(Boolean),
+    }))
+    .filter((group) => group.queries.length);
+  const queries = [];
+  groups.forEach((group) => {
+    group.queries.forEach((query) => {
+      queries.push({
+        query,
+        query_text: query,
+        resource_type: group.resource_type,
+        sources: group.sources.length ? group.sources : group.source ? [group.source] : [],
+        source: group.source,
+        language: group.language,
+        intent: group.resource_type,
+        reason: group.reason || "用户确认的 V4 检索计划。",
+        confidence: Number(group.confidence || 0.75),
+      });
+    });
+  });
+  plan.query_groups = groups;
+  plan.queries = queries;
+  plan.query_count = queries.length;
+  plan.query_text = queries.map((item) => item.query_text).join("\n");
+  plan.strategy = {
+    ...(plan.strategy || {}),
+    limit_per_source: currentGuidedLimitPerSource(),
+    source_limits: guidedSourceLimitsForSubmit(),
+  };
+  return plan;
+}
+
+async function draftRetrievalGuidedSearchPlan({ query, sources, materialTypes }) {
+  try {
+    state.retrievalGuidedPlanBusy = true;
+    state.addItemMessage = "正在生成 AI 检索计划...";
+    renderRetrievalSurface();
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-plan`, {
+      topic: query,
+      input_text: query,
+      search_route: "natural_language",
+      planner_version: "v4",
+      expansion_level: "balanced",
+      language_policy: "source_adaptive",
+      mode: state.retrievalGuidedMode || "quality",
+      time_range: { preset: state.retrievalGuidedTimePreset || "10y" },
+      limit_per_source: currentGuidedLimitPerSource(),
+      source_limits: guidedSourceLimitsForSubmit(sources),
+      material_types: materialTypes,
+      sources,
+      use_ai_planning: true,
+    });
+    state.retrievalGuidedPlanDraft = result.plan || null;
+    const aiStatus = retrievalGuidedPlanAiStatus(state.retrievalGuidedPlanDraft);
+    state.addItemMessage = state.retrievalGuidedPlanDraft
+      ? aiStatus.tone === "ok"
+        ? "AI 检索计划已生成。请确认或编辑后再开始检索。"
+        : `${aiStatus.label}，已生成可编辑计划；请检查检索词后再开始检索。`
+      : "未生成有效检索计划。";
+  } catch (error) {
+    state.addItemMessage = error.message;
+    state.retrievalGuidedPlanDraft = null;
+  } finally {
+    state.retrievalGuidedPlanBusy = false;
+    renderRetrievalSurface();
+  }
+}
+
 async function submitIdentifierImport(event) {
   event.preventDefault();
   const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
@@ -3454,7 +3998,12 @@ async function submitRetrievalSearch(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const formData = new FormData(form);
+  const submitter = event.submitter || null;
+  const guidedAction = submitter?.name === "guided_action"
+    ? String(submitter.value || "").trim()
+    : "";
   const query = String(formData.get("query") || "").trim();
+  const searchRoute = normalizeRetrievalSearchRoute(state.retrievalSearchRoute);
   const selectedSources = uniqueRetrievalSources(formData.getAll("sources").map((value) => String(value)));
   const unavailableSources = unavailableRetrievalSources(selectedSources);
   const focusedUnavailableSources = unavailableRetrievalSources([...state.retrievalSources]);
@@ -3462,32 +4011,59 @@ async function submitRetrievalSearch(event) {
   state.retrievalQuery = query;
   if (!query) {
     state.addItemMessage = "检索词不能为空。";
-    renderAddItemModal();
+    renderRetrievalSurface();
     return;
   }
   if (!selectedSources.length) {
     state.addItemMessage = focusedUnavailableSources.length
       ? unavailableRetrievalSourceMessage(focusedUnavailableSources)
       : "请至少选择一个数据源。";
-    renderAddItemModal();
+    renderRetrievalSurface();
     return;
   }
   state.retrievalSources = new Set(selectedSources);
   if (unavailableSources.length) {
     state.addItemMessage = unavailableRetrievalSourceMessage(unavailableSources);
-    renderAddItemModal();
+    renderRetrievalSurface();
     return;
   }
   if (!sources.length) {
     state.addItemMessage = "请至少选择一个可用数据源。";
-    renderAddItemModal();
+    renderRetrievalSurface();
+    return;
+  }
+  const materialTypes = currentGuidedMaterialTypes();
+  if (searchRoute === "agent") {
+    state.addItemMessage = "智能体检索实验入口已在下方说明：网页端暂未启动 agent，当前可通过 Codex skill/CLI 调用。";
+    renderRetrievalSurface();
+    return;
+  }
+  if (searchRoute === "natural_language" && guidedAction !== "search") {
+    state.retrievalSources = new Set(selectedSources);
+    await draftRetrievalGuidedSearchPlan({ query, sources, materialTypes });
+    return;
+  }
+  if (searchRoute === "natural_language" && !state.retrievalGuidedPlanDraft) {
+    state.retrievalSources = new Set(selectedSources);
+    await draftRetrievalGuidedSearchPlan({ query, sources, materialTypes });
+    return;
+  }
+  const confirmedPlan = searchRoute === "natural_language" ? buildRetrievalGuidedPlanForSubmit() : null;
+  if (searchRoute === "natural_language" && (!confirmedPlan || !confirmedPlan.query_count)) {
+    state.addItemMessage = "检索计划里没有有效关键词。请至少保留一条 query。";
+    renderRetrievalSurface();
     return;
   }
   try {
     state.addItemBusy = true;
-    state.addItemMessage = "快速检索已提交后台，切换页面也会继续运行。";
+    state.retrievalGuidedBusy = true;
+    state.addItemMessage = `${retrievalSearchRouteLabel(searchRoute)}已提交后台，切换页面也会继续运行。`;
     state.addItemResults = [];
+    state.retrievalDeletedCandidateKeys = new Set();
     state.retrievalSearchJobId = "";
+    state.retrievalGuidedJobId = "";
+    state.retrievalGuidedJob = null;
+    state.retrievalGuidedCoverage = null;
     state.retrievalAiScoringJobId = "";
     state.retrievalAiEvaluationBusy = false;
     state.retrievalAiEvaluationStopRequested = false;
@@ -3507,11 +4083,31 @@ async function submitRetrievalSearch(event) {
       clearTimeout(retrievalSearchPollTimer);
       retrievalSearchPollTimer = null;
     }
-    renderAddItemModal();
-    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/search/jobs`, { query, sources, limit: 10, use_ai_evaluation: false });
-    applyRetrievalSearchJob(result.job || null);
-    scheduleRetrievalSearchPoll(state.retrievalSearchJobId);
-    renderAddItemModal();
+    if (retrievalGuidedPollTimer) {
+      clearTimeout(retrievalGuidedPollTimer);
+      retrievalGuidedPollTimer = null;
+    }
+    renderRetrievalSurface();
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-jobs`, {
+      topic: query,
+      input_text: query,
+      search_route: searchRoute,
+      planner_version: "v4",
+      expansion_level: "balanced",
+      language_policy: "source_adaptive",
+      mode: state.retrievalGuidedMode || "quality",
+      time_range: { preset: state.retrievalGuidedTimePreset || "10y" },
+      limit_per_source: currentGuidedLimitPerSource(),
+      source_limits: guidedSourceLimitsForSubmit(sources),
+      material_types: materialTypes,
+      sources,
+      use_ai_planning: searchRoute !== "keyword",
+      plan: confirmedPlan,
+    });
+    applyRetrievalGuidedJob(result.job || null);
+    resetRetrievalGuidedPlanDraft();
+    scheduleRetrievalGuidedPoll(state.retrievalGuidedJobId);
+    renderRetrievalSurface();
   } catch (error) {
     state.addItemMessage = error.message;
     state.retrievalCandidates = [];
@@ -3520,7 +4116,10 @@ async function submitRetrievalSearch(event) {
     state.retrievalAiEvaluationSummary = null;
     state.retrievalRunId = "";
   } finally {
-    if (!state.retrievalSearchJobId) state.addItemBusy = false;
+    if (!state.retrievalGuidedJobId) {
+      state.addItemBusy = false;
+      state.retrievalGuidedBusy = false;
+    }
     renderAddItemModal();
   }
 }
@@ -3616,6 +4215,173 @@ async function loadLatestRetrievalSearchJob(options = {}) {
     if (applied && retrievalBackgroundJobIsActive(job)) scheduleRetrievalSearchPoll(job.job_id);
   } catch (error) {
     if (!options.silent) state.addItemMessage = error.message;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function applyRetrievalGuidedJob(job) {
+  if (!job) return false;
+  const jobTopic = String(job.topic || "");
+  if (jobTopic && state.retrievalQuery && jobTopic !== state.retrievalQuery && state.retrievalCandidates.length) return false;
+  state.retrievalGuidedJob = job;
+  state.retrievalGuidedJobId = String(job.job_id || state.retrievalGuidedJobId || "");
+  state.retrievalSearchRoute = normalizeRetrievalSearchRoute(job.search_route || job.options?.search_route || state.retrievalSearchRoute);
+  state.retrievalGuidedMode = String(job.mode || state.retrievalGuidedMode || "quality");
+  if (job.time_range?.preset) state.retrievalGuidedTimePreset = String(job.time_range.preset);
+  if (Array.isArray(job.material_types) && job.material_types.length) state.retrievalGuidedMaterialTypes = new Set(job.material_types);
+  state.retrievalGuidedCoverage = job.coverage || state.retrievalGuidedCoverage || null;
+  state.retrievalGuidedBusy = retrievalBackgroundJobIsActive(job);
+  state.addItemBusy = state.retrievalGuidedBusy;
+  const progress = job.progress || {};
+  const status = String(job.status || "");
+  const completed = Number(progress.completed_queries || 0);
+  const total = Number(progress.total_queries || 0);
+  const candidates = Number(progress.candidate_count || state.retrievalCandidates.length || 0);
+  const routeLabel = retrievalSearchRouteLabel(state.retrievalSearchRoute);
+  if (status === "queued") {
+    state.addItemMessage = `${routeLabel}已进入后台队列。`;
+  } else if (status === "running") {
+    state.addItemMessage = `${routeLabel}中：Query ${completed}/${total || "?"}，已发现 ${candidates} 条候选。`;
+  } else if (status === "paused") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = `${routeLabel}已暂停：Query ${completed}/${total || "?"}。`;
+  } else if (status === "canceled") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = `${routeLabel}已停止。`;
+  } else if (status === "failed") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = `${routeLabel}失败：${job.error || "后台任务异常"}`;
+  } else if (status === "partial") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = `${routeLabel}部分完成：已发现 ${candidates} 条候选，部分 query 失败。`;
+  } else if (status === "completed") {
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+    state.addItemMessage = `${routeLabel}完成：已发现 ${candidates} 条候选。`;
+  }
+  return true;
+}
+
+async function loadRetrievalGuidedCandidates(jobId, options = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!state.libraryId || !cleanJobId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(cleanJobId)}/candidates?limit=300&use_ai_evaluation=0`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载引导式检索候选失败。");
+    state.retrievalCandidates = normalizeRetrievalCandidates(data.candidates || []);
+    const candidateKeys = new Set(state.retrievalCandidates.map((candidate) => candidate.client_key).filter(Boolean));
+    state.retrievalSelectedKeys = new Set([...state.retrievalSelectedKeys].filter((key) => candidateKeys.has(key)));
+    state.retrievalStats = data.source_stats || {};
+    state.retrievalGuidedCoverage = data.coverage || null;
+    state.retrievalAiEvaluationSummary = data.ai_evaluation_summary || state.retrievalAiEvaluationSummary;
+    state.retrievalRunId = "";
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+  }
+}
+
+async function loadRetrievalGuidedJob(jobId, options = {}) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!state.libraryId || !cleanJobId) return;
+  if (!state.retrievalGuidedJobId || cleanJobId !== state.retrievalGuidedJobId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(cleanJobId)}`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载引导式检索任务失败。");
+    const applied = applyRetrievalGuidedJob(data.job || null);
+    if (!applied) {
+      if (retrievalGuidedPollTimer) clearTimeout(retrievalGuidedPollTimer);
+      retrievalGuidedPollTimer = null;
+      return;
+    }
+    await loadRetrievalGuidedCandidates(cleanJobId, { silent: true });
+    if (retrievalBackgroundJobIsActive(data.job)) {
+      scheduleRetrievalGuidedPoll(cleanJobId);
+    } else if (retrievalGuidedPollTimer) {
+      clearTimeout(retrievalGuidedPollTimer);
+      retrievalGuidedPollTimer = null;
+      loadRetrievalRuns({ silent: true });
+      loadRetrievalSummary({ silent: true });
+    }
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+    state.addItemBusy = false;
+    state.retrievalGuidedBusy = false;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+function scheduleRetrievalGuidedPoll(jobId) {
+  const cleanJobId = String(jobId || "").trim();
+  if (retrievalGuidedPollTimer) clearTimeout(retrievalGuidedPollTimer);
+  retrievalGuidedPollTimer = null;
+  if (!cleanJobId) return;
+  retrievalGuidedPollTimer = setTimeout(() => {
+    loadRetrievalGuidedJob(cleanJobId, { silent: true });
+  }, 1400);
+}
+
+async function loadLatestRetrievalGuidedJob(options = {}) {
+  if (!state.libraryId) return;
+  try {
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/latest`);
+    const data = await parseJSONResponse(response);
+    if (!data.ok) throw new Error(data.error || "加载最近引导式检索任务失败。");
+    const job = data.job || null;
+    if (!job) return;
+    const shouldRestore = retrievalBackgroundJobIsActive(job) || !state.retrievalCandidates.length || String(job.topic || "") === String(state.retrievalQuery || "");
+    const applied = shouldRestore ? applyRetrievalGuidedJob(job) : false;
+    if (applied) {
+      await loadRetrievalGuidedCandidates(job.job_id, { silent: true });
+      if (retrievalBackgroundJobIsActive(job)) scheduleRetrievalGuidedPoll(job.job_id);
+    }
+  } catch (error) {
+    if (!options.silent) state.addItemMessage = error.message;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+async function pauseGuidedSearch() {
+  if (!state.retrievalGuidedJobId) return;
+  try {
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(state.retrievalGuidedJobId)}/pause`, {});
+    applyRetrievalGuidedJob(result.job || null);
+  } catch (error) {
+    state.addItemMessage = `暂停失败：${error.message}`;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+async function resumeGuidedSearch() {
+  if (!state.retrievalGuidedJobId) return;
+  try {
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(state.retrievalGuidedJobId)}/resume`, {});
+    applyRetrievalGuidedJob(result.job || null);
+    scheduleRetrievalGuidedPoll(state.retrievalGuidedJobId);
+  } catch (error) {
+    state.addItemMessage = `继续失败：${error.message}`;
+  } finally {
+    renderAddItemModal();
+  }
+}
+
+async function cancelGuidedSearch() {
+  if (!state.retrievalGuidedJobId) return;
+  try {
+    const result = await postJSON(`/api/library/${state.libraryId}/retrieval/guided-search-jobs/${encodeURIComponent(state.retrievalGuidedJobId)}/cancel`, {});
+    applyRetrievalGuidedJob(result.job || null);
+    await loadRetrievalGuidedCandidates(state.retrievalGuidedJobId, { silent: true });
+  } catch (error) {
+    state.addItemMessage = `停止失败：${error.message}`;
   } finally {
     renderAddItemModal();
   }
@@ -3866,7 +4632,6 @@ async function draftRetrievalBatchQueries(options = {}) {
   try {
     state.retrievalQueryPlanBusy = true;
     state.retrievalBatchMessage = "";
-    state.simplePlanBatchJobId = "";
     renderAddItemModal();
     const result = await postJSON(`/api/library/${state.libraryId}/retrieval/query-plan/jobs`, {
       seed_query: seedQuery,
@@ -3956,99 +4721,6 @@ async function loadLatestRetrievalQueryPlanJob(options = {}) {
   } catch (error) {
     if (!options.silent) state.retrievalBatchMessage = error.message;
   } finally {
-    renderAddItemModal();
-  }
-}
-
-async function submitSimpleRetrievalPlanBatch() {
-  const queries = String(state.retrievalBatchQueries || state.retrievalQueryPlan?.query_text || "").trim();
-  const sourceSelection = simplePlanBatchSourceSelection();
-  const unavailableSources = sourceSelection.unavailable;
-  const sources = sourceSelection.available;
-  const sourceLimits = simplePlanBatchSourceLimits(sources);
-  if (!queries) {
-    state.retrievalBatchMessage = "请先生成检索计划。";
-    renderAddItemModal();
-    return;
-  }
-  if (unavailableSources.length) {
-    state.retrievalBatchMessage = unavailableRetrievalSourceMessage(unavailableSources);
-    renderAddItemModal();
-    return;
-  }
-  if (!sources.length) {
-    state.retrievalBatchMessage = "没有可用数据源，请先勾选或配置至少一个数据源。";
-    renderAddItemModal();
-    return;
-  }
-  const activeJob = currentSimplePlanBatchJob();
-  if (retrievalBatchIsActive(activeJob)) {
-    state.retrievalBatchMessage = `批量检索正在运行：${activeJob.completed_queries || 0}/${activeJob.total_queries || 0}`;
-    await loadRetrievalBatchJobs({ silent: true });
-    return;
-  }
-  try {
-    state.retrievalBatchBusy = true;
-    state.retrievalBatchMessage = `正在创建计划检索任务（${currentSimpleBatchMode() === "full" ? "全量模式" : "快速模式"}）...`;
-    state.simplePlanBatchLoadedJobId = "";
-    state.retrievalCandidates = [];
-    state.retrievalSelectedKeys = new Set();
-    state.retrievalRunId = "";
-    renderAddItemModal();
-    const batchLimit = Math.max(currentSimpleBatchLimit(), ...Object.values(sourceLimits));
-    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/batches`, {
-      queries,
-      sources,
-      limit: batchLimit,
-      source_limits: sourceLimits,
-    });
-    state.simplePlanBatchJobId = data.job.job_id || "";
-    state.retrievalBatchJobs = [data.job, ...state.retrievalBatchJobs.filter((job) => job.job_id !== data.job.job_id)];
-    const sourceNote = sourceSelection.recommended ? `使用计划推荐源：${sources.join(" / ")}` : `使用已勾选源：${sources.join(" / ")}`;
-    const limitNote = Object.entries(sourceLimits).map(([source, limit]) => `${retrievalSourceLabel(source)} ${limit}`).join(" / ");
-    state.retrievalBatchMessage = `已按计划创建批量检索（${currentSimpleBatchMode() === "full" ? "全量模式" : "快速模式"}）：${data.job.completed_queries || 0}/${data.job.total_queries || 0}，${sourceNote}，每源数量：${limitNote || batchLimit}，完成后会显示到下方候选结果。`;
-    await loadRetrievalBatchJobs({ silent: true });
-    await loadRetrievalRuns({ silent: true });
-    await loadRetrievalSummary({ silent: true });
-  } catch (error) {
-    state.retrievalBatchMessage = error.message;
-  } finally {
-    state.retrievalBatchBusy = false;
-    renderAddItemModal();
-  }
-}
-
-async function loadSimplePlanBatchCandidates(jobId, options = {}) {
-  const cleanJobId = String(jobId || "").trim();
-  if (!state.libraryId || !cleanJobId) return;
-  const silent = Boolean(options.silent);
-  try {
-    state.simplePlanBatchCandidatesBusy = true;
-    if (!silent) state.retrievalBatchMessage = "正在加载计划检索候选和 AI 推荐...";
-    renderAddItemModal();
-    const params = new URLSearchParams({ limit: "120", use_ai_evaluation: "0" });
-    const response = await fetch(`/api/library/${state.libraryId}/retrieval/batches/${encodeURIComponent(cleanJobId)}/candidates?${params.toString()}`);
-    const data = await parseJSONResponse(response);
-    if (!data.ok) throw new Error(data.error || "加载计划检索候选失败。");
-    state.retrievalCandidates = normalizeRetrievalCandidates(data.candidates || []);
-    state.retrievalSelectedKeys = new Set(
-      state.retrievalCandidates
-        .filter((candidate) => candidate.ai_evaluation?.auto_select === true)
-        .map((candidate) => candidate.client_key)
-        .filter(Boolean)
-    );
-    state.retrievalStats = data.source_stats || {};
-    state.retrievalAiEvaluationSummary = data.ai_evaluation_summary || null;
-    state.retrievalRunId = "";
-    state.simplePlanBatchLoadedJobId = cleanJobId;
-    const aiRecommended = state.retrievalCandidates.filter((candidate) => {
-      return String(candidate.ai_evaluation?.decision || "").toLowerCase() === "recommend";
-    }).length;
-    state.retrievalBatchMessage = `已显示计划检索结果：${state.retrievalCandidates.length} 条候选，推荐 ${aiRecommended} 条；需要更省事的排序时，可点击“AI 推荐排序”。`;
-  } catch (error) {
-    state.retrievalBatchMessage = error.message;
-  } finally {
-    state.simplePlanBatchCandidatesBusy = false;
     renderAddItemModal();
   }
 }
@@ -4148,15 +4820,6 @@ async function loadRetrievalBatchJobs(options = {}) {
     if (!data.ok) throw new Error(data.error || "Failed to load batch jobs");
     state.retrievalBatchJobs = data.jobs || [];
     scheduleRetrievalBatchRefresh();
-    const simpleJob = currentSimplePlanBatchJob();
-    if (
-      simpleJob &&
-      String(simpleJob.status || "") === "completed" &&
-      state.simplePlanBatchLoadedJobId !== String(simpleJob.job_id || "") &&
-      !state.simplePlanBatchCandidatesBusy
-    ) {
-      await loadSimplePlanBatchCandidates(simpleJob.job_id, { silent: true });
-    }
   } catch (error) {
     state.retrievalBatchMessage = error.message;
   } finally {
@@ -4355,6 +5018,7 @@ async function loadRetrievalRunCandidates(runId, options = {}) {
     state.retrievalRunId = String(run.run_id || cleanRunId);
     state.retrievalQuery = String(run.query || state.retrievalQuery || "");
     state.retrievalStats = run.source_stats || null;
+    state.retrievalDeletedCandidateKeys = new Set();
     state.retrievalCandidates = normalizeRetrievalCandidates(candidates);
     state.retrievalSelectedKeys = new Set();
     state.retrievalAiEvaluationSummary = run.ai_evaluation_summary || null;
@@ -4403,6 +5067,7 @@ async function loadRetrievalSources(options = {}) {
       if (source.name) info[source.name] = source;
     });
     state.retrievalSourceInfo = info;
+    state.retrievalCustomSources = Array.isArray(data.custom_sources) ? data.custom_sources : [];
     Object.entries(info).forEach(([name, source]) => {
       if (source.available === false) state.retrievalSources.delete(name);
     });
@@ -4412,6 +5077,91 @@ async function loadRetrievalSources(options = {}) {
   } finally {
     state.retrievalSourcesBusy = false;
     state.retrievalSourcesChecking = false;
+    renderAddItemModal();
+  }
+}
+
+async function saveRetrievalCustomSource(event) {
+  event.preventDefault();
+  if (!state.libraryId) return;
+  const root = event.currentTarget.closest?.("[data-custom-source-form]") || document.querySelector("[data-custom-source-form]");
+  const configText = String(root?.querySelector("[name='config_text']")?.value || "").trim();
+  try {
+    state.retrievalCustomSourceBusy = true;
+    state.retrievalCustomSourceDraft = configText;
+    state.retrievalCustomSourceMessage = "";
+    renderRetrievalSurface();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/custom-sources`, {
+      name: String(root?.querySelector("[name='name']")?.value || "").trim(),
+      kind: String(root?.querySelector("[name='kind']")?.value || "httpjson").trim(),
+      config_text: configText,
+      enabled: true,
+    });
+    if (data.source?.source_id) state.retrievalSources.add(data.source.source_id);
+    state.retrievalCustomSourceDraft = "";
+    state.retrievalCustomSourceMessage = "自定义源已保存。";
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalCustomSourceMessage = error.message;
+  } finally {
+    state.retrievalCustomSourceBusy = false;
+    renderRetrievalSurface();
+  }
+}
+
+async function checkRetrievalCustomSource(sourceId) {
+  if (!state.libraryId || !sourceId) return;
+  try {
+    state.retrievalCustomSourceBusy = true;
+    state.retrievalCustomSourceMessage = "";
+    renderAddItemModal();
+    const data = await postJSON(`/api/library/${state.libraryId}/retrieval/custom-sources/${encodeURIComponent(sourceId)}/check`, {
+      query: state.retrievalQuery || "robot",
+      sample_size: 2,
+    });
+    state.retrievalCustomSourceMessage = data.check?.ok ? "检测通过。" : (data.check?.error || "检测失败。");
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalCustomSourceMessage = error.message;
+  } finally {
+    state.retrievalCustomSourceBusy = false;
+    renderRetrievalSurface();
+  }
+}
+
+async function toggleRetrievalCustomSource(sourceId, enabled) {
+  if (!state.libraryId || !sourceId) return;
+  try {
+    state.retrievalCustomSourceBusy = true;
+    renderAddItemModal();
+    await postJSON(`/api/library/${state.libraryId}/retrieval/custom-sources/${encodeURIComponent(sourceId)}`, { enabled: Boolean(enabled) }, "PATCH");
+    if (!enabled) state.retrievalSources.delete(sourceId);
+    state.retrievalCustomSourceMessage = enabled ? "自定义源已启用。" : "自定义源已停用。";
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalCustomSourceMessage = error.message;
+  } finally {
+    state.retrievalCustomSourceBusy = false;
+    renderAddItemModal();
+  }
+}
+
+async function deleteRetrievalCustomSource(sourceId) {
+  if (!state.libraryId || !sourceId) return;
+  if (!window.confirm("删除这个自定义源？")) return;
+  try {
+    state.retrievalCustomSourceBusy = true;
+    renderAddItemModal();
+    const response = await fetch(`/api/library/${state.libraryId}/retrieval/custom-sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+    const data = await parseJSONResponse(response);
+    if (!response.ok || !data.ok) throw new Error(data.error || "删除自定义源失败");
+    state.retrievalSources.delete(sourceId);
+    state.retrievalCustomSourceMessage = "自定义源已删除。";
+    await loadRetrievalSources({ silent: true });
+  } catch (error) {
+    state.retrievalCustomSourceMessage = error.message;
+  } finally {
+    state.retrievalCustomSourceBusy = false;
     renderAddItemModal();
   }
 }
@@ -7958,6 +8708,7 @@ async function loadRetrievalWorkspaceData() {
   await loadRetrievalBatchJobs({ silent: true });
   await loadLatestRetrievalQueryPlanJob({ silent: true });
   await loadLatestRetrievalAiScoringJob({ silent: true });
+  await loadLatestRetrievalGuidedJob({ silent: true });
 }
 
 function setupRetrievalPage() {

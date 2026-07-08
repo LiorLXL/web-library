@@ -11,6 +11,10 @@ from .semantic_tags import normalize_hash_tag, stable_tag_color
 from .utils import new_key, now_iso
 
 
+GUIDED_JOB_EVENT_LIMIT = 40
+GUIDED_JOB_EVENT_MESSAGE_LIMIT = 220
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS libraries (
   library_id TEXT PRIMARY KEY,
@@ -141,6 +145,43 @@ CREATE TABLE IF NOT EXISTS retrieval_batch_items (
   started_at TEXT NOT NULL DEFAULT '',
   finished_at TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS retrieval_guided_jobs (
+  job_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  topic TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  time_range_json TEXT NOT NULL DEFAULT '{}',
+  material_types_json TEXT NOT NULL DEFAULT '[]',
+  sources_json TEXT NOT NULL DEFAULT '[]',
+  options_json TEXT NOT NULL DEFAULT '{}',
+  plan_json TEXT NOT NULL DEFAULT '{}',
+  coverage_json TEXT NOT NULL DEFAULT '{}',
+  source_stats_json TEXT NOT NULL DEFAULT '{}',
+  run_ids_json TEXT NOT NULL DEFAULT '[]',
+  progress_json TEXT NOT NULL DEFAULT '{}',
+  use_ai_planning INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  operator TEXT NOT NULL DEFAULT 'cjh',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  finished_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS retrieval_custom_sources (
+  source_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  status_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_checked_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -258,6 +299,8 @@ def delete_library_record(library_id: str) -> None:
         conn.execute("DELETE FROM retrieval_batch_context WHERE library_id = ?", (library_id,))
         conn.execute("DELETE FROM retrieval_batch_jobs WHERE library_id = ?", (library_id,))
         conn.execute("DELETE FROM retrieval_batch_items WHERE library_id = ?", (library_id,))
+        conn.execute("DELETE FROM retrieval_guided_jobs WHERE library_id = ?", (library_id,))
+        conn.execute("DELETE FROM retrieval_custom_sources WHERE library_id = ?", (library_id,))
         conn.commit()
 
 
@@ -409,6 +452,158 @@ def set_retrieval_manifest_config(library_id: str, config: dict[str, Any]) -> di
     normalized = dict(config) if isinstance(config, dict) else {}
     set_preference(library_id, RETRIEVAL_MANIFEST_CONFIG_KEY, normalized)
     return normalized
+
+
+def list_retrieval_custom_sources(library_id: str, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+    ensure_app_store()
+    where = "WHERE library_id = ?"
+    values: list[Any] = [library_id]
+    if enabled_only:
+        where += " AND enabled = 1"
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM retrieval_custom_sources
+            {where}
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            values,
+        ).fetchall()
+    return [_custom_source_from_row(row) for row in rows]
+
+
+def get_retrieval_custom_source(library_id: str, source_id: str) -> dict[str, Any] | None:
+    ensure_app_store()
+    clean_id = str(source_id or "").strip()
+    if not clean_id:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM retrieval_custom_sources WHERE library_id = ? AND source_id = ?",
+            (library_id, clean_id),
+        ).fetchone()
+    return _custom_source_from_row(row) if row else None
+
+
+def upsert_retrieval_custom_source(library_id: str, source: dict[str, Any]) -> dict[str, Any]:
+    ensure_app_store()
+    existing = get_retrieval_custom_source(library_id, str(source.get("source_id") or source.get("id") or ""))
+    source_id = existing["source_id"] if existing else _custom_source_id(source.get("source_id") or source.get("id"))
+    timestamp = now_iso()
+    name = str(source.get("name") or (existing or {}).get("name") or "自定义源").strip()[:120] or "自定义源"
+    kind = str(source.get("kind") or (existing or {}).get("kind") or "httpjson").strip().lower()[:40] or "httpjson"
+    enabled = bool(source.get("enabled", (existing or {}).get("enabled", True)))
+    config = source.get("config") if isinstance(source.get("config"), dict) else (existing or {}).get("config") or {}
+    status = source.get("status") if isinstance(source.get("status"), dict) else (existing or {}).get("status") or {}
+    created_at = (existing or {}).get("created_at") or timestamp
+    last_checked_at = str(source.get("last_checked_at") or (existing or {}).get("last_checked_at") or "")
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO retrieval_custom_sources
+              (source_id, library_id, name, kind, enabled, config_json, status_json, created_at, updated_at, last_checked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id) DO UPDATE SET
+              name = excluded.name,
+              kind = excluded.kind,
+              enabled = excluded.enabled,
+              config_json = excluded.config_json,
+              status_json = excluded.status_json,
+              updated_at = excluded.updated_at,
+              last_checked_at = excluded.last_checked_at
+            """,
+            (
+                source_id,
+                library_id,
+                name,
+                kind,
+                1 if enabled else 0,
+                json.dumps(config, ensure_ascii=False),
+                json.dumps(status, ensure_ascii=False),
+                created_at,
+                timestamp,
+                last_checked_at,
+            ),
+        )
+        conn.commit()
+    stored = get_retrieval_custom_source(library_id, source_id)
+    if stored is None:
+        raise ValueError("custom source was not saved")
+    return stored
+
+
+def update_retrieval_custom_source_status(
+    library_id: str,
+    source_id: str,
+    status: dict[str, Any],
+    *,
+    checked: bool = False,
+) -> dict[str, Any]:
+    ensure_app_store()
+    existing = get_retrieval_custom_source(library_id, source_id)
+    if not existing:
+        raise ValueError("custom source does not exist")
+    timestamp = now_iso()
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE retrieval_custom_sources
+            SET status_json = ?, updated_at = ?, last_checked_at = CASE WHEN ? THEN ? ELSE last_checked_at END
+            WHERE library_id = ? AND source_id = ?
+            """,
+            (
+                json.dumps(status if isinstance(status, dict) else {}, ensure_ascii=False),
+                timestamp,
+                1 if checked else 0,
+                timestamp,
+                library_id,
+                source_id,
+            ),
+        )
+        conn.commit()
+    stored = get_retrieval_custom_source(library_id, source_id)
+    if stored is None:
+        raise ValueError("custom source does not exist")
+    return stored
+
+
+def delete_retrieval_custom_source(library_id: str, source_id: str) -> bool:
+    ensure_app_store()
+    with connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM retrieval_custom_sources WHERE library_id = ? AND source_id = ?",
+            (library_id, str(source_id or "").strip()),
+        )
+        conn.commit()
+    return cursor.rowcount > 0
+
+
+def _custom_source_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["enabled"] = bool(item.get("enabled"))
+    item["config"] = _safe_json_dict(item.pop("config_json", "{}"))
+    item["status"] = _safe_json_dict(item.pop("status_json", "{}"))
+    item["id"] = item.get("source_id", "")
+    return item
+
+
+def _custom_source_id(value: Any = "") -> str:
+    raw = str(value or "").strip().lower()
+    cleaned = "".join(char if char.isalnum() or char == "-" else "-" for char in raw).strip("-")
+    if not cleaned or not cleaned.startswith("custom-"):
+        cleaned = f"custom-{new_key(10).lower()}"
+    return cleaned[:80]
+
+
+def _safe_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        decoded = json.loads(str(value or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def column_preference(library_id: str) -> list[str]:
@@ -729,6 +924,292 @@ def _decode_json_field(value: Any, fallback: Any) -> Any:
         return json.loads(str(value or ""))
     except json.JSONDecodeError:
         return fallback
+
+
+def _guided_job_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    json_defaults = {
+        "time_range_json": {},
+        "material_types_json": [],
+        "sources_json": [],
+        "options_json": {},
+        "plan_json": {},
+        "coverage_json": {},
+        "source_stats_json": {},
+        "run_ids_json": [],
+        "progress_json": {},
+    }
+    for key, fallback in json_defaults.items():
+        item[key.replace("_json", "")] = _decode_json_field(item.pop(key, ""), fallback)
+    item["use_ai_planning"] = bool(item.get("use_ai_planning"))
+    options = item.get("options") if isinstance(item.get("options"), dict) else {}
+    item["search_route"] = str(options.get("search_route") or options.get("route") or "").strip()
+    item["input_text"] = str(options.get("input_text") or item.get("topic") or "").strip()
+    item["planner_version"] = str(options.get("planner_version") or "").strip()
+    item["expansion_level"] = str(options.get("expansion_level") or "").strip()
+    item["language_policy"] = str(options.get("language_policy") or "").strip()
+    progress = item.get("progress") if isinstance(item.get("progress"), dict) else {}
+    events = progress.get("events") if isinstance(progress.get("events"), list) else []
+    item["events"] = [event for event in events if isinstance(event, dict)][-GUIDED_JOB_EVENT_LIMIT:]
+    total = int(progress.get("total_queries") or 0)
+    completed = int(progress.get("completed_queries") or 0)
+    item["candidate_count"] = int(progress.get("candidate_count") or 0)
+    item["progress_ratio"] = round(completed / total, 3) if total else 0
+    return item
+
+
+def _guided_event_payload(message: str, kind: str = "progress", data: dict[str, Any] | None = None) -> dict[str, Any]:
+    cleaned = " ".join(str(message or "").split())[:GUIDED_JOB_EVENT_MESSAGE_LIMIT].strip()
+    if not cleaned:
+        return {}
+    event = {
+        "event_id": f"event-{new_key(10).lower()}",
+        "kind": str(kind or "progress").strip().lower() or "progress",
+        "message": cleaned,
+        "created_at": now_iso(),
+    }
+    if isinstance(data, dict) and data:
+        event["data"] = data
+    return event
+
+
+def _guided_progress_with_event(
+    progress: dict[str, Any] | None,
+    message: str,
+    *,
+    kind: str = "progress",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    next_progress = dict(progress or {}) if isinstance(progress, dict) else {}
+    event = _guided_event_payload(message, kind=kind, data=data)
+    if not event:
+        return next_progress
+    events = [item for item in next_progress.get("events") or [] if isinstance(item, dict)]
+    latest = events[-1] if events else {}
+    if str(latest.get("kind") or "") == event["kind"] and str(latest.get("message") or "") == event["message"]:
+        return next_progress
+    events.append(event)
+    next_progress["events"] = events[-GUIDED_JOB_EVENT_LIMIT:]
+    return next_progress
+
+
+def create_retrieval_guided_job(
+    library_id: str,
+    *,
+    topic: str,
+    mode: str,
+    time_range: dict[str, Any],
+    material_types: list[str],
+    sources: list[str],
+    options: dict[str, Any],
+    use_ai_planning: bool,
+    operator: str = "cjh",
+) -> dict[str, Any]:
+    ensure_app_store()
+    clean_topic = str(topic or "").strip()
+    if not clean_topic:
+        raise ValueError("guided search topic cannot be empty")
+    clean_mode = str(mode or "fast").strip().lower()
+    timestamp = now_iso()
+    job_id = f"guided-{new_key(12).lower()}"
+    progress = {"stage": "queued", "total_queries": 0, "completed_queries": 0, "failed_queries": 0, "candidate_count": 0}
+    progress = _guided_progress_with_event(progress, "已创建引导式检索任务，等待后台执行。", kind="queued")
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO retrieval_guided_jobs
+              (job_id, library_id, status, topic, mode, time_range_json, material_types_json, sources_json,
+               options_json, plan_json, coverage_json, source_stats_json, run_ids_json, progress_json,
+               use_ai_planning, error, operator, created_at, updated_at)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, '{}', '{}', '{}', '[]', ?, ?, '', ?, ?, ?)
+            """,
+            (
+                job_id,
+                library_id,
+                clean_topic,
+                clean_mode,
+                json.dumps(time_range or {}, ensure_ascii=False),
+                json.dumps(material_types or [], ensure_ascii=False),
+                json.dumps(sources or [], ensure_ascii=False),
+                json.dumps(options or {}, ensure_ascii=False),
+                json.dumps(progress, ensure_ascii=False),
+                1 if use_ai_planning else 0,
+                operator,
+                timestamp,
+                timestamp,
+            ),
+        )
+        conn.commit()
+    return retrieval_guided_job(library_id, job_id)
+
+
+def retrieval_guided_job(library_id: str, job_id: str) -> dict[str, Any]:
+    ensure_app_store()
+    clean_job_id = str(job_id or "").strip()
+    if not clean_job_id:
+        raise ValueError("guided search job does not exist")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM retrieval_guided_jobs WHERE library_id = ? AND job_id = ?",
+            (library_id, clean_job_id),
+        ).fetchone()
+    if not row:
+        raise ValueError("guided search job does not exist")
+    return _guided_job_from_row(row)
+
+
+def recent_retrieval_guided_jobs(library_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    ensure_app_store()
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM retrieval_guided_jobs
+            WHERE library_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (library_id, max(1, min(int(limit or 20), 100))),
+        ).fetchall()
+    return [_guided_job_from_row(row) for row in rows]
+
+
+def latest_retrieval_guided_job(library_id: str) -> dict[str, Any] | None:
+    jobs = recent_retrieval_guided_jobs(library_id, limit=1)
+    return jobs[0] if jobs else None
+
+
+def update_retrieval_guided_job(
+    library_id: str,
+    job_id: str,
+    *,
+    status: str | None = None,
+    plan: dict[str, Any] | None = None,
+    coverage: dict[str, Any] | None = None,
+    source_stats: dict[str, Any] | None = None,
+    run_ids: list[str] | None = None,
+    progress: dict[str, Any] | None = None,
+    error: str | None = None,
+    started: bool = False,
+    finished: bool = False,
+) -> dict[str, Any]:
+    ensure_app_store()
+    retrieval_guided_job(library_id, job_id)
+    timestamp = now_iso()
+    assignments = ["updated_at = ?"]
+    values: list[Any] = [timestamp]
+    if status is not None:
+        assignments.append("status = ?")
+        values.append(str(status))
+    if plan is not None:
+        assignments.append("plan_json = ?")
+        values.append(json.dumps(plan, ensure_ascii=False))
+    if coverage is not None:
+        assignments.append("coverage_json = ?")
+        values.append(json.dumps(coverage, ensure_ascii=False))
+    if source_stats is not None:
+        assignments.append("source_stats_json = ?")
+        values.append(json.dumps(source_stats, ensure_ascii=False))
+    if run_ids is not None:
+        assignments.append("run_ids_json = ?")
+        values.append(json.dumps(run_ids, ensure_ascii=False))
+    if progress is not None:
+        assignments.append("progress_json = ?")
+        values.append(json.dumps(progress, ensure_ascii=False))
+    if error is not None:
+        assignments.append("error = ?")
+        values.append(str(error or ""))
+    if started:
+        assignments.append("started_at = CASE WHEN started_at = '' THEN ? ELSE started_at END")
+        values.append(timestamp)
+    if finished:
+        assignments.append("finished_at = ?")
+        values.append(timestamp)
+    values.extend([library_id, job_id])
+    with connect() as conn:
+        conn.execute(
+            f"""
+            UPDATE retrieval_guided_jobs
+            SET {", ".join(assignments)}
+            WHERE library_id = ? AND job_id = ?
+            """,
+            values,
+        )
+        conn.commit()
+    return retrieval_guided_job(library_id, job_id)
+
+
+def append_retrieval_guided_event(
+    library_id: str,
+    job_id: str,
+    message: str,
+    *,
+    kind: str = "progress",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    job = retrieval_guided_job(library_id, job_id)
+    progress = _guided_progress_with_event(
+        job.get("progress") if isinstance(job.get("progress"), dict) else {},
+        message,
+        kind=kind,
+        data=data,
+    )
+    return update_retrieval_guided_job(library_id, job_id, progress=progress)
+
+
+def cancel_retrieval_guided_job(library_id: str, job_id: str, reason: str = "Guided search canceled.") -> dict[str, Any]:
+    job = retrieval_guided_job(library_id, job_id)
+    if job.get("status") not in {"queued", "running", "pausing"}:
+        return job
+    progress = _guided_progress_with_event(
+        {**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "canceled"},
+        reason,
+        kind="warning",
+    )
+    return update_retrieval_guided_job(
+        library_id,
+        job_id,
+        status="canceled",
+        error=reason,
+        progress=progress,
+        finished=True,
+    )
+
+
+def pause_retrieval_guided_job(library_id: str, job_id: str, reason: str = "Guided search paused.") -> dict[str, Any]:
+    job = retrieval_guided_job(library_id, job_id)
+    if job.get("status") not in {"queued", "running"}:
+        raise ValueError("guided search job cannot be paused")
+    progress = _guided_progress_with_event(
+        {**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "paused"},
+        reason,
+        kind="warning",
+    )
+    return update_retrieval_guided_job(
+        library_id,
+        job_id,
+        status="paused",
+        error=reason,
+        progress=progress,
+    )
+
+
+def resume_retrieval_guided_job(library_id: str, job_id: str) -> dict[str, Any]:
+    job = retrieval_guided_job(library_id, job_id)
+    if job.get("status") != "paused":
+        raise ValueError("guided search job is not paused")
+    progress = _guided_progress_with_event(
+        {**(job.get("progress") if isinstance(job.get("progress"), dict) else {}), "stage": "queued"},
+        "已恢复引导式检索任务，等待继续执行。",
+        kind="progress",
+    )
+    return update_retrieval_guided_job(
+        library_id,
+        job_id,
+        status="queued",
+        error="",
+        progress=progress,
+    )
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
