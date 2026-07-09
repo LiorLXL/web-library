@@ -72,9 +72,11 @@ const state = {
   apiConfigShowSecrets: false,
   apiConfigShowMineruSecret: false,
   apiConfigShowCodexSecrets: false,
+  apiConfigShowEmbeddingSecret: false,
   apiConfigCheckResults: {},
   apiConfigChecking: "",
   apiConfigCodexMessage: "",
+  apiConfigEmbeddingMessage: "",
   items: [],
   collections: [],
   tagShortcuts: [],
@@ -289,7 +291,12 @@ async function loadApiConfig(options = {}) {
     const response = await fetch(`/api/library/${state.libraryId}/api-config${suffix}`);
     const data = await parseJSONResponse(response);
     if (!data.ok) throw new Error(data.error || "API 配置加载失败");
+    const currentEmbedding = state.apiConfig?.embedding;
     state.apiConfig = data.config || {};
+    if (currentEmbedding) state.apiConfig.embedding = currentEmbedding;
+    const embeddingResponse = await fetch(`/api/library/${state.libraryId}/rag/embeddings/config${suffix}`);
+    const embeddingData = await parseJSONResponse(embeddingResponse);
+    if (embeddingData.ok) state.apiConfig.embedding = defaultEmbeddingConfig(embeddingData.config || {});
   } catch (error) {
     state.apiConfigMessage = error.message;
   } finally {
@@ -316,7 +323,7 @@ function apiConfigMineruKeyValue() {
 }
 
 function apiConfigShouldIncludeSecrets() {
-  return state.apiConfigShowSecrets || state.apiConfigShowMineruSecret || state.apiConfigShowCodexSecrets;
+  return state.apiConfigShowSecrets || state.apiConfigShowMineruSecret || state.apiConfigShowCodexSecrets || state.apiConfigShowEmbeddingSecret;
 }
 
 function apiConfigSecretPayload(formData, field, configured, source) {
@@ -346,9 +353,65 @@ function ensureCodexConfigState() {
   return codex;
 }
 
+function defaultEmbeddingConfig(embedding = {}) {
+  return {
+    enabled: Boolean(embedding.enabled),
+    provider: String(embedding.provider || "openai"),
+    model: String(embedding.model || "text-embedding-3-small"),
+    base_url: String(embedding.base_url || "https://api.openai.com/v1"),
+    api_key: String(embedding.api_key || ""),
+    masked_api_key: String(embedding.masked_api_key || ""),
+    configured: Boolean(embedding.configured),
+    source: String(embedding.source || (embedding.configured ? "preference" : "none")),
+    dim: embedding.dim == null ? "" : String(embedding.dim),
+    batch_size: String(embedding.batch_size || 64),
+    vector_store_type: String(embedding.vector_store_type || "sqlite_blob"),
+  };
+}
+
+function ensureEmbeddingConfigState() {
+  if (!state.apiConfig) state.apiConfig = {};
+  const embedding = defaultEmbeddingConfig(state.apiConfig.embedding || {});
+  state.apiConfig.embedding = embedding;
+  return embedding;
+}
+
+function syncEmbeddingDraftFromForm(form = document.querySelector("[data-embedding-config-form]")) {
+  if (!form) return;
+  const embedding = ensureEmbeddingConfigState();
+  const formData = new FormData(form);
+  embedding.enabled = formData.get("embedding_enabled") === "on";
+  embedding.provider = String(formData.get("embedding_provider") || "openai").trim() || "openai";
+  embedding.model = String(formData.get("embedding_model") || "").trim() || "text-embedding-3-small";
+  embedding.base_url = String(formData.get("embedding_base_url") || "").trim() || "https://api.openai.com/v1";
+  embedding.batch_size = String(formData.get("embedding_batch_size") || "64").trim() || "64";
+  embedding.dim = String(formData.get("embedding_dim") || "").trim();
+  embedding.vector_store_type = String(formData.get("embedding_vector_store_type") || "sqlite_blob").trim() || "sqlite_blob";
+  const apiKey = String(formData.get("embedding_api_key") || "").trim();
+  if (state.apiConfigShowEmbeddingSecret || apiKey) embedding.api_key = apiKey;
+  state.apiConfig.embedding = embedding;
+}
+
+function serializeEmbeddingConfigPayload() {
+  syncEmbeddingDraftFromForm();
+  const embedding = ensureEmbeddingConfigState();
+  const apiKey = String(embedding.api_key || "").trim();
+  return {
+    enabled: Boolean(embedding.enabled),
+    provider: embedding.provider,
+    model: embedding.model,
+    base_url: embedding.base_url,
+    batch_size: Number.parseInt(embedding.batch_size || "64", 10) || 64,
+    dim: String(embedding.dim || "").trim(),
+    vector_store_type: embedding.vector_store_type,
+    api_key: apiKey || (embedding.configured && embedding.source === "preference" ? API_CONFIG_SECRET_KEEP_VALUE : ""),
+  };
+}
+
 function syncCodexDraftFromForm(form = document.querySelector("[data-codex-config-form]")) {
   if (!form) return;
   const codex = ensureCodexConfigState();
+  const embedding = ensureEmbeddingConfigState();
   const formData = new FormData(form);
   codex.model = String(formData.get("codex_model") || "").trim();
   codex.base_url = String(formData.get("codex_base_url") || "").trim() || "https://api.openai.com/v1";
@@ -393,6 +456,7 @@ function renderApiConfigPage() {
   const brave = config.code_sources?.brave || {};
   const mineru = config.mineru || {};
   const codex = ensureCodexConfigState();
+  const embedding = ensureEmbeddingConfigState();
   const codexApiKeyValue = state.apiConfigShowCodexSecrets ? String(codex.api_key || "") : "";
   const codexApiKeyPlaceholder = codex.configured
     ? `${apiConfigSourceText(codex.source)}已配置 ${codex.masked_api_key || ""}`.trim()
@@ -403,6 +467,10 @@ function renderApiConfigPage() {
     : "未配置";
   const mineruKeyPlaceholder = mineru.configured
     ? `${apiConfigSourceText(mineru.source)}已配置 ${mineru.masked_api_key || ""}`.trim()
+    : "未配置";
+  const embeddingApiKeyValue = state.apiConfigShowEmbeddingSecret ? String(embedding.api_key || "") : "";
+  const embeddingApiKeyPlaceholder = embedding.configured
+    ? `${apiConfigSourceText(embedding.source)}已配置 ${embedding.masked_api_key || ""}`.trim()
     : "未配置";
   const serviceRows = [
     ["github", "GitHub Token", "github_token", github, "公开仓库搜索；可选，未填也能搜公开资源"],
@@ -448,6 +516,63 @@ function renderApiConfigPage() {
     <section class="api-config-card">
       <div class="api-config-head">
         <div>
+          <h2>Embedding 配置</h2>
+          <p>用于 RAG 语义检索和混合排序。开启后刷新 RAG 索引会自动补齐 chunk embedding。</p>
+        </div>
+        <span class="api-status ${embedding.configured ? "ok" : "failed"}">${embedding.configured ? "已配置" : "未配置"}</span>
+      </div>
+      <form class="api-config-form" data-embedding-config-form>
+        <label class="api-config-checkbox">
+          <input name="embedding_enabled" type="checkbox" ${embedding.enabled ? "checked" : ""}>
+          <span>启用语义检索</span>
+        </label>
+        <div class="api-config-field-grid">
+          <label>
+            <span>Provider</span>
+            <select name="embedding_provider">
+              ${["openai", "deterministic"].map((value) => `<option value="${value}" ${embedding.provider === value ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
+          </label>
+          <label>
+            <span>Embedding 模型</span>
+            <input name="embedding_model" value="${escapeHtml(embedding.model || "")}" placeholder="text-embedding-3-small">
+          </label>
+          <label>
+            <span>API 请求地址</span>
+            <input name="embedding_base_url" value="${escapeHtml(embedding.base_url || "")}" placeholder="https://api.openai.com/v1">
+          </label>
+          <label>
+            <span>API Key</span>
+            <input name="embedding_api_key" type="${state.apiConfigShowEmbeddingSecret ? "text" : "password"}" value="${escapeHtml(embeddingApiKeyValue)}" placeholder="${escapeHtml(embeddingApiKeyPlaceholder)}">
+            <em>来源：${escapeHtml(apiConfigSourceText(embedding.source))}</em>
+          </label>
+          <label>
+            <span>Batch Size</span>
+            <input name="embedding_batch_size" type="number" min="1" max="512" value="${escapeHtml(embedding.batch_size || "64")}">
+          </label>
+          <label>
+            <span>维度</span>
+            <input name="embedding_dim" type="number" min="1" value="${escapeHtml(embedding.dim || "")}" placeholder="自动">
+          </label>
+          <label>
+            <span>向量存储</span>
+            <select name="embedding_vector_store_type">
+              <option value="sqlite_blob" ${embedding.vector_store_type === "sqlite_blob" ? "selected" : ""}>sqlite_blob</option>
+            </select>
+          </label>
+        </div>
+        <div class="api-config-actions">
+          <button type="button" class="form-action-btn" data-save-embedding-config ${state.apiConfigBusy ? "disabled" : ""}>${state.apiConfigBusy ? "保存中..." : "保存 Embedding 配置"}</button>
+          <button type="button" class="ghost-btn" data-toggle-embedding-config-secret>${state.apiConfigShowEmbeddingSecret ? "隐藏 key" : "显示 key"}</button>
+        </div>
+        <p class="api-config-message">保存后回到知识库页刷新 RAG 索引或补齐语义索引。</p>
+        ${state.apiConfigEmbeddingMessage ? `<p class="api-config-message">${escapeHtml(state.apiConfigEmbeddingMessage)}</p>` : ""}
+      </form>
+    </section>
+
+    <section class="api-config-card">
+      <div class="api-config-head">
+        <div>
           <h2>MinerU PDF 解析</h2>
           <p>用于批量解析已勾选条目的 PDF。解析结果会保存到本地副本文库目录的 mineru-results/。</p>
         </div>
@@ -481,7 +606,7 @@ function renderApiConfigPage() {
       <div class="api-config-head">
         <div>
           <h2>Codex 模型配置</h2>
-          <p>用于后续接入 Codex 检索工作流。配置和 MinerU、模型 API 一样，统一保存在当前文库的 <code>api_config</code> 里。</p>
+          <p>用于后续接入 openai-codex 检索工作流。配置和 MinerU、模型 API 一样，统一保存在当前文库的 <code>api_config</code> 里。</p>
         </div>
         <span class="api-status ${codex.configured ? "ok" : "failed"}">${codex.configured ? "已配置" : "未配置"}</span>
       </div>
@@ -572,7 +697,9 @@ async function saveApiConfig(event) {
     state.apiConfigMessage = "";
     renderApiConfigPage();
     const data = await postJSON(`/api/library/${state.libraryId}/api-config`, payload);
+    const currentEmbedding = state.apiConfig?.embedding;
     state.apiConfig = data.config || {};
+    if (currentEmbedding) state.apiConfig.embedding = currentEmbedding;
     state.apiConfigShowSecrets = false;
     state.apiConfigMessage = "配置已保存。";
   } catch (error) {
@@ -598,7 +725,9 @@ async function saveMineruConfig(event) {
     state.apiConfigBusy = true;
     state.apiConfigMessage = "";
     const data = await postJSON(`/api/library/${state.libraryId}/api-config`, payload);
+    const currentEmbedding = state.apiConfig?.embedding;
     state.apiConfig = data.config || {};
+    if (currentEmbedding) state.apiConfig.embedding = currentEmbedding;
     state.apiConfigShowMineruSecret = false;
     state.apiConfigMessage = "MinerU 配置已保存。";
   } catch (error) {
@@ -624,6 +753,28 @@ async function saveCodexConfig(event) {
     state.apiConfigCodexMessage = "Codex 智能体设置已保存。";
   } catch (error) {
     state.apiConfigCodexMessage = error.message;
+  } finally {
+    state.apiConfigBusy = false;
+    renderApiConfigPage();
+  }
+}
+
+async function saveEmbeddingConfig(event) {
+  event.preventDefault();
+  try {
+    state.apiConfigBusy = true;
+    state.apiConfigEmbeddingMessage = "";
+    syncEmbeddingDraftFromForm(event.currentTarget);
+    renderApiConfigPage();
+    const data = await postJSON(`/api/library/${state.libraryId}/rag/embeddings/config`, {
+      embedding: serializeEmbeddingConfigPayload(),
+    });
+    if (!state.apiConfig) state.apiConfig = {};
+    state.apiConfig.embedding = defaultEmbeddingConfig(data.config || {});
+    state.apiConfigShowEmbeddingSecret = false;
+    state.apiConfigEmbeddingMessage = "Embedding 配置已保存。";
+  } catch (error) {
+    state.apiConfigEmbeddingMessage = error.message;
   } finally {
     state.apiConfigBusy = false;
     renderApiConfigPage();
@@ -8732,13 +8883,16 @@ function setupApiConfigPage() {
   host?.addEventListener("submit", (event) => {
     if (event.target.matches("[data-api-config-form]")) saveApiConfig(event);
     else if (event.target.matches("[data-mineru-config-form]")) saveMineruConfig(event);
+    else if (event.target.matches("[data-embedding-config-form]")) saveEmbeddingConfig(event);
     else if (event.target.matches("[data-codex-config-form]")) saveCodexConfig(event);
   });
   host?.addEventListener("input", (event) => {
     if (event.target.closest("[data-codex-config-form]")) syncCodexDraftFromForm();
+    if (event.target.closest("[data-embedding-config-form]")) syncEmbeddingDraftFromForm();
   });
   host?.addEventListener("change", (event) => {
     if (event.target.closest("[data-codex-config-form]")) syncCodexDraftFromForm();
+    if (event.target.closest("[data-embedding-config-form]")) syncEmbeddingDraftFromForm();
   });
   host?.addEventListener("click", (event) => {
     const button = event.target.closest("button");
@@ -8752,6 +8906,9 @@ function setupApiConfigPage() {
     } else if (button.matches("[data-save-codex-config]")) {
       const form = button.closest("[data-codex-config-form]");
       if (form) saveCodexConfig({ preventDefault: () => {}, currentTarget: form });
+    } else if (button.matches("[data-save-embedding-config]")) {
+      const form = button.closest("[data-embedding-config-form]");
+      if (form) saveEmbeddingConfig({ preventDefault: () => {}, currentTarget: form });
     } else if (button.matches("[data-toggle-api-config-secrets]")) {
       state.apiConfigShowSecrets = !state.apiConfigShowSecrets;
       loadApiConfig({ includeSecrets: apiConfigShouldIncludeSecrets() });
@@ -8760,6 +8917,9 @@ function setupApiConfigPage() {
       loadApiConfig({ includeSecrets: apiConfigShouldIncludeSecrets() });
     } else if (button.matches("[data-toggle-codex-config-secret]")) {
       state.apiConfigShowCodexSecrets = !state.apiConfigShowCodexSecrets;
+      loadApiConfig({ includeSecrets: apiConfigShouldIncludeSecrets() });
+    } else if (button.matches("[data-toggle-embedding-config-secret]")) {
+      state.apiConfigShowEmbeddingSecret = !state.apiConfigShowEmbeddingSecret;
       loadApiConfig({ includeSecrets: apiConfigShouldIncludeSecrets() });
     } else if (button.matches("[data-check-api-config]")) {
       checkApiConfig(button.dataset.checkApiConfig);

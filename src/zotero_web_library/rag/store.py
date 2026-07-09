@@ -110,6 +110,23 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_section ON rag_chunks(section_title);
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_hash ON rag_chunks(content_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_chunks_unique_index ON rag_chunks(doc_id, chunk_index);
 
+CREATE TABLE IF NOT EXISTS rag_embeddings (
+  chunk_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  embedding BLOB NOT NULL,
+  content_hash TEXT NOT NULL,
+  embedding_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_embeddings_library ON rag_embeddings(library_id);
+CREATE INDEX IF NOT EXISTS idx_rag_embeddings_model ON rag_embeddings(provider, model);
+CREATE INDEX IF NOT EXISTS idx_rag_embeddings_hash ON rag_embeddings(content_hash);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunk_fts USING fts5(
   chunk_id UNINDEXED,
   doc_id UNINDEXED,
@@ -221,7 +238,18 @@ def ensure_store(library: dict[str, Any]) -> None:
             """,
             (str(library["library_id"]), now_iso(), now_iso()),
         )
+        _migrate_store(conn)
         conn.commit()
+
+
+def _migrate_store(conn: sqlite3.Connection) -> None:
+    chunk_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_chunks)").fetchall()}
+    if "embedding_status" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_status TEXT NOT NULL DEFAULT 'not_configured'")
+    if "embedding_model" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''")
+    if "embedding_hash" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_hash TEXT NOT NULL DEFAULT ''")
 
 
 def text_hash(value: str | bytes) -> str:
@@ -255,6 +283,11 @@ def reset_index(library: dict[str, Any], *, source_types: Iterable[str] | None =
         else:
             doc_ids = [str(row["doc_id"]) for row in conn.execute("SELECT doc_id FROM rag_documents").fetchall()]
         for doc_id in doc_ids:
+            chunk_rows = conn.execute("SELECT chunk_id FROM rag_chunks WHERE doc_id = ?", (doc_id,)).fetchall()
+            chunk_ids = [str(row["chunk_id"]) for row in chunk_rows]
+            if chunk_ids:
+                placeholders = ",".join("?" for _ in chunk_ids)
+                conn.execute(f"DELETE FROM rag_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
             conn.execute("DELETE FROM rag_chunk_fts WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM rag_assets WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM rag_chunks WHERE doc_id = ?", (doc_id,))
@@ -318,6 +351,9 @@ def upsert_document(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
 
 def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: list[Any]) -> None:
     title = str(document.get("title") or "")
+    config = conn.execute("SELECT embedding_enabled, embedding_provider, embedding_model FROM rag_config WHERE library_id = ?", (str(document["library_id"]),)).fetchone()
+    embedding_enabled = bool(config and int(config["embedding_enabled"] or 0) and str(config["embedding_provider"] or "") and str(config["embedding_model"] or ""))
+    embedding_model = f"{config['embedding_provider']}:{config['embedding_model']}" if embedding_enabled and config else ""
     for index, chunk in enumerate(chunks):
         content = str(chunk.content or "").strip()
         if not content:
@@ -348,6 +384,9 @@ def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: li
             "has_tables": 1 if "|" in content and "---" in content else 0,
             "has_equations": 1 if "$" in content else 0,
             "has_code": 1 if "```" in content else 0,
+            "embedding_status": "pending" if embedding_enabled else "not_configured",
+            "embedding_model": embedding_model,
+            "embedding_hash": "",
             "created_at": now_iso(),
         }
         conn.execute(
@@ -356,13 +395,15 @@ def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: li
               chunk_id, doc_id, library_id, item_key, attachment_key, chunk_index, chunk_type,
               content, content_hash, excerpt, section_title, section_path, section_level,
               estimated_page, position_json, token_count, char_count, word_count, has_assets,
-              has_tables, has_equations, has_code, created_at
+              has_tables, has_equations, has_code, embedding_status, embedding_model,
+              embedding_hash, created_at
             )
             VALUES (
               :chunk_id, :doc_id, :library_id, :item_key, :attachment_key, :chunk_index, :chunk_type,
               :content, :content_hash, :excerpt, :section_title, :section_path, :section_level,
               :estimated_page, :position_json, :token_count, :char_count, :word_count, :has_assets,
-              :has_tables, :has_equations, :has_code, :created_at
+              :has_tables, :has_equations, :has_code, :embedding_status, :embedding_model,
+              :embedding_hash, :created_at
             )
             """,
             payload,
@@ -425,6 +466,103 @@ def update_config_stats(library: dict[str, Any], *, status: str = "completed") -
     return index_status(library)
 
 
+def embedding_config(library: dict[str, Any]) -> dict[str, Any]:
+    ensure_store(library)
+    with connect(library) as conn:
+        row = conn.execute("SELECT * FROM rag_config WHERE library_id = ?", (str(library["library_id"]),)).fetchone()
+    payload = dict(row) if row else {}
+    config_json = payload.get("config_json") or "{}"
+    try:
+        extra = json.loads(str(config_json))
+    except json.JSONDecodeError:
+        extra = {}
+    embedding_extra = extra.get("embedding") if isinstance(extra.get("embedding"), dict) else {}
+    return {
+        "enabled": bool(int(payload.get("embedding_enabled") or 0)),
+        "provider": str(payload.get("embedding_provider") or ""),
+        "model": str(payload.get("embedding_model") or ""),
+        "dim": int(payload["embedding_dim"]) if payload.get("embedding_dim") is not None else None,
+        "vector_store_type": str(payload.get("vector_store_type") or "none"),
+        "vector_store_path": str(payload.get("vector_store_path") or ""),
+        "batch_size": int(embedding_extra.get("batch_size") or 64),
+        "api_key": str(embedding_extra.get("api_key") or ""),
+        "base_url": str(embedding_extra.get("base_url") or ""),
+    }
+
+
+def save_embedding_config(
+    library: dict[str, Any],
+    *,
+    enabled: bool,
+    provider: str,
+    model: str,
+    dim: int | None = None,
+    vector_store_type: str = "sqlite_blob",
+    api_key: str = "",
+    base_url: str = "",
+    batch_size: int = 64,
+) -> dict[str, Any]:
+    ensure_store(library)
+    clean_provider = str(provider or "").strip()
+    clean_model = str(model or "").strip()
+    clean_vector_store = str(vector_store_type or "sqlite_blob").strip() or "sqlite_blob"
+    clean_dim = int(dim) if dim is not None else None
+    timestamp = now_iso()
+    with connect(library) as conn:
+        row = conn.execute("SELECT config_json FROM rag_config WHERE library_id = ?", (str(library["library_id"]),)).fetchone()
+        try:
+            extra = json.loads(str((row or {})["config_json"] or "{}")) if row else {}
+        except json.JSONDecodeError:
+            extra = {}
+        extra["embedding"] = {
+            "api_key": str(api_key or "").strip(),
+            "base_url": str(base_url or "").strip(),
+            "batch_size": max(1, min(int(batch_size or 64), 512)),
+        }
+        conn.execute(
+            """
+            UPDATE rag_config
+            SET embedding_enabled = ?, embedding_provider = ?, embedding_model = ?,
+                embedding_dim = ?, vector_store_type = ?, config_json = ?,
+                updated_at = ?
+            WHERE library_id = ?
+            """,
+            (
+                1 if enabled else 0,
+                clean_provider,
+                clean_model,
+                clean_dim,
+                clean_vector_store,
+                json_dumps(extra),
+                timestamp,
+                str(library["library_id"]),
+            ),
+        )
+        if not enabled:
+            conn.execute(
+                """
+                UPDATE rag_chunks
+                SET embedding_status = 'not_configured',
+                    embedding_model = '',
+                    embedding_hash = ''
+                """
+            )
+        else:
+            model_label = f"{clean_provider}:{clean_model}"
+            conn.execute(
+                """
+                UPDATE rag_chunks
+                SET embedding_status = CASE
+                      WHEN embedding_model = ? AND embedding_hash != '' THEN embedding_status
+                      ELSE 'pending'
+                    END
+                """,
+                (model_label,),
+            )
+        conn.commit()
+    return embedding_config(library)
+
+
 def index_status(library: dict[str, Any]) -> dict[str, Any]:
     ensure_store(library)
     with connect(library) as conn:
@@ -445,10 +583,28 @@ def index_status(library: dict[str, Any]) -> dict[str, Any]:
             ORDER BY chunk_type
             """
         ).fetchall()
+        embedding_rows = conn.execute(
+            """
+            SELECT embedding_status, COUNT(*) AS chunk_count
+            FROM rag_chunks
+            GROUP BY embedding_status
+            ORDER BY embedding_status
+            """
+        ).fetchall()
+        embedding_count = conn.execute("SELECT COUNT(*) FROM rag_embeddings").fetchone()[0]
     payload = dict(config) if config else {"library_id": str(library["library_id"]), "index_status": "pending"}
     payload["rag_db_path"] = str(rag_db_path(library))
     payload["sources"] = [dict(row) for row in source_rows]
     payload["chunk_types"] = [dict(row) for row in chunk_rows]
+    payload["embedding"] = {
+        "enabled": bool(int(payload.get("embedding_enabled") or 0)),
+        "provider": str(payload.get("embedding_provider") or ""),
+        "model": str(payload.get("embedding_model") or ""),
+        "dim": payload.get("embedding_dim"),
+        "vector_store_type": str(payload.get("vector_store_type") or "none"),
+        "stored_embeddings": int(embedding_count or 0),
+        "statuses": [dict(row) for row in embedding_rows],
+    }
     return payload
 
 

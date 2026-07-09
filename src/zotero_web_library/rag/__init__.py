@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+from .embeddings import embed_missing_chunks, embedding_status
 from .ingest import index_library, index_mineru_results
 from .store import (
     add_knowledge_base_items,
     create_knowledge_base,
     delete_knowledge_base,
+    embedding_config,
     index_status,
     knowledge_base,
     list_knowledge_bases,
     remove_knowledge_base_items,
+    save_embedding_config,
 )
 from .retriever import retrieve
-from .tools import chunk_read, keyword_search, metadata_search
+from .tools import chunk_read, keyword_search, metadata_search, semantic_search
 
 __all__ = [
     "chunk_read",
+    "embed_missing_chunks",
+    "embedding_status",
+    "embedding_config",
     "index_library",
     "index_mineru_results",
     "index_status",
@@ -27,4 +33,6 @@ __all__ = [
     "metadata_search",
     "remove_knowledge_base_items",
     "retrieve",
+    "save_embedding_config",
+    "semantic_search",
 ]

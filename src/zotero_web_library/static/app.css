@@ -762,6 +762,34 @@ button, input, select {
   gap: 10px;
 }
 
+.knowledge-embedding-panel {
+  align-items: center;
+  border: 1px solid #d8e2ec;
+  border-radius: 12px;
+  background: #ffffff;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 12px;
+}
+
+.knowledge-embedding-panel div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.knowledge-embedding-panel span,
+.knowledge-embedding-panel small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.knowledge-embedding-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .knowledge-search-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -5001,6 +5029,17 @@ button, input, select {
 .api-config-form label {
   display: grid;
   gap: 6px;
+}
+
+.api-config-form .api-config-checkbox {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.api-config-form .api-config-checkbox input {
+  min-height: auto;
+  width: auto;
 }
 
 .api-config-form span {
