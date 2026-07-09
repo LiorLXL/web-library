@@ -43,6 +43,9 @@ from .rag import (
     chunk_read as rag_chunk_read,
     create_knowledge_base as rag_create_knowledge_base,
     delete_knowledge_base as rag_delete_knowledge_base,
+    embedding_config as rag_embedding_config,
+    embed_missing_chunks as rag_embed_missing_chunks,
+    embedding_status as rag_embedding_status,
     index_library as rag_index_library,
     index_mineru_results as rag_index_mineru_results,
     index_status as rag_index_status,
@@ -52,6 +55,8 @@ from .rag import (
     metadata_search as rag_metadata_search,
     remove_knowledge_base_items as rag_remove_knowledge_base_items,
     retrieve as rag_retrieve,
+    save_embedding_config as rag_save_embedding_config,
+    semantic_search as rag_semantic_search,
 )
 from .retrieval import CandidateImportError, RetrievalError, imported_items_from_candidates, retrieval_source_statuses, search_retrieval
 from .retrieval.importing import imported_item_from_candidate
@@ -249,6 +254,27 @@ def api_config_codex_for_library(library_id: str) -> dict[str, Any]:
     config = api_config_for_library(library_id)
     codex = config.get("codex") if isinstance(config.get("codex"), dict) else {}
     return default_codex_config(codex)
+
+
+def library_embedding_config_response(library: dict[str, Any], *, include_secrets: bool = False) -> dict[str, Any]:
+    config = rag_embedding_config(library)
+    api_key = clean_secret(config.get("api_key"))
+    provider = clean_secret(config.get("provider")) or "openai"
+    model = clean_secret(config.get("model")) or "text-embedding-3-small"
+    base_url = clean_secret(config.get("base_url")) or CODEX_DEFAULT_BASE_URL
+    return {
+        "enabled": bool(config.get("enabled")),
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+        "api_key": api_key if include_secrets else "",
+        "masked_api_key": masked_secret(api_key),
+        "configured": bool(config.get("enabled") and provider and model and (provider != "openai" or api_key)),
+        "source": "preference" if api_key else "none",
+        "dim": config.get("dim"),
+        "batch_size": int(config.get("batch_size") or 64),
+        "vector_store_type": clean_secret(config.get("vector_store_type")) or "sqlite_blob",
+    }
 
 
 def effective_code_source_token(library_id: str, key: str, env_name: str) -> str:
@@ -14402,6 +14428,65 @@ def create_app() -> Flask:
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.get("/api/library/<library_id>/rag/embeddings/config")
+    def api_rag_embeddings_config(library_id: str):
+        try:
+            library = library_or_404(library_id)
+            include_secrets = request.args.get("include_secrets") == "1"
+            return jsonify({"ok": True, "config": library_embedding_config_response(library, include_secrets=include_secrets)})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/embeddings/config")
+    def api_rag_save_embeddings_config(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        raw = payload.get("embedding") if isinstance(payload.get("embedding"), dict) else payload
+        try:
+            library = library_or_404(library_id)
+            existing = rag_embedding_config(library)
+            raw_api_key = clean_secret(raw.get("api_key"))
+            api_key = clean_secret(existing.get("api_key")) if raw_api_key == API_CONFIG_SECRET_KEEP_VALUE else raw_api_key
+            raw_dim = raw.get("dim")
+            dim = int(raw_dim) if str(raw_dim or "").strip() else None
+            config = rag_save_embedding_config(
+                library,
+                enabled=bool(raw.get("enabled", False)),
+                provider=clean_secret(raw.get("provider")) or "openai",
+                model=clean_secret(raw.get("model")) or "text-embedding-3-small",
+                dim=dim,
+                vector_store_type=clean_secret(raw.get("vector_store_type")) or "sqlite_blob",
+                api_key=api_key,
+                base_url=clean_secret(raw.get("base_url")) or CODEX_DEFAULT_BASE_URL,
+                batch_size=int(raw.get("batch_size") or 64),
+            )
+            return jsonify({"ok": True, "config": library_embedding_config_response(library, include_secrets=False), "raw_config": {key: value for key, value in config.items() if key != "api_key"}})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/rag/embeddings/status")
+    def api_rag_embeddings_status(library_id: str):
+        try:
+            return jsonify({"ok": True, "status": rag_embedding_status(library_or_404(library_id))})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/embeddings/index")
+    def api_rag_embeddings_index(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            result = rag_embed_missing_chunks(
+                library_or_404(library_id),
+                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                batch_size=int(payload.get("batch_size") or 64),
+                force=bool(payload.get("force", False)),
+            )
+            return jsonify({"ok": bool(result.get("ok", True)), **result})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.post("/api/library/<library_id>/rag/tools/retrieve")
     def api_rag_retrieve(library_id: str):
         payload = request.get_json(silent=True) or {}
@@ -14847,6 +14932,24 @@ def create_app() -> Flask:
                 library_or_404(library_id),
                 str(payload.get("query") or ""),
                 top_k=int(payload.get("top_k") or 10),
+                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+            )
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/tools/semantic_search")
+    def api_rag_semantic_search(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            result = rag_semantic_search(
+                library_or_404(library_id),
+                str(payload.get("query") or ""),
+                top_k=int(payload.get("top_k") or 10),
+                chunk_type=str(payload.get("chunk_type") or ""),
                 knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
                 item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
             )

@@ -3,8 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .embeddings import embedding_config
 from .store import connect, ensure_store, knowledge_base_item_keys
-from .tools import chunk_read, keyword_search, metadata_search
+from .tools import chunk_read, keyword_search, metadata_search, semantic_search
 
 
 VALID_RETRIEVAL_MODES = {"auto", "hybrid", "metadata", "keyword", "semantic"}
@@ -67,16 +68,28 @@ def retrieve(
         pack["tool_calls"].append(_tool_call("keyword_search", search_query, keyword))
         raw_results.extend(_tag_results(keyword.get("results", []), retrieval_type="keyword"))
 
-    if clean_mode in {"hybrid", "semantic"}:
-        pack["warnings"].append("semantic_search_not_configured")
-        pack["tool_calls"].append(
-            {
-                "tool": "semantic_search",
-                "query": search_query,
-                "result_count": 0,
-                "status": "not_configured",
-            }
+    should_run_semantic = clean_mode in {"hybrid", "semantic"} or (
+        clean_mode == "auto" and _semantic_configured(library)
+    )
+    if should_run_semantic:
+        semantic = semantic_search(
+            library,
+            clean_query,
+            top_k=limit,
+            knowledge_base_id=pack["knowledge_base_id"],
+            item_keys=item_keys,
         )
+        status = str(semantic.get("status") or "ok")
+        pack["tool_calls"].append(_tool_call("semantic_search", clean_query, semantic, status=status))
+        if status == "not_configured":
+            pack["warnings"].append("semantic_search_not_configured")
+        elif status == "empty_scope":
+            pack["warnings"].append("semantic_search_empty_scope")
+        else:
+            raw_results.extend(_tag_results(semantic.get("results", []), retrieval_type="semantic"))
+
+    if raw_results and (should_run_semantic or clean_mode == "hybrid"):
+        raw_results = _rank_hybrid(raw_results)
 
     if not raw_results and clean_mode in {"auto", "hybrid", "keyword"}:
         fallback = _scope_context_results(
@@ -239,12 +252,15 @@ def _scope_context_results(
     return results
 
 
-def _tool_call(tool: str, query: str, result: dict[str, Any]) -> dict[str, Any]:
-    return {
+def _tool_call(tool: str, query: str, result: dict[str, Any], *, status: str = "") -> dict[str, Any]:
+    payload = {
         "tool": tool,
         "query": query,
         "result_count": len(result.get("results") or []),
     }
+    if status:
+        payload["status"] = status
+    return payload
 
 
 def _tag_results(results: list[dict[str, Any]], *, retrieval_type: str) -> list[dict[str, Any]]:
@@ -285,6 +301,60 @@ def _build_evidence(
     return evidence
 
 
+def _semantic_configured(library: dict[str, Any]) -> bool:
+    config = embedding_config(library)
+    return bool(config.get("enabled") and config.get("provider") and config.get("model"))
+
+
+def _rank_hybrid(raw_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    keyword_rank = 0
+    semantic_rank = 0
+    metadata_rank = 0
+    for raw in raw_results:
+        chunk_id = str(raw.get("chunk_id") or "")
+        if not chunk_id:
+            continue
+        retrieval_type = str(raw.get("retrieval_type") or "")
+        current = grouped.setdefault(chunk_id, dict(raw))
+        scores = dict(current.get("scores") or {})
+        if retrieval_type == "keyword":
+            keyword_rank += 1
+            scores["keyword_rank_score"] = max(scores.get("keyword_rank_score", 0.0), 1.0 / keyword_rank)
+            scores["keyword_score"] = raw.get("score")
+        elif retrieval_type == "semantic":
+            semantic_rank += 1
+            scores["semantic_rank_score"] = max(scores.get("semantic_rank_score", 0.0), 1.0 / semantic_rank)
+            scores["semantic_score"] = raw.get("semantic_score", raw.get("score"))
+        elif retrieval_type == "metadata":
+            metadata_rank += 1
+            scores["metadata_rank_score"] = max(scores.get("metadata_rank_score", 0.0), 1.0 / metadata_rank)
+        else:
+            scores[f"{retrieval_type}_rank_score"] = max(scores.get(f"{retrieval_type}_rank_score", 0.0), 0.2)
+        current["scores"] = scores
+        retrieval_types = set(str(item) for item in current.get("retrieval_types", []) if str(item))
+        retrieval_types.add(retrieval_type)
+        current["retrieval_types"] = sorted(retrieval_types)
+        if retrieval_type == "semantic" and not current.get("snippet"):
+            current["snippet"] = raw.get("snippet", "")
+
+    ranked: list[dict[str, Any]] = []
+    for item in grouped.values():
+        scores = dict(item.get("scores") or {})
+        hybrid_score = (
+            0.55 * float(scores.get("keyword_rank_score") or 0.0)
+            + 0.35 * float(scores.get("semantic_rank_score") or 0.0)
+            + 0.10 * float(scores.get("metadata_rank_score") or 0.0)
+        )
+        item["scores"] = {**scores, "hybrid_score": hybrid_score}
+        item["score"] = hybrid_score
+        if len(item.get("retrieval_types") or []) > 1:
+            item["retrieval_type"] = "hybrid"
+        ranked.append(item)
+    ranked.sort(key=lambda item: float((item.get("scores") or {}).get("hybrid_score") or 0.0), reverse=True)
+    return ranked
+
+
 def _evidence_from_result(
     library: dict[str, Any],
     raw: dict[str, Any],
@@ -319,6 +389,7 @@ def _evidence_from_result(
         "text": text,
         "excerpt": str(raw.get("snippet") or raw.get("excerpt") or source.get("excerpt") or "")[:700],
         "score": raw.get("score"),
+        "scores": raw.get("scores") or {},
         "rank": rank,
         "citation": _citation(source_type=source_type, item_key=item_key, chunk_id=chunk_id),
     }

@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
-from zotero_web_library.rag import chunk_read, index_library, keyword_search, metadata_search, retrieve
-from zotero_web_library.rag.store import create_knowledge_base
+from zotero_web_library.rag import (
+    chunk_read,
+    embed_missing_chunks,
+    embedding_status,
+    index_library,
+    keyword_search,
+    metadata_search,
+    retrieve,
+    semantic_search,
+)
+from zotero_web_library.rag.store import connect, create_knowledge_base, insert_chunks, save_embedding_config, upsert_document
 from zotero_web_library.rag.store import rag_db_path
 from zotero_web_library.sources import create_local_copy
 from zotero_web_library.web import create_app
@@ -214,6 +224,224 @@ def test_retrieve_semantic_mode_is_explicitly_not_configured(
             "status": "not_configured",
         }
     ]
+
+
+def test_semantic_search_indexes_embeddings_and_respects_scope(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    write_mineru_fixture(library)
+    save_embedding_config(
+        library,
+        enabled=True,
+        provider="deterministic",
+        model="deterministic-hash-v1",
+        dim=64,
+    )
+
+    status = index_library(library)
+
+    assert status["embedding"]["enabled"] is True
+    embedding_payload = embedding_status(library)
+    assert embedding_payload["stored_embeddings"] >= 1
+    assert any(item["embedding_status"] == "embedded" for item in embedding_payload["statuses"])
+
+    result = semantic_search(library, "robust manipulation", top_k=5)
+    assert result["status"] == "ok"
+    assert result["results"]
+    assert result["results"][0]["item_key"] == "ITEM0001"
+    assert result["results"][0]["semantic_score"] > 0
+
+    unrelated = create_knowledge_base(library, name="Unrelated semantic", item_keys=["ITEM0002"])
+    bypass_attempt = semantic_search(
+        library,
+        "robust manipulation",
+        knowledge_base_id=unrelated["knowledge_base_id"],
+        item_keys=["ITEM0001"],
+    )
+    assert bypass_attempt["results"] == []
+
+
+def test_embed_missing_chunks_is_incremental(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    write_mineru_fixture(library)
+    save_embedding_config(
+        library,
+        enabled=True,
+        provider="deterministic",
+        model="deterministic-hash-v1",
+        dim=64,
+    )
+    index_library(library)
+
+    result = embed_missing_chunks(library)
+
+    assert result["status"] == "up_to_date"
+    assert result["processed_chunks"] == 0
+
+
+def test_embed_missing_chunks_splits_provider_requests(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    save_embedding_config(
+        library,
+        enabled=True,
+        provider="openai",
+        model="limited-test",
+        api_key="sk-test",
+        batch_size=64,
+    )
+    doc = {
+        "doc_id": "doc-batch-test",
+        "library_id": library["library_id"],
+        "item_key": "ITEM0001",
+        "attachment_key": "ATTACH01",
+        "source_type": "test",
+        "title": "Batch Test",
+    }
+    chunks = [
+        SimpleNamespace(
+            content=f"semantic batch chunk {index}",
+            chunk_type="text",
+            section_title="Batch",
+            section_level=1,
+            estimated_page=None,
+        )
+        for index in range(25)
+    ]
+    with connect(library) as conn:
+        upsert_document(conn, doc)
+        insert_chunks(conn, doc, chunks)
+        conn.commit()
+
+    class LimitedProvider:
+        provider_name = "openai"
+        model = "limited-test"
+        dim = 3
+        max_batch_size = 10
+
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(len(texts))
+            assert len(texts) <= self.max_batch_size
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+    provider = LimitedProvider()
+    result = embed_missing_chunks(library, batch_size=64, provider=provider)
+
+    assert result["ok"] is True
+    assert result["processed_chunks"] == 25
+    assert result["embedded_chunks"] == 25
+    assert provider.calls == [10, 10, 5]
+
+
+def test_retrieve_hybrid_uses_semantic_results_when_configured(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    write_mineru_fixture(library)
+    save_embedding_config(
+        library,
+        enabled=True,
+        provider="deterministic",
+        model="deterministic-hash-v1",
+        dim=64,
+    )
+    index_library(library)
+
+    pack = retrieve(library, "robust manipulation", mode="hybrid", top_k=5)
+
+    assert pack["results"]
+    assert any(call["tool"] == "semantic_search" and call["status"] == "ok" for call in pack["tool_calls"])
+    assert any("semantic_score" in result.get("scores", {}) for result in pack["results"])
+
+
+def test_semantic_search_api(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    write_mineru_fixture(library)
+    save_embedding_config(
+        library,
+        enabled=True,
+        provider="deterministic",
+        model="deterministic-hash-v1",
+        dim=64,
+    )
+    client = create_app().test_client()
+
+    assert client.post(f"/api/library/{library['library_id']}/rag/index").status_code == 200
+    status_response = client.get(f"/api/library/{library['library_id']}/rag/embeddings/status")
+    assert status_response.status_code == 200
+    assert status_response.get_json()["status"]["stored_embeddings"] >= 1
+
+    search_response = client.post(
+        f"/api/library/{library['library_id']}/rag/tools/semantic_search",
+        json={"query": "robust manipulation", "top_k": 5},
+    )
+    assert search_response.status_code == 200
+    payload = search_response.get_json()
+    assert payload["ok"] is True
+    assert payload["status"] == "ok"
+    assert payload["results"]
+
+
+def test_embedding_config_api(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    client = create_app().test_client()
+
+    save_response = client.post(
+        f"/api/library/{library['library_id']}/rag/embeddings/config",
+        json={
+            "embedding": {
+                "enabled": True,
+                "provider": "openai",
+                "model": "text-embedding-3-small",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "sk-embedding-test",
+                "batch_size": 16,
+            }
+        },
+    )
+
+    assert save_response.status_code == 200
+    payload = save_response.get_json()
+    assert payload["ok"] is True
+    assert payload["config"]["enabled"] is True
+    assert payload["config"]["api_key"] == ""
+    assert payload["config"]["masked_api_key"]
+    assert payload["config"]["batch_size"] == 16
+
+    secret_response = client.get(f"/api/library/{library['library_id']}/rag/embeddings/config?include_secrets=1")
+    assert secret_response.status_code == 200
+    config = secret_response.get_json()["config"]
+    assert config["api_key"] == "sk-embedding-test"
+    assert config["configured"] is True
 
 
 def test_knowledge_base_api_crud_and_scoped_search(zotero_fixture: Path, monkeypatch, tmp_path: Path) -> None:

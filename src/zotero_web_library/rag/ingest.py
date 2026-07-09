@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from zotero_web_library.rag.chunking import chunk_markdown, chunk_plain_text, clean_text, html_to_text
+from zotero_web_library.rag.embeddings import EmbeddingConfigError, embed_missing_chunks
 from zotero_web_library.rag.store import (
     connect,
+    embedding_config,
     ensure_store,
     file_hash,
     insert_asset,
@@ -276,11 +278,11 @@ def index_library(library: dict[str, Any]) -> dict[str, Any]:
                 upsert_document(conn, note_doc)
                 insert_chunks(conn, note_doc, note_chunks)
         conn.commit()
-    index_mineru_results(library, reset_existing=False)
-    return update_config_stats(library)
+    index_mineru_results(library, reset_existing=False, finalize=False)
+    return _final_index_status(library)
 
 
-def index_mineru_results(library: dict[str, Any], *, reset_existing: bool = True) -> dict[str, Any]:
+def index_mineru_results(library: dict[str, Any], *, reset_existing: bool = True, finalize: bool = True) -> dict[str, Any]:
     ensure_store(library)
     repo = ZoteroRepository(library)
     items = repo.items()
@@ -295,6 +297,11 @@ def index_mineru_results(library: dict[str, Any], *, reset_existing: bool = True
             doc, chunks, image_paths = mineru_document(library, json_path, payload, items_by_key.get(item_key))
             upsert_document(conn, doc)
             if chunks:
+                chunk_rows = conn.execute("SELECT chunk_id FROM rag_chunks WHERE doc_id = ?", (doc["doc_id"],)).fetchall()
+                chunk_ids = [str(row["chunk_id"]) for row in chunk_rows]
+                if chunk_ids:
+                    placeholders = ",".join("?" for _ in chunk_ids)
+                    conn.execute(f"DELETE FROM rag_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
                 conn.execute("DELETE FROM rag_chunk_fts WHERE doc_id = ?", (doc["doc_id"],))
                 conn.execute("DELETE FROM rag_chunks WHERE doc_id = ?", (doc["doc_id"],))
                 insert_chunks(conn, doc, chunks)
@@ -331,4 +338,20 @@ def index_mineru_results(library: dict[str, Any], *, reset_existing: bool = True
                     },
                 )
         conn.commit()
-    return update_config_stats(library)
+    if not finalize:
+        return update_config_stats(library)
+    return _final_index_status(library)
+
+
+def _final_index_status(library: dict[str, Any]) -> dict[str, Any]:
+    status = update_config_stats(library)
+    config = embedding_config(library)
+    if not (config.get("enabled") and config.get("provider") and config.get("model")):
+        return status
+    try:
+        embedding_index = embed_missing_chunks(library, batch_size=int(config.get("batch_size") or 64))
+    except EmbeddingConfigError as exc:
+        embedding_index = {"ok": False, "status": "failed", "error": str(exc)}
+    next_status = update_config_stats(library)
+    next_status["embedding_index"] = embedding_index
+    return next_status

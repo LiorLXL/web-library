@@ -142,6 +142,10 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-codex-config-form" in app_js
     assert "data-save-codex-config" in app_js
     assert "data-toggle-codex-config-secret" in app_js
+    assert "data-embedding-config-form" in app_js
+    assert "data-save-embedding-config" in app_js
+    assert "data-toggle-embedding-config-secret" in app_js
+    assert "/rag/embeddings/config" in app_js
     assert "保存 Codex 设置" in app_js
     assert "Reasoning Effort" in app_js
     assert "openai-codex" in app_js
@@ -162,7 +166,12 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-mineru-config-form" in app_js
     assert "data-save-mineru-config" in app_js
     assert "data-toggle-mineru-config-secret" in app_js
+    assert "data-embedding-index" in knowledge_js
+    assert "data-embedding-rebuild" in knowledge_js
+    assert "/embeddings/status" in knowledge_js
+    assert "/embeddings/index" in knowledge_js
     assert ".api-config-field-grid" in app_css
+    assert ".knowledge-embedding-panel" in app_css
     assert "data-attachment-editor-modal" in library_html
     assert "data-reader-pdf-picker-modal" in library_html
     assert "data-delete-items-modal" in library_html

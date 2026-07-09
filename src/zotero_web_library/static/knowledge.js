@@ -7,6 +7,8 @@ const knowledgeState = {
   loading: false,
   message: "",
   indexBusy: false,
+  embeddingStatus: null,
+  embeddingBusy: false,
   deleteBusy: false,
   searchQuery: "",
   searchResults: [],
@@ -133,6 +135,16 @@ async function loadKnowledgeBases({ keepActive = true } = {}) {
   }
 }
 
+async function loadEmbeddingStatus() {
+  try {
+    const data = await knowledgeJSON(knowledgeApi("/embeddings/status"));
+    knowledgeState.embeddingStatus = data.status || null;
+  } catch (error) {
+    knowledgeState.embeddingStatus = { configured: false, error: error.message, statuses: [] };
+  }
+  renderKnowledgeSearchPanel();
+}
+
 async function loadKnowledgeBaseDetail(knowledgeBaseId) {
   const cleanId = String(knowledgeBaseId || "").trim();
   if (!cleanId) {
@@ -164,6 +176,7 @@ async function createKnowledgeBaseFromPrompt() {
     });
     knowledgeState.activeId = data.knowledge_base?.knowledge_base_id || "";
     setKnowledgeMessage("知识库已创建。");
+    await loadEmbeddingStatus();
     await loadKnowledgeBases({ keepActive: true });
   } catch (error) {
     setKnowledgeMessage(error.message);
@@ -227,6 +240,34 @@ async function refreshRagIndex() {
   } finally {
     knowledgeState.indexBusy = false;
     if (button) button.disabled = false;
+  }
+}
+
+async function rebuildEmbeddingIndex({ force = false } = {}) {
+  if (knowledgeState.embeddingBusy) return;
+  const active = activeKnowledgeLibrary();
+  if (!active) return;
+  if (force && !window.confirm("确认强制重建当前知识库的语义索引？这会重新生成该知识库范围内的 chunk embedding。")) return;
+  knowledgeState.embeddingBusy = true;
+  setKnowledgeMessage(force ? "正在强制重建语义索引..." : "正在补齐语义索引...");
+  renderKnowledgeSearchPanel();
+  try {
+    const data = await knowledgeJSON(knowledgeApi("/embeddings/index"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        knowledge_base_id: knowledgeState.activeId,
+        force,
+        batch_size: 64,
+      }),
+    });
+    setKnowledgeMessage(`语义索引完成：处理 ${Number(data.processed_chunks || 0)} 个 chunk，成功 ${Number(data.embedded_chunks || 0)} 个。`);
+    await loadEmbeddingStatus();
+  } catch (error) {
+    setKnowledgeMessage(error.message);
+  } finally {
+    knowledgeState.embeddingBusy = false;
+    renderKnowledgeSearchPanel();
   }
 }
 
@@ -441,6 +482,7 @@ function renderKnowledgeSearchPanel() {
   const disabled = !active || knowledgeState.searchBusy;
   const results = knowledgeState.searchResults || [];
   host.innerHTML = `
+    ${renderEmbeddingStatusPanel(active)}
     <form class="knowledge-search-form" data-knowledge-search-form>
       <input name="query" value="${escapeKnowledgeHtml(knowledgeState.searchQuery)}" placeholder="在当前知识库中检索证据 chunk" ${disabled ? "disabled" : ""}>
       <button type="submit" class="form-action-btn" ${disabled ? "disabled" : ""}>${knowledgeState.searchBusy ? "检索中..." : "检索"}</button>
@@ -450,6 +492,43 @@ function renderKnowledgeSearchPanel() {
     </div>
   `;
   host.querySelector("[data-knowledge-search-form]")?.addEventListener("submit", submitKnowledgeSearch);
+  host.querySelector("[data-embedding-index]")?.addEventListener("click", () => rebuildEmbeddingIndex({ force: false }));
+  host.querySelector("[data-embedding-rebuild]")?.addEventListener("click", () => rebuildEmbeddingIndex({ force: true }));
+}
+
+function renderEmbeddingStatusPanel(active) {
+  const status = knowledgeState.embeddingStatus || {};
+  const rows = Array.isArray(status.statuses) ? status.statuses : [];
+  const counts = new Map(rows.map((row) => [String(row.embedding_status || ""), Number(row.chunk_count || 0)]));
+  const embedded = counts.get("embedded") || 0;
+  const pending = (counts.get("pending") || 0) + (counts.get("stale") || 0);
+  const failed = counts.get("failed") || 0;
+  const notConfigured = counts.get("not_configured") || 0;
+  const total = embedded + pending + failed + notConfigured;
+  const config = status.config || {};
+  const configured = Boolean(status.configured);
+  const provider = config.provider || "";
+  const model = config.model || "";
+  const busy = knowledgeState.embeddingBusy;
+  const summary = configured
+    ? `已生成 ${embedded}/${total} 个 chunk embedding`
+    : "未配置 embedding，当前聊天仍会使用关键词检索";
+  const detail = configured
+    ? `${provider} / ${model}${failed ? ` / 失败 ${failed}` : ""}${pending ? ` / 待生成 ${pending}` : ""}`
+    : "请到 API 配置页启用 Embedding 配置";
+  return `
+    <section class="knowledge-embedding-panel">
+      <div>
+        <strong>语义索引</strong>
+        <span>${escapeKnowledgeHtml(summary)}</span>
+        <small>${escapeKnowledgeHtml(detail)}</small>
+      </div>
+      <div class="knowledge-embedding-actions">
+        <button type="button" class="ghost-btn small" data-embedding-index ${!active || !configured || busy ? "disabled" : ""}>${busy ? "处理中..." : "补齐语义索引"}</button>
+        <button type="button" class="ghost-btn small" data-embedding-rebuild ${!active || !configured || busy ? "disabled" : ""}>强制重建</button>
+      </div>
+    </section>
+  `;
 }
 
 function renderKnowledgeSearchResult(result) {
@@ -802,6 +881,7 @@ function setupKnowledgePage() {
   renderKnowledgeList();
   renderKnowledgeMatrix();
   renderKnowledgeChat();
+  loadEmbeddingStatus();
   loadKnowledgeBases();
   loadMatrixState();
 }

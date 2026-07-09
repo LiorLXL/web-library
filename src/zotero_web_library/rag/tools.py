@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+from zotero_web_library.rag.embeddings import semantic_search_vectors
 from zotero_web_library.rag.store import connect, ensure_store, knowledge_base_item_keys, row_to_dict
 
 
@@ -101,6 +102,25 @@ def metadata_search(
         query,
         top_k=top_k,
         chunk_type="metadata",
+        knowledge_base_id=knowledge_base_id,
+        item_keys=item_keys,
+    )
+
+
+def semantic_search(
+    library: dict[str, Any],
+    query: str,
+    *,
+    top_k: int = 10,
+    chunk_type: str = "",
+    knowledge_base_id: str = "",
+    item_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    return semantic_search_vectors(
+        library,
+        query,
+        top_k=top_k,
+        chunk_type=chunk_type,
         knowledge_base_id=knowledge_base_id,
         item_keys=item_keys,
     )
