@@ -939,6 +939,24 @@ async function setupReaderPage() {
   const params = new URLSearchParams(window.location.search);
   readerState.itemKey = params.get("item_key") || "";
   readerState.attachmentKey = params.get("attachment_key") || "";
+
+  // 进入研读页时若 URL 未带文献参数，则恢复上一次打开的 PDF（按文库分别记忆），
+  // 这样切走再切回仍能保留 PDF 与对话。
+  if (!readerState.itemKey || !readerState.attachmentKey) {
+    const lastItem = localStorage.getItem(readerStorageKey("lastItemKey"));
+    const lastAttachment = localStorage.getItem(readerStorageKey("lastAttachmentKey"));
+    if (lastItem && lastAttachment) {
+      const next = new URL(window.location.href);
+      next.searchParams.set("item_key", lastItem);
+      next.searchParams.set("attachment_key", lastAttachment);
+      window.location.replace(next.toString());
+      return;
+    }
+  } else {
+    // 记录本次打开的文献，供下次恢复。
+    localStorage.setItem(readerStorageKey("lastItemKey"), readerState.itemKey);
+    localStorage.setItem(readerStorageKey("lastAttachmentKey"), readerState.attachmentKey);
+  }
   loadReaderPreferences();
   setupReaderSplitters();
   setupOutlineToggle();

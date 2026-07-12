@@ -318,7 +318,9 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "\"import-knowledge\", \"导入知识库\"" in app_js
     assert "setupKnowledgePage();" in knowledge_js
     assert "knowledge-workbench" in knowledge_js
-    assert "notifyKnowledgePlaceholder" in knowledge_js
+    assert "loadMatrixState" in knowledge_js
+    assert "data-run-reading-matrix" in knowledge_html
+    assert "data-stop-reading-matrix" in knowledge_html
     assert ".knowledge-workbench" in app_css
     assert ".knowledge-create-btn" in app_css
     assert ".matrix-table" in app_css

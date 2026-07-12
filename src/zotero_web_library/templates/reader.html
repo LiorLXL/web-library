@@ -14,6 +14,7 @@
     <a class="rail-btn" title="文库" href="{{ url_for('library_page', library_id=library.library_id) }}">库</a>
     <a class="rail-btn" title="知识库" href="{{ url_for('knowledge_page', library_id=library.library_id) }}">知</a>
     <a class="rail-btn active" title="文献研读" href="{{ url_for('reader_page', library_id=library.library_id) }}">读</a>
+
     <a class="rail-btn" title="API 配置" href="{{ url_for('api_config_page', library_id=library.library_id) }}">配</a>
   </aside>
   <main class="reader-shell">
@@ -64,16 +65,40 @@
       <div class="reader-splitter" data-reader-splitter="right" title="拖拽调整宽度"></div>
       <aside class="reader-agent">
         <div class="reader-panel-head">
-          <h2>智能体对话</h2>
+          <h2>文献对话</h2>
+          <p class="reader-agent-subtitle">只围绕当前文献，保留多轮记忆。</p>
         </div>
-        <div class="reader-agent-placeholder">
-          <strong>下一版接入</strong>
-          <p>这里将用于围绕当前 PDF、标注和选中文本进行智能问答。</p>
+
+        <div class="chat-window reading-chat-window" data-reading-chat-window>
+          <div class="chat-empty">
+            <strong>开始和这篇文献对话</strong>
+            <span>可以问“这篇文献的核心贡献是什么？”、“实验设置怎么理解？”，或截图/粘贴一张图片辅助提问。</span>
+          </div>
         </div>
+
+        <form class="task-panel reading-chat-form"
+          method="post"
+          data-reading-chat-form
+          {% if item_key %}
+          action="{{ url_for('api_reading_chat_run', library_id=library.library_id, item_key=item_key) }}"
+          data-run-url="{{ url_for('api_reading_chat_run', library_id=library.library_id, item_key=item_key) }}"
+          data-status-url="{{ url_for('api_reading_chat_status', library_id=library.library_id, item_key=item_key) }}"
+          data-stop-url="{{ url_for('api_reading_chat_stop', library_id=library.library_id, item_key=item_key) }}"
+          data-reset-url="{{ url_for('api_reading_chat_reset', library_id=library.library_id, item_key=item_key) }}"
+          {% endif %}>
+          <div class="reading-attachment-tray" data-reading-attachment-tray></div>
+          <textarea name="user_question" placeholder="围绕当前文献提问，例如：请解释这篇文献的方法流程，并指出关键实验结论。" {% if not item_key %}readonly{% endif %}></textarea>
+          <div class="reading-chat-controls">
+            <button class="reset-chat-btn" type="button" data-start-reading-screenshot>截图</button>
+            <button class="reset-chat-btn" type="button" data-reset-reading-chat>重置</button>
+            <button class="send-btn" type="submit" title="发送文献问题" aria-label="发送文献问题">➤</button>
+          </div>
+        </form>
       </aside>
     </section>
   </main>
   <script src="{{ url_for('static', filename='vendor/pdfjs/pdf.min.js') }}"></script>
   <script src="{{ url_for('static', filename='reader.js') }}"></script>
+  <script src="{{ url_for('static', filename='reader-chat.js') }}"></script>
 </body>
 </html>

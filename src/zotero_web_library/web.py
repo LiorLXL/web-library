@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import copy
+import datetime
 import hashlib
 import http.client
 import io
@@ -31,6 +32,9 @@ from .codex_agent import (
     build_agentic_rag_chat_prompt,
     run_codex_connectivity_probe as rag_codex_connectivity_probe,
     run_codex_prompt as rag_codex_prompt,
+    run_reading_chat_turn,
+    recommend_matrix_fields,
+    run_reading_matrix_for_item,
 )
 from .metadata_import import MetadataImportError, parse_import_text, resolve_identifier
 from .paths import app_data_dir
@@ -129,6 +133,11 @@ RETRIEVAL_BACKGROUND_JOB_HISTORY_LIMIT = 30
 RETRIEVAL_CONFIG_BUNDLE_SCHEMA = "web-library.retrieval-config-bundle/v1"
 RETRIEVAL_BATCH_CONTEXT_SCHEMA = "web-library.retrieval-batch-context/v1"
 RETRIEVAL_CONFIG_BUNDLE_REDACTED_VALUE = "__REDACTED__"
+
+# 单篇文献研读对话：异步任务 + 轮询 + 停止 + 持久化。
+READING_CHAT_LOCK = threading.Lock()
+READING_CHAT_TASKS: dict[str, dict[str, Any]] = {}
+READING_CHAT_HISTORY_LIMIT = 30
 API_CONFIG_PREFERENCE_KEY = "api_config"
 API_CONFIG_SECRET_KEEP_VALUE = "__KEEP_SECRET__"
 MINERU_API_KEY_ENV = "MINERU_API_KEY"
@@ -10436,6 +10445,538 @@ def _rag_chat_sources(evidence_pack: dict[str, Any]) -> list[dict[str, Any]]:
     return sources
 
 
+# ---------------------------------------------------------------------------
+# 单篇文献研读对话存储：聊天记录 + 线程状态 + 图片附件，落盘到 app-data。
+# ---------------------------------------------------------------------------
+
+def _reading_chat_dir(library_id: str, item_key: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_]", "_", str(library_id or "library"))
+    safe_item = re.sub(r"[^A-Za-z0-9_]", "_", str(item_key or "item"))
+    path = app_data_dir() / "libraries" / safe_id / "reading-chat" / safe_item
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _reading_chat_messages_path(library_id: str, item_key: str) -> Path:
+    return _reading_chat_dir(library_id, item_key) / "messages.json"
+
+
+def _reading_chat_state_path(library_id: str, item_key: str) -> Path:
+    return _reading_chat_dir(library_id, item_key) / "state.json"
+
+
+def _reading_chat_tasks_path(library_id: str, item_key: str) -> Path:
+    return _reading_chat_dir(library_id, item_key) / "tasks.json"
+
+
+def _reading_chat_assets_dir(library_id: str, item_key: str) -> Path:
+    path = _reading_chat_dir(library_id, item_key) / "assets"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _read_json_file(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+def _write_json_file(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+
+
+def load_reading_chat_messages(library_id: str, item_key: str) -> list[dict[str, Any]]:
+    return _read_json_file(_reading_chat_messages_path(library_id, item_key), []) or []
+
+
+def save_reading_chat_messages(library_id: str, item_key: str, messages: list[dict[str, Any]]) -> None:
+    _write_json_file(_reading_chat_messages_path(library_id, item_key), messages)
+
+
+def append_reading_chat_message(library_id: str, item_key: str, message: dict[str, Any]) -> None:
+    messages = load_reading_chat_messages(library_id, item_key)
+    messages.append(message)
+    save_reading_chat_messages(library_id, item_key, messages)
+
+
+def load_reading_chat_state(library_id: str, item_key: str) -> dict[str, Any]:
+    return _read_json_file(_reading_chat_state_path(library_id, item_key), {}) or {}
+
+
+def save_reading_chat_state(library_id: str, item_key: str, state: dict[str, Any]) -> None:
+    _write_json_file(_reading_chat_state_path(library_id, item_key), state)
+
+
+def load_reading_chat_tasks(library_id: str, item_key: str) -> list[dict[str, Any]]:
+    return _read_json_file(_reading_chat_tasks_path(library_id, item_key), []) or []
+
+
+def save_reading_chat_tasks(library_id: str, item_key: str, tasks: list[dict[str, Any]]) -> None:
+    _write_json_file(_reading_chat_tasks_path(library_id, item_key), tasks[-READING_CHAT_HISTORY_LIMIT:])
+
+
+def upsert_reading_chat_task(library_id: str, item_key: str, task: dict[str, Any]) -> None:
+    tasks = load_reading_chat_tasks(library_id, item_key)
+    run_id = task.get("run_id")
+    for index, existing in enumerate(tasks):
+        if existing.get("run_id") == run_id:
+            tasks[index] = {**existing, **task}
+            save_reading_chat_tasks(library_id, item_key, tasks)
+            return
+    tasks.append(task)
+    save_reading_chat_tasks(library_id, item_key, tasks)
+
+
+def append_reading_chat_task_event(library_id: str, item_key: str, run_id: str, message: str, kind: str = "info") -> None:
+    tasks = load_reading_chat_tasks(library_id, item_key)
+    for task in tasks:
+        if task.get("run_id") == run_id:
+            events = task.get("events") or []
+            events.append({"message": message, "kind": kind, "created_at": now_iso()})
+            task["events"] = events[-20:]
+            break
+    save_reading_chat_tasks(library_id, item_key, tasks)
+
+
+def reading_chat_task_is_running(library_id: str, item_key: str, run_id: str) -> bool:
+    for task in load_reading_chat_tasks(library_id, item_key):
+        if task.get("run_id") == run_id and task.get("status") == "running":
+            return True
+    return False
+
+
+def latest_reading_chat_task(library_id: str, item_key: str) -> dict[str, Any] | None:
+    tasks = load_reading_chat_tasks(library_id, item_key)
+    return tasks[-1] if tasks else None
+
+
+def serialize_reading_chat_messages(library_id: str, item_key: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    assets_dir = _reading_chat_assets_dir(library_id, item_key)
+    serialized: list[dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        attachments = []
+        for attachment in message.get("attachments") or []:
+            if not isinstance(attachment, dict):
+                continue
+            copied = dict(attachment)
+            filename = str(attachment.get("filename") or "").strip()
+            if filename:
+                copied["url"] = f"/api/library/{library_id}/items/{item_key}/reading-chat/asset/{filename}"
+            attachments.append(copied)
+        item["attachments"] = attachments
+        serialized.append(item)
+    return serialized
+
+
+def save_reading_chat_uploads(library_id: str, item_key: str, run_id: str, uploads: list[Any]) -> list[dict[str, Any]]:
+    allowed = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+    target_dir = _reading_chat_assets_dir(library_id, item_key)
+    attachments: list[dict[str, Any]] = []
+    for index, upload in enumerate(uploads[:6], start=1):
+        if not upload or not getattr(upload, "filename", ""):
+            continue
+        content_type = str(getattr(upload, "content_type", "") or "").lower().split(";", 1)[0]
+        ext = allowed.get(content_type)
+        if not ext:
+            filename_ext = Path(str(upload.filename)).suffix.lower().lstrip(".")
+            ext = filename_ext if filename_ext in {"png", "jpg", "jpeg", "webp", "gif"} else ""
+        if not ext:
+            continue
+        if ext == "jpeg":
+            ext = "jpg"
+        filename = f"{re.sub(r'[^A-Za-z0-9_]', '_', str(run_id))}-{index:02d}.{ext}"
+        target = target_dir / filename
+        upload.save(target)
+        attachments.append({"type": "image", "filename": filename, "size": target.stat().st_size})
+    return attachments
+
+
+def execute_reading_chat_task(
+    library_id: str,
+    item_key: str,
+    run_id: str,
+    user_question: str,
+    attachments: list[dict[str, Any]] | None = None,
+) -> None:
+    try:
+        library = app_store.get_library(library_id)
+        if not library:
+            raise RuntimeError("文库不存在。")
+        repo = ZoteroRepository(library)
+        item = next((value for value in repo.items() if value.get("key") == item_key), None)
+        if not item:
+            raise RuntimeError("当前文献条目不存在。")
+        pdf_path = ""
+        for attachment in item.get("attachments") or []:
+            if attachment.get("kind") == "pdf" and attachment.get("openable") and attachment.get("resolved_path"):
+                candidate = Path(attachment["resolved_path"])
+                if candidate.exists():
+                    pdf_path = str(candidate)
+                    break
+
+        state = load_reading_chat_state(library_id, item_key)
+        thread_id = state.get("thread_id")
+        include_paper_context = not thread_id
+        if include_paper_context:
+            append_reading_chat_task_event(library_id, item_key, run_id, "正在注入当前文献上下文。")
+        else:
+            append_reading_chat_task_event(library_id, item_key, run_id, "沿用当前文献研读线程中的上下文。")
+
+        codex_config = api_config_codex_for_library(library_id)
+        assets_dir = _reading_chat_assets_dir(library_id, item_key)
+        image_paths = [
+            str(assets_dir / attachment["filename"])
+            for attachment in (attachments or [])
+            if attachment.get("type") == "image" and attachment.get("filename")
+        ]
+
+        result = run_reading_chat_turn(
+            library=library,
+            codex_config=codex_config,
+            item=item,
+            pdf_path=pdf_path,
+            thread_id=thread_id,
+            user_question=user_question,
+            include_paper_context=include_paper_context,
+            image_paths=image_paths,
+            progress=lambda message: append_reading_chat_task_event(library_id, item_key, run_id, message),
+        )
+        if not reading_chat_task_is_running(library_id, item_key, run_id):
+            append_reading_chat_task_event(library_id, item_key, run_id, "用户已停止本次研读问答，丢弃迟到回复。")
+            return
+        thread_id = result.get("thread_id") or thread_id
+        save_reading_chat_state(
+            library_id,
+            item_key,
+            {
+                "thread_id": thread_id,
+                "created_at": state.get("created_at") or now_iso(),
+                "updated_at": now_iso(),
+                "item_key": item_key,
+            },
+        )
+        append_reading_chat_message(
+            library_id,
+            item_key,
+            {
+                "role": "assistant",
+                "content": result.get("assistant_message") or "文献研读问答已完成，但没有返回内容。",
+                "created_at": now_iso(),
+                "run_id": run_id,
+                "thread_id": thread_id,
+                "item_key": item_key,
+                "usage": result.get("usage"),
+            },
+        )
+        upsert_reading_chat_task(
+            library_id,
+            item_key,
+            {
+                "run_id": run_id,
+                "item_key": item_key,
+                "status": "success",
+                "finished_at": now_iso(),
+                "thread_id": thread_id,
+            },
+        )
+    except Exception as exc:
+        append_reading_chat_message(
+            library_id,
+            item_key,
+            {
+                "role": "assistant",
+                "content": f"文献研读问答失败：{exc}",
+                "created_at": now_iso(),
+                "run_id": run_id,
+                "item_key": item_key,
+                "error": True,
+                "attachments": attachments or [],
+            },
+        )
+        upsert_reading_chat_task(
+            library_id,
+            item_key,
+            {
+                "run_id": run_id,
+                "item_key": item_key,
+                "status": "failed",
+                "finished_at": now_iso(),
+                "error": str(exc),
+            },
+        )
+    finally:
+        with READING_CHAT_LOCK:
+            task_key = f"{library_id}:{item_key}"
+            if READING_CHAT_TASKS.get(task_key, {}).get("run_id") == run_id:
+                READING_CHAT_TASKS.pop(task_key, None)
+
+
+# ---- 单篇文献矩阵（字段管理 + 运行 + 进度 + 持久化） ----
+MATRIX_LOCK = threading.Lock()
+MATRIX_TASKS: dict[str, dict[str, Any]] = {}
+MATRIX_HISTORY_LIMIT = 30
+
+
+def _matrix_dir(library_id: str, knowledge_base_id: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_]", "_", str(library_id or "library"))
+    safe_kb = re.sub(r"[^A-Za-z0-9_]", "_", str(knowledge_base_id or "kb"))
+    return app_data_dir() / "libraries" / safe_id / "matrix" / safe_kb
+
+
+def _matrix_fields_path(library_id: str, knowledge_base_id: str) -> Path:
+    return _matrix_dir(library_id, knowledge_base_id) / "fields.json"
+
+
+def _matrix_item_path(library_id: str, knowledge_base_id: str, item_key: str) -> Path:
+    safe_item = re.sub(r"[^A-Za-z0-9_]", "_", str(item_key or "item"))
+    return _matrix_dir(library_id, knowledge_base_id) / "items" / f"{safe_item}.json"
+
+
+def _matrix_tasks_path(library_id: str, knowledge_base_id: str) -> Path:
+    return _matrix_dir(library_id, knowledge_base_id) / "tasks.json"
+
+
+def default_matrix_fields() -> list[dict[str, Any]]:
+    return [
+        {"field_id": "research_background", "name": "研究背景", "rule": "概述论文所解决的问题背景与研究动机，2-4 句中文。", "enabled": True},
+        {"field_id": "method_design", "name": "实验设计", "rule": "概括方法或实验设计的核心思路与关键设置。", "enabled": True},
+        {"field_id": "key_findings", "name": "关键结论", "rule": "列出 2-4 条最核心的实验结论或发现。", "enabled": True},
+        {"field_id": "contributions", "name": "创新点", "rule": "说明论文相对已有工作的主要贡献或创新之处。", "enabled": True},
+    ]
+
+
+def _slugify_field(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_\u4e00-\u9fff]+", "_", str(name or "")).strip("_").lower()
+    return slug or "field"
+
+
+def normalize_matrix_fields(raw_fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: dict[str, int] = {}
+    normalized: list[dict[str, Any]] = []
+    for entry in raw_fields or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        field_id = str(entry.get("field_id") or "").strip() or _slugify_field(name)
+        if field_id in seen:
+            seen[field_id] += 1
+            field_id = f"{field_id}-{seen[field_id]}"
+        else:
+            seen[field_id] = 1
+        normalized.append(
+            {
+                "field_id": field_id,
+                "name": name,
+                "rule": str(entry.get("rule") or "").strip(),
+                "enabled": bool(entry.get("enabled", True)),
+            }
+        )
+    if not normalized:
+        normalized = default_matrix_fields()
+    return normalized
+
+
+def load_matrix_fields(library_id: str, knowledge_base_id: str) -> list[dict[str, Any]]:
+    data = _read_json_file(_matrix_fields_path(library_id, knowledge_base_id), None)
+    if not isinstance(data, list) or not data:
+        return default_matrix_fields()
+    return data
+
+
+def save_matrix_fields(library_id: str, knowledge_base_id: str, fields: list[dict[str, Any]]) -> None:
+    _write_json_file(_matrix_fields_path(library_id, knowledge_base_id), fields)
+
+
+def load_matrix_item_values(library_id: str, knowledge_base_id: str, item_key: str) -> dict[str, Any]:
+    data = _read_json_file(_matrix_item_path(library_id, knowledge_base_id, item_key), {}) or {}
+    return data.get("values", {}) if isinstance(data, dict) else {}
+
+
+def save_matrix_item_values(library_id: str, knowledge_base_id: str, item_key: str, values: dict[str, Any]) -> None:
+    _write_json_file(
+        _matrix_item_path(library_id, knowledge_base_id, item_key),
+        {"item_key": item_key, "values": values, "updated_at": now_iso()},
+    )
+
+
+def load_matrix_tasks(library_id: str, knowledge_base_id: str) -> list[dict[str, Any]]:
+    return _read_json_file(_matrix_tasks_path(library_id, knowledge_base_id), []) or []
+
+
+def save_matrix_tasks(library_id: str, knowledge_base_id: str, tasks: list[dict[str, Any]]) -> None:
+    _write_json_file(_matrix_tasks_path(library_id, knowledge_base_id), tasks[-MATRIX_HISTORY_LIMIT:])
+
+
+def upsert_matrix_task(library_id: str, knowledge_base_id: str, task: dict[str, Any]) -> None:
+    tasks = load_matrix_tasks(library_id, knowledge_base_id)
+    replaced = False
+    for index, existing in enumerate(tasks):
+        if isinstance(existing, dict) and existing.get("run_id") == task.get("run_id"):
+            tasks[index] = {**existing, **task}
+            replaced = True
+            break
+    if not replaced:
+        tasks.append(task)
+    save_matrix_tasks(library_id, knowledge_base_id, tasks)
+
+
+def append_matrix_task_event(library_id: str, knowledge_base_id: str, run_id: str, message: str, kind: str = "info") -> None:
+    tasks = load_matrix_tasks(library_id, knowledge_base_id)
+    for task in tasks:
+        if isinstance(task, dict) and task.get("run_id") == run_id:
+            events = task.setdefault("events", [])
+            events.append({"kind": kind, "message": message, "created_at": now_iso()})
+            task["events"] = events[-40:]
+            save_matrix_tasks(library_id, knowledge_base_id, tasks)
+            return
+
+
+def matrix_task_is_running(library_id: str, knowledge_base_id: str, run_id: str) -> bool:
+    for task in load_matrix_tasks(library_id, knowledge_base_id):
+        if isinstance(task, dict) and task.get("run_id") == run_id:
+            return task.get("status") == "running"
+    return False
+
+
+def latest_matrix_task(library_id: str, knowledge_base_id: str) -> dict[str, Any] | None:
+    tasks = load_matrix_tasks(library_id, knowledge_base_id)
+    return tasks[-1] if tasks else None
+
+
+def _first_pdf_path(item: dict[str, Any]) -> str:
+    for attachment in item.get("attachments") or []:
+        if attachment.get("kind") == "pdf" and attachment.get("openable") and attachment.get("resolved_path"):
+            candidate = Path(attachment["resolved_path"])
+            if candidate.exists():
+                return str(candidate)
+    return ""
+
+
+def execute_matrix_task(
+    library_id: str,
+    knowledge_base_id: str,
+    run_id: str,
+    item_keys: list[str],
+    mode: str,
+) -> None:
+    try:
+        library = app_store.get_library(library_id)
+        if not library:
+            raise RuntimeError("文库不存在。")
+        repo = ZoteroRepository(library)
+        items = {value["key"]: value for value in repo.items() if isinstance(value, dict) and value.get("key")}
+        fields = [field for field in load_matrix_fields(library_id, knowledge_base_id) if field.get("enabled", True)]
+        if not fields:
+            raise RuntimeError("当前没有启用任何文献矩阵字段，请先新增或 AI 推荐字段。")
+        codex_config = api_config_codex_for_library(library_id)
+
+        total = len(item_keys)
+        task = {
+            "run_id": run_id,
+            "status": "running",
+            "knowledge_base_id": knowledge_base_id,
+            "selected_item_keys": item_keys,
+            "mode": mode,
+            "total": total,
+            "completed": 0,
+            "failed": 0,
+            "skipped_no_pdf": 0,
+            "skipped_existing": 0,
+            "current_item_key": "",
+            "current_title": "",
+            "started_at": now_iso(),
+            "finished_at": "",
+            "events": [],
+        }
+        upsert_matrix_task(library_id, knowledge_base_id, task)
+
+        completed = failed = skipped_no_pdf = skipped_existing = 0
+        for index, item_key in enumerate(item_keys, start=1):
+            if not matrix_task_is_running(library_id, knowledge_base_id, run_id):
+                append_matrix_task_event(library_id, knowledge_base_id, run_id, "用户已停止文献矩阵任务。")
+                break
+            item = items.get(item_key)
+            if not item:
+                append_matrix_task_event(library_id, knowledge_base_id, run_id, f"条目 {item_key} 不存在，已跳过。", "warning")
+                failed += 1
+                task.update(completed=completed, failed=failed, skipped_no_pdf=skipped_no_pdf, skipped_existing=skipped_existing, current_item_key="", current_title="")
+                upsert_matrix_task(library_id, knowledge_base_id, task)
+                continue
+            title = str(item.get("title") or item_key)
+            pdf_path = _first_pdf_path(item)
+            task.update(current_item_key=item_key, current_title=title)
+            upsert_matrix_task(library_id, knowledge_base_id, task)
+            if not pdf_path:
+                append_matrix_task_event(library_id, knowledge_base_id, run_id, f"[{index}/{total}] {title}：未找到本地 PDF，已跳过。", "warning")
+                skipped_no_pdf += 1
+                task.update(completed=completed, failed=failed, skipped_no_pdf=skipped_no_pdf, skipped_existing=skipped_existing)
+                upsert_matrix_task(library_id, knowledge_base_id, task)
+                continue
+            existing = load_matrix_item_values(library_id, knowledge_base_id, item_key)
+            if mode == "skip_existing" and any(str(v.get("value") or "").strip() for v in existing.values() if isinstance(v, dict)):
+                append_matrix_task_event(library_id, knowledge_base_id, run_id, f"[{index}/{total}] {title}：已有结果，跳过。", "info")
+                skipped_existing += 1
+                task.update(completed=completed, failed=failed, skipped_no_pdf=skipped_no_pdf, skipped_existing=skipped_existing)
+                upsert_matrix_task(library_id, knowledge_base_id, task)
+                continue
+            append_matrix_task_event(library_id, knowledge_base_id, run_id, f"[{index}/{total}] 正在处理：{title}", "info")
+            try:
+                result = run_reading_matrix_for_item(
+                    library=library,
+                    codex_config=codex_config,
+                    item=item,
+                    fields=fields,
+                    pdf_path=pdf_path,
+                    progress=lambda message: append_matrix_task_event(library_id, knowledge_base_id, run_id, message),
+                )
+                new_values = result.get("values", {})
+                if mode == "overwrite_existing":
+                    merged = {**existing, **new_values}
+                else:
+                    merged = {**new_values, **existing}
+                save_matrix_item_values(library_id, knowledge_base_id, item_key, merged)
+                completed += 1
+                append_matrix_task_event(library_id, knowledge_base_id, run_id, f"[{index}/{total}] {title}：已完成。", "info")
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                append_matrix_task_event(library_id, knowledge_base_id, run_id, f"[{index}/{total}] {title} 处理失败：{exc}", "error")
+            task.update(completed=completed, failed=failed, skipped_no_pdf=skipped_no_pdf, skipped_existing=skipped_existing)
+            upsert_matrix_task(library_id, knowledge_base_id, task)
+
+        status = "failed" if failed and completed == 0 and skipped_no_pdf == 0 and skipped_existing == 0 else "success"
+        upsert_matrix_task(
+            library_id,
+            knowledge_base_id,
+            {**task, "status": status, "finished_at": now_iso()},
+        )
+    except Exception as exc:  # noqa: BLE001
+        upsert_matrix_task(
+            library_id,
+            knowledge_base_id,
+            {
+                "run_id": run_id,
+                "status": "failed",
+                "finished_at": now_iso(),
+                "error": str(exc),
+                "events": [{"kind": "error", "message": str(exc), "created_at": now_iso()}],
+            },
+        )
+    finally:
+        with MATRIX_LOCK:
+            MATRIX_TASKS.pop(f"{library_id}:{knowledge_base_id}", None)
+
+
 def create_app() -> Flask:
     mimetypes.add_type("application/javascript", ".js")
     mimetypes.add_type("application/javascript", ".mjs")
@@ -11372,7 +11913,15 @@ def create_app() -> Flask:
     def reader_page(library_id: str):
         library = library_or_404(library_id)
         libraries = app_store.list_libraries()
-        return render_template("reader.html", library=library, libraries=libraries)
+        item_key = str(request.args.get("item_key") or "").strip()
+        attachment_key = str(request.args.get("attachment_key") or "").strip()
+        return render_template(
+            "reader.html",
+            library=library,
+            libraries=libraries,
+            item_key=item_key,
+            attachment_key=attachment_key,
+        )
 
     @app.get("/library/<library_id>/api-config")
     def api_config_page(library_id: str):
@@ -13679,6 +14228,321 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": str(exc)}), 400
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)}), 400
+
+    # ---- 单篇文献研读对话（异步任务 + 轮询 + 停止 + 持久化） ----
+
+    @app.post("/api/library/<library_id>/items/<item_key>/reading-chat/run")
+    def api_reading_chat_run(library_id: str, item_key: str):
+        library_or_404(library_id)
+        task_key = f"{library_id}:{item_key}"
+        with READING_CHAT_LOCK:
+            if READING_CHAT_TASKS.get(task_key, {}).get("status") == "running":
+                return jsonify({"ok": False, "error": "当前文献已有研读问答正在运行。"}), 409
+        if request.is_json:
+            payload = request.get_json(silent=True) or {}
+            user_question = str(payload.get("user_question") or payload.get("question") or "").strip()
+            attachments = []
+        else:
+            payload = {}
+            user_question = str(request.form.get("user_question") or "").strip()
+            attachments = save_reading_chat_uploads(library_id, item_key, f"run-{now_iso()}", request.files.getlist("images"))
+        if not user_question and not attachments:
+            return jsonify({"ok": False, "error": "请输入研读问题，或先截图/粘贴一张图片。"}), 400
+        run_id = f"readqa-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        user_message = {
+            "role": "user",
+            "content": user_question or "请根据我附加的图片回答。",
+            "created_at": now_iso(),
+            "run_id": run_id,
+            "item_key": item_key,
+            "attachments": attachments,
+        }
+        append_reading_chat_message(library_id, item_key, user_message)
+        upsert_reading_chat_task(
+            library_id,
+            item_key,
+            {
+                "run_id": run_id,
+                "item_key": item_key,
+                "user_question": user_message["content"],
+                "status": "running",
+                "started_at": now_iso(),
+                "attachment_count": len(attachments),
+                "events": [],
+            },
+        )
+        thread = threading.Thread(
+            target=execute_reading_chat_task,
+            args=(library_id, item_key, run_id, user_message["content"], attachments),
+            daemon=True,
+        )
+        with READING_CHAT_LOCK:
+            READING_CHAT_TASKS[task_key] = {"run_id": run_id, "status": "running", "thread": thread}
+        thread.start()
+        return jsonify(
+            {
+                "ok": True,
+                "run_id": run_id,
+                "user_message": serialize_reading_chat_messages(library_id, item_key, [user_message])[0],
+                "messages": serialize_reading_chat_messages(library_id, item_key, load_reading_chat_messages(library_id, item_key)),
+            }
+        )
+
+    @app.get("/api/library/<library_id>/items/<item_key>/reading-chat/status")
+    def api_reading_chat_status(library_id: str, item_key: str):
+        library_or_404(library_id)
+        latest = latest_reading_chat_task(library_id, item_key)
+        messages = load_reading_chat_messages(library_id, item_key)
+        return jsonify(
+            {
+                "running": bool(latest and latest.get("status") == "running"),
+                "latest": latest,
+                "messages": serialize_reading_chat_messages(library_id, item_key, messages),
+                "message_count": len(messages),
+            }
+        )
+
+    @app.post("/api/library/<library_id>/items/<item_key>/reading-chat/stop")
+    def api_reading_chat_stop(library_id: str, item_key: str):
+        library_or_404(library_id)
+        latest = latest_reading_chat_task(library_id, item_key)
+        if latest and latest.get("status") == "running":
+            run_id = latest.get("run_id", "")
+            append_reading_chat_task_event(library_id, item_key, run_id, "用户已停止本次文献研读问答。", kind="warning")
+            upsert_reading_chat_task(
+                library_id,
+                item_key,
+                {
+                    "run_id": run_id,
+                    "item_key": item_key,
+                    "status": "stopped",
+                    "finished_at": now_iso(),
+                },
+            )
+            append_reading_chat_message(
+                library_id,
+                item_key,
+                {
+                    "role": "assistant",
+                    "content": "已停止本次文献研读问答。当前文献对话记忆会保留，下一次可以继续提问；如果想清空记忆，请点击“重置”。",
+                    "created_at": now_iso(),
+                    "run_id": run_id,
+                    "item_key": item_key,
+                    "stopped": True,
+                },
+            )
+        return jsonify(
+            {
+                "ok": True,
+                "messages": serialize_reading_chat_messages(library_id, item_key, load_reading_chat_messages(library_id, item_key)),
+                "latest": latest,
+            }
+        )
+
+    @app.post("/api/library/<library_id>/items/<item_key>/reading-chat/reset")
+    def api_reading_chat_reset(library_id: str, item_key: str):
+        library_or_404(library_id)
+        task_key = f"{library_id}:{item_key}"
+        with READING_CHAT_LOCK:
+            if READING_CHAT_TASKS.get(task_key, {}).get("status") == "running":
+                return jsonify({"ok": False, "error": "当前有研读问答正在运行，请完成后再重置。"}), 409
+        divider = {
+            "role": "divider",
+            "content": "新的对话",
+            "created_at": now_iso(),
+        }
+        save_reading_chat_state(library_id, item_key, {})
+        append_reading_chat_message(library_id, item_key, divider)
+        return jsonify(
+            {
+                "ok": True,
+                "messages": serialize_reading_chat_messages(library_id, item_key, load_reading_chat_messages(library_id, item_key)),
+            }
+        )
+
+    @app.get("/api/library/<library_id>/items/<item_key>/reading-chat/asset/<filename>")
+    def api_reading_chat_asset(library_id: str, item_key: str, filename: str):
+        library_or_404(library_id)
+        safe_name = Path(filename).name
+        if safe_name != filename:
+            return jsonify({"ok": False, "error": "invalid filename"}), 400
+        asset_path = _reading_chat_assets_dir(library_id, item_key) / safe_name
+        if not asset_path.is_file():
+            return jsonify({"ok": False, "error": "asset not found"}), 404
+        return send_file(asset_path)
+
+    # ---- 单篇文献矩阵（字段管理 + 运行 + 进度 + 持久化） ----
+
+    def _matrix_item_summaries(library_id: str, library: dict[str, Any], knowledge_base_id: str) -> list[dict[str, Any]]:
+        if not knowledge_base_id:
+            return []
+        try:
+            kb = rag_knowledge_base(library, knowledge_base_id)
+        except (SourceError, ValueError, OSError, sqlite3.Error):
+            return []
+        kb_items = kb.get("items") if isinstance(kb.get("items"), list) else []
+        repo_items = {it["key"]: it for it in ZoteroRepository(library).items() if isinstance(it, dict) and it.get("key")}
+        summaries = []
+        for kb_item in kb_items:
+            key = str(kb_item.get("item_key") or "")
+            repo_item = repo_items.get(key, {})
+            summaries.append(
+                {
+                    "key": key,
+                    "title": kb_item.get("title") or repo_item.get("title", ""),
+                    "creators_display": repo_item.get("creators_display", ""),
+                    "year": kb_item.get("year") or repo_item.get("year", ""),
+                    "venue": kb_item.get("venue") or repo_item.get("venue", ""),
+                    "has_pdf": bool(_first_pdf_path(repo_item)),
+                    "values": load_matrix_item_values(library_id, knowledge_base_id, key),
+                }
+            )
+        return summaries
+
+    @app.get("/api/library/<library_id>/matrix")
+    def api_matrix_state(library_id: str):
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        knowledge_base_id = str(request.args.get("knowledge_base_id") or payload.get("knowledge_base_id") or "").strip()
+        if not knowledge_base_id:
+            return jsonify({"ok": True, "knowledge_base_id": "", "fields": [], "items": [], "running": False, "latest": None})
+        latest = latest_matrix_task(library_id, knowledge_base_id)
+        return jsonify(
+            {
+                "ok": True,
+                "knowledge_base_id": knowledge_base_id,
+                "fields": load_matrix_fields(library_id, knowledge_base_id),
+                "items": _matrix_item_summaries(library_id, library, knowledge_base_id),
+                "running": bool(latest and latest.get("status") == "running"),
+                "latest": latest,
+            }
+        )
+
+    @app.post("/api/library/<library_id>/matrix/fields")
+    def api_matrix_save_fields(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        knowledge_base_id = str(request.args.get("knowledge_base_id") or payload.get("knowledge_base_id") or "").strip()
+        if not knowledge_base_id:
+            return jsonify({"ok": False, "error": "缺少 knowledge_base_id"}), 400
+        raw = payload.get("fields")
+        if not isinstance(raw, list):
+            return jsonify({"ok": False, "error": "fields 必须是数组"}), 400
+        fields = normalize_matrix_fields(raw)
+        save_matrix_fields(library_id, knowledge_base_id, fields)
+        return jsonify({"ok": True, "fields": fields})
+
+    @app.post("/api/library/<library_id>/matrix/recommend-fields")
+    def api_matrix_recommend_fields(library_id: str):
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        knowledge_base_id = str(request.args.get("knowledge_base_id") or payload.get("knowledge_base_id") or "").strip()
+        if not knowledge_base_id:
+            return jsonify({"ok": False, "error": "缺少 knowledge_base_id"}), 400
+        item_keys = payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else []
+        try:
+            kb = rag_knowledge_base(library, knowledge_base_id)
+            kb_items = kb.get("items") if isinstance(kb.get("items"), list) else []
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": f"知识库不存在：{exc}"}), 400
+        kb_keys = {str(it.get("item_key") or "") for it in kb_items}
+        selected_keys = [k for k in (item_keys or []) if k in kb_keys] if item_keys else list(kb_keys)
+        if not selected_keys:
+            return jsonify({"ok": False, "error": "当前知识库没有可推荐的论文。"}), 400
+        repo_items = {it["key"]: it for it in ZoteroRepository(library).items() if isinstance(it, dict) and it.get("key")}
+        selected = [repo_items.get(k, {"key": k, "title": "", "creators": [], "fields": {}}) for k in selected_keys]
+        try:
+            codex_config = api_config_codex_for_library(library_id)
+            recommended = recommend_matrix_fields(
+                library=library,
+                codex_config=codex_config,
+                items=selected,
+                existing_fields=load_matrix_fields(library_id, knowledge_base_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": f"AI 推荐字段失败：{exc}"}), 500
+        return jsonify({"ok": True, "fields": recommended, "source_count": len(selected_keys)})
+
+    @app.post("/api/library/<library_id>/matrix/run")
+    def api_matrix_run(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        knowledge_base_id = str(request.args.get("knowledge_base_id") or payload.get("knowledge_base_id") or "").strip()
+        if not knowledge_base_id:
+            return jsonify({"ok": False, "error": "缺少 knowledge_base_id"}), 400
+        task_key = f"{library_id}:{knowledge_base_id}"
+        with MATRIX_LOCK:
+            if MATRIX_TASKS.get(task_key, {}).get("status") == "running":
+                return jsonify({"ok": False, "error": "已有文献矩阵任务正在运行。"}), 409
+        item_keys = [str(k) for k in (payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else []) if str(k).strip()]
+        if not item_keys:
+            return jsonify({"ok": False, "error": "请至少选择一篇文献。"}), 400
+        mode = str(payload.get("mode") or "skip_existing")
+        if mode not in ("skip_existing", "overwrite_existing"):
+            mode = "skip_existing"
+        run_id = f"matrix-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        upsert_matrix_task(
+            library_id,
+            knowledge_base_id,
+            {
+                "run_id": run_id,
+                "status": "running",
+                "knowledge_base_id": knowledge_base_id,
+                "selected_item_keys": item_keys,
+                "mode": mode,
+                "total": len(item_keys),
+                "completed": 0,
+                "failed": 0,
+                "skipped_no_pdf": 0,
+                "skipped_existing": 0,
+                "current_item_key": "",
+                "current_title": "",
+                "started_at": now_iso(),
+                "finished_at": "",
+                "events": [],
+            },
+        )
+        thread = threading.Thread(
+            target=execute_matrix_task,
+            args=(library_id, knowledge_base_id, run_id, item_keys, mode),
+            daemon=True,
+        )
+        with MATRIX_LOCK:
+            MATRIX_TASKS[task_key] = {"run_id": run_id, "status": "running", "thread": thread}
+        thread.start()
+        return jsonify({"ok": True, "run_id": run_id})
+
+    @app.get("/api/library/<library_id>/matrix/status")
+    def api_matrix_status(library_id: str):
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        knowledge_base_id = str(request.args.get("knowledge_base_id") or payload.get("knowledge_base_id") or "").strip()
+        latest = latest_matrix_task(library_id, knowledge_base_id) if knowledge_base_id else None
+        return jsonify(
+            {
+                "ok": True,
+                "running": bool(latest and latest.get("status") == "running"),
+                "latest": latest,
+                "fields": load_matrix_fields(library_id, knowledge_base_id) if knowledge_base_id else [],
+                "items": _matrix_item_summaries(library_id, library, knowledge_base_id) if knowledge_base_id else [],
+            }
+        )
+
+    @app.post("/api/library/<library_id>/matrix/stop")
+    def api_matrix_stop(library_id: str):
+        library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        knowledge_base_id = str(request.args.get("knowledge_base_id") or payload.get("knowledge_base_id") or "").strip()
+        if not knowledge_base_id:
+            return jsonify({"ok": False, "error": "缺少 knowledge_base_id"}), 400
+        latest = latest_matrix_task(library_id, knowledge_base_id)
+        if not latest or latest.get("status") != "running":
+            return jsonify({"ok": False, "error": "当前没有正在运行的文献矩阵任务。"}), 400
+        upsert_matrix_task(library_id, knowledge_base_id, {**latest, "status": "stopped", "finished_at": now_iso()})
+        append_matrix_task_event(library_id, knowledge_base_id, latest.get("run_id"), "用户已停止文献矩阵任务。")
+        with MATRIX_LOCK:
+            MATRIX_TASKS.pop(f"{library_id}:{knowledge_base_id}", None)
+        return jsonify({"ok": True, "latest": latest_matrix_task(library_id, knowledge_base_id)})
 
     @app.post("/api/library/<library_id>/rag/tools/keyword_search")
     def api_rag_keyword_search(library_id: str):

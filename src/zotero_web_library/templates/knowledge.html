@@ -13,6 +13,7 @@
     <a class="rail-btn" title="文库" href="{{ url_for('library_page', library_id=library.library_id) }}">库</a>
     <a class="rail-btn active" title="知识库" href="{{ url_for('knowledge_page', library_id=library.library_id) }}">知</a>
     <a class="rail-btn" title="文献研读" href="{{ url_for('reader_page', library_id=library.library_id) }}">读</a>
+
     <a class="rail-btn" title="API 配置" href="{{ url_for('api_config_page', library_id=library.library_id) }}">配</a>
   </aside>
   <main class="workspace app-page-shell">
@@ -57,6 +58,7 @@
             <button class="ghost-btn small" type="button" data-recommend-matrix-fields>AI 推荐字段</button>
             <button class="ghost-btn small" type="button" data-save-matrix-fields>保存字段</button>
             <button class="ghost-btn small matrix-run-btn" type="button" data-run-reading-matrix aria-label="运行文献矩阵" title="运行文献矩阵">运行</button>
+            <button class="ghost-btn small matrix-stop-btn" type="button" data-stop-reading-matrix hidden aria-label="停止文献矩阵" title="停止文献矩阵">停止</button>
           </div>
         </div>
         <div class="knowledge-matrix-body">

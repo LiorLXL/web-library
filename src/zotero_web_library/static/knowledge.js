@@ -13,11 +13,11 @@ const knowledgeState = {
   searchBusy: false,
   chatBusy: false,
   chatMessages: [],
-  matrixFields: [
-    { id: "source-1", name: "元数据", rule: "Zotero title / authors / year / venue / abstract" },
-    { id: "source-2", name: "笔记", rule: "Zotero notes indexed as note chunks" },
-    { id: "source-3", name: "PDF 解析", rule: "MinerU markdown chunks and image assets" },
-  ],
+  matrixFields: [],
+  matrixItems: [],
+  matrixRunning: false,
+  matrixLatest: null,
+  matrixPollTimer: null,
 };
 
 function knowledgeQuery(selector) {
@@ -55,12 +55,13 @@ function activeKnowledgeLibrary() {
   return knowledgeState.activeBase || knowledgeState.knowledgeBases.find((entry) => entry.knowledge_base_id === knowledgeState.activeId) || null;
 }
 
-function activeKnowledgeItems() {
-  return activeKnowledgeLibrary()?.items || [];
-}
-
 function knowledgeApi(path) {
   return `/api/library/${knowledgeState.libraryId}/rag${path}`;
+}
+
+function matrixApi(path) {
+  const kb = knowledgeState.activeId || "";
+  return `/api/library/${knowledgeState.libraryId}/matrix${path}?knowledge_base_id=${encodeURIComponent(kb)}`;
 }
 
 function setKnowledgeMessage(message) {
@@ -71,14 +72,41 @@ function setKnowledgeMessage(message) {
 function renderKnowledgeStatus() {
   const status = knowledgeQuery("[data-reading-matrix-status]");
   if (!status) return;
-  const active = activeKnowledgeLibrary();
-  const count = active ? Number(active.item_count || active.items?.length || 0) : 0;
-  const chunks = active ? Number(active.chunk_count || 0) : 0;
-  const docs = active ? Number(active.document_count || 0) : 0;
-  const baseText = active
-    ? `当前知识库包含 ${count} 条文献、${docs} 份索引文档、${chunks} 个 chunk。`
-    : "还没有选择知识库。";
-  status.innerHTML = `<span>${escapeKnowledgeHtml(knowledgeState.message || baseText)}</span>`;
+  const latest = knowledgeState.matrixLatest;
+  let html = "";
+
+  if (knowledgeState.matrixRunning && latest) {
+    const done =
+      (latest.completed || 0) + (latest.failed || 0) + (latest.skipped_no_pdf || 0) + (latest.skipped_existing || 0);
+    html += `<span>文献矩阵运行中：进度 ${done}/${latest.total || 0}（完成 ${latest.completed || 0} · 失败 ${latest.failed || 0} · 无PDF ${latest.skipped_no_pdf || 0} · 跳过 ${latest.skipped_existing || 0}）。</span>`;
+  } else if (knowledgeState.message) {
+    html += `<span>${escapeKnowledgeHtml(knowledgeState.message)}</span>`;
+  } else if (!knowledgeState.matrixRunning && latest) {
+    if (latest.status === "failed") {
+      html += `<span>文献矩阵任务失败：${escapeKnowledgeHtml(latest.error || "未知错误，请检查 API 配置或本地 PDF 是否存在。")}</span>`;
+    } else if (latest.status === "success") {
+      html += `<span>文献矩阵已完成：成功 ${latest.completed || 0} · 失败 ${latest.failed || 0} · 无PDF ${latest.skipped_no_pdf || 0} · 跳过 ${latest.skipped_existing || 0}。</span>`;
+    }
+  }
+
+  const events = (latest && Array.isArray(latest.events)) ? latest.events : [];
+  if (events.length) {
+    const lines = events.map((e) => {
+      const kind = escapeKnowledgeHtml(e.kind || "info");
+      const msg = escapeKnowledgeHtml(e.message || "");
+      return `<div class="matrix-event matrix-event-${kind}">${msg}</div>`;
+    }).join("");
+    html += `<div class="matrix-event-log" data-reading-matrix-events>${lines}</div>`;
+  }
+
+  if (!html) {
+    const enabledCount = knowledgeState.matrixFields.filter((field) => field.enabled).length;
+    html = `<span>文献矩阵共 ${knowledgeState.matrixFields.length} 个字段（启用 ${enabledCount} 个）。勾选矩阵表格中的文献后点“运行”批量生成。</span>`;
+  }
+
+  status.innerHTML = html;
+  const logEl = status.querySelector("[data-reading-matrix-events]");
+  if (logEl) logEl.scrollTop = logEl.scrollHeight;
 }
 
 async function loadKnowledgeBases({ keepActive = true } = {}) {
@@ -114,14 +142,15 @@ async function loadKnowledgeBaseDetail(knowledgeBaseId) {
   }
   try {
     const data = await knowledgeJSON(knowledgeApi(`/knowledge-bases/${encodeURIComponent(cleanId)}`));
-    knowledgeState.activeBase = data.knowledge_base || null;
-    knowledgeState.activeId = cleanId;
+  knowledgeState.activeBase = data.knowledge_base || null;
+  knowledgeState.activeId = cleanId;
   } catch (error) {
     knowledgeState.activeBase = null;
     setKnowledgeMessage(error.message);
   }
   renderKnowledgeList();
   renderKnowledgeMatrix();
+  loadMatrixState();
 }
 
 async function createKnowledgeBaseFromPrompt() {
@@ -280,67 +309,129 @@ function renderKnowledgeList() {
 function renderMatrixFields() {
   const host = knowledgeQuery("[data-matrix-field-list]");
   if (!host) return;
+  if (!knowledgeState.matrixFields.length) {
+    host.innerHTML = `<article class="matrix-field-empty">还没有字段，点击“新增字段”或“AI 推荐字段”添加。</article>`;
+    return;
+  }
   host.innerHTML = knowledgeState.matrixFields
     .map(
-      (field) => `
-    <article class="matrix-field-card" data-field-id="${field.id}">
+      (field, index) => `
+    <article class="matrix-field-card" data-field-index="${index}">
       <label>
-        <span>索引源</span>
-        <input value="${escapeKnowledgeHtml(field.name)}" readonly>
+        <span>字段名</span>
+        <input type="text" value="${escapeKnowledgeHtml(field.name)}" data-field-name>
       </label>
       <label>
-        <span>当前用途</span>
-        <textarea readonly>${escapeKnowledgeHtml(field.rule)}</textarea>
+        <span>判断依据与格式要求</span>
+        <textarea data-field-rule>${escapeKnowledgeHtml(field.rule)}</textarea>
       </label>
+      <button type="button" class="icon-action-btn danger" data-remove-field title="删除字段">×</button>
     </article>
   `,
     )
     .join("");
 }
 
-function renderKnowledgeMatrix() {
-  const active = activeKnowledgeLibrary();
-  const items = activeKnowledgeItems();
-  const title = knowledgeQuery("[data-knowledge-current-title]");
+function enabledMatrixFields() {
+  return knowledgeState.matrixFields;
+}
+
+const matrixColumnWidths = {};
+
+function renderKnowledgeMatrixTable() {
   const head = knowledgeQuery("[data-knowledge-matrix-head]");
   const body = knowledgeQuery("[data-knowledge-matrix-body]");
-  if (title) title.textContent = active ? `${active.name} · 文献与索引状态` : "选择或新建知识库后查看条目";
-  renderKnowledgeStatus();
-  renderMatrixFields();
-  renderKnowledgeSearchPanel();
-  renderKnowledgeChat();
-  updateKnowledgeDeleteButton();
   if (!head || !body) return;
+  const cols = enabledMatrixFields();
   head.innerHTML = `
     <tr>
-      <th>文献</th>
-      <th>年份</th>
-      <th>来源</th>
-      <th>索引文档</th>
-      <th>Chunks</th>
-    </tr>
-  `;
-  if (!active) {
-    body.innerHTML = `<tr><td colspan="5">暂无知识库。</td></tr>`;
-    return;
-  }
+      <th class="col-select" data-col-key="col-select"><input type="checkbox" data-select-all><span class="col-resizer" data-col-resize></span></th>
+      <th class="col-title" data-col-key="col-title">名称<span class="col-resizer" data-col-resize></span></th>
+      ${cols.map((field) => `<th class="col-field" data-col-key="col-field-${field.field_id}" title="${escapeKnowledgeHtml(field.rule)}">${escapeKnowledgeHtml(field.name)}<span class="col-resizer" data-col-resize></span></th>`).join("")}
+      <th class="col-pdf" data-col-key="col-pdf">PDF<span class="col-resizer" data-col-resize></span></th>
+    </tr>`;
+  head.querySelectorAll("th[data-col-key]").forEach((th) => {
+    const key = th.getAttribute("data-col-key");
+    if (matrixColumnWidths[key]) th.style.width = matrixColumnWidths[key];
+  });
+  head.querySelectorAll("[data-col-resize]").forEach((handle) => {
+    handle.addEventListener("mousedown", onMatrixColResizeStart);
+  });
+  const items = knowledgeState.matrixItems || [];
   if (!items.length) {
-    body.innerHTML = `<tr><td colspan="5">这个知识库还没有条目。可从文库页勾选文献后点击“导入知识库”。</td></tr>`;
+    body.innerHTML = `<tr><td colspan="${cols.length + 3}">当前知识库还没有导入的文献条目。</td></tr>`;
     return;
   }
   body.innerHTML = items
-    .map(
-      (item) => `
-    <tr>
-      <td><strong>${escapeKnowledgeHtml(item.title || item.item_key)}</strong><small>${escapeKnowledgeHtml(item.item_key || "")}</small></td>
-      <td>${escapeKnowledgeHtml(item.year || "-")}</td>
-      <td>${escapeKnowledgeHtml(item.venue || "-")}</td>
-      <td>${Number(item.document_count || 0)}</td>
-      <td>${Number(item.chunk_count || 0)}</td>
-    </tr>
-  `,
-    )
+    .map((item) => {
+      const cells = cols
+        .map((field) => {
+          const value = (item.values && item.values[field.field_id]) || {};
+          const text = value.value || "—";
+          return `<td class="col-field" title="${escapeKnowledgeHtml(text)}">${escapeKnowledgeHtml(text)}</td>`;
+        })
+        .join("");
+      return `
+    <tr data-item-key="${escapeKnowledgeHtml(item.key)}">
+      <td class="col-select"><input type="checkbox" data-item-select></td>
+      <td class="col-title">
+        <div class="matrix-item-title">${escapeKnowledgeHtml(item.title)}</div>
+        <div class="matrix-item-meta">${escapeKnowledgeHtml([item.creators_display, item.year, item.venue].filter(Boolean).join(" · "))}</div>
+      </td>
+      ${cells}
+      <td class="col-pdf">${item.has_pdf ? "有" : "无"}</td>
+    </tr>`;
+    })
     .join("");
+  const selectAll = head.querySelector("[data-select-all]");
+  if (selectAll) {
+    selectAll.addEventListener("change", () => {
+      body.querySelectorAll("[data-item-select]").forEach((box) => {
+        box.checked = selectAll.checked;
+      });
+    });
+  }
+}
+
+function onMatrixColResizeStart(event) {
+  event.preventDefault();
+  const handle = event.currentTarget;
+  const th = handle.closest("th");
+  if (!th) return;
+  const startX = event.clientX;
+  const startWidth = th.getBoundingClientRect().width;
+  th.classList.add("resizing");
+  document.body.classList.add("col-resizing");
+
+  function onMove(ev) {
+    const dx = ev.clientX - startX;
+    const newWidth = Math.max(64, startWidth + dx);
+    th.style.width = `${newWidth}px`;
+  }
+
+  function onUp() {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    th.classList.remove("resizing");
+    document.body.classList.remove("col-resizing");
+    const key = th.getAttribute("data-col-key");
+    if (key) matrixColumnWidths[key] = th.style.width;
+  }
+
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+function renderKnowledgeMatrix() {
+  const active = activeKnowledgeLibrary();
+  const title = knowledgeQuery("[data-knowledge-current-title]");
+  if (title) title.textContent = active ? `${active.name} · 文献矩阵字段与矩阵表格` : "选择或新建知识库后查看条目";
+  renderKnowledgeStatus();
+  renderMatrixFields();
+  renderKnowledgeMatrixTable();
+  renderKnowledgeSearchPanel();
+  renderKnowledgeChat();
+  updateKnowledgeDeleteButton();
 }
 
 function renderKnowledgeSearchPanel() {
@@ -479,16 +570,202 @@ async function submitKnowledgeChat() {
   }
 }
 
-function notifyKnowledgePlaceholder(action) {
-  const labels = {
-    "add-field": "新增字段",
-    "recommend-fields": "AI 推荐字段",
-    "save-fields": "保存字段",
-    "run-matrix": "运行文献矩阵",
-    compress: "压缩记忆",
-    "delete-field": "删除字段",
-  };
-  window.alert(`${labels[action] || "该功能"}将在文献矩阵阶段接入。`);
+function selectedMatrixItemKeys() {
+  const body = knowledgeQuery("[data-knowledge-matrix-body]");
+  if (!body) return [];
+  return Array.from(body.querySelectorAll("tr[data-item-key] [data-item-select]:checked")).map(
+    (box) => box.closest("tr").dataset.itemKey,
+  );
+}
+
+function updateMatrixRunButtons() {
+  const runBtn = knowledgeQuery("[data-run-reading-matrix]");
+  const stopBtn = knowledgeQuery("[data-stop-reading-matrix]");
+  if (runBtn) runBtn.disabled = knowledgeState.matrixRunning;
+  if (stopBtn) stopBtn.hidden = !knowledgeState.matrixRunning;
+}
+
+function setupMatrixFieldListEvents() {
+  const host = knowledgeQuery("[data-matrix-field-list]");
+  if (!host) return;
+  host.addEventListener("input", (event) => {
+    const row = event.target.closest("[data-field-index]");
+    if (!row) return;
+    const index = Number(row.dataset.fieldIndex);
+    if (event.target.matches("[data-field-name]")) {
+      knowledgeState.matrixFields[index].name = event.target.value;
+    } else if (event.target.matches("[data-field-rule]")) {
+      knowledgeState.matrixFields[index].rule = event.target.value;
+    }
+  });
+  host.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-remove-field]");
+    if (!button) return;
+    const row = event.target.closest("[data-field-index]");
+    if (!row) return;
+    knowledgeState.matrixFields.splice(Number(row.dataset.fieldIndex), 1);
+    renderMatrixFields();
+  });
+}
+
+function addMatrixField() {
+  knowledgeState.matrixFields.push({ field_id: "", name: "新字段", rule: "", enabled: true });
+  renderMatrixFields();
+}
+
+async function saveMatrixFields() {
+  if (!knowledgeState.activeId) {
+    window.alert("请先在左侧选择或新建知识库。");
+    return;
+  }
+  try {
+    const data = await knowledgeJSON(matrixApi("/fields"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ fields: knowledgeState.matrixFields }),
+    });
+    knowledgeState.matrixFields = data.fields || knowledgeState.matrixFields;
+    renderMatrixFields();
+    renderKnowledgeMatrixTable();
+    setKnowledgeMessage("文献矩阵字段已保存。");
+  } catch (error) {
+    setKnowledgeMessage(error.message);
+  }
+}
+
+async function recommendMatrixFields() {
+  if (!knowledgeState.activeId) {
+    window.alert("请先在左侧选择或新建知识库。");
+    return;
+  }
+  if (!window.confirm("AI 将基于文库论文推荐 3-6 个矩阵字段，并追加到当前字段列表（不会自动保存，记得点“保存字段”）。继续？")) return;
+  const btn = knowledgeQuery("[data-recommend-matrix-fields]");
+  if (btn) btn.disabled = true;
+  setKnowledgeMessage("AI 正在推荐字段，请稍候...");
+  try {
+    const data = await knowledgeJSON(matrixApi("/recommend-fields"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ item_keys: selectedMatrixItemKeys() }),
+    });
+    const recommended = (data.fields || []).map((field) => ({
+      field_id: "",
+      name: field.name,
+      rule: field.rule,
+      enabled: true,
+    }));
+    knowledgeState.matrixFields = knowledgeState.matrixFields.concat(recommended);
+    renderMatrixFields();
+    setKnowledgeMessage(`已推荐 ${recommended.length} 个字段，请检查后点击“保存字段”。`);
+  } catch (error) {
+    setKnowledgeMessage(error.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function stopMatrixPolling() {
+  if (knowledgeState.matrixPollTimer) {
+    window.clearInterval(knowledgeState.matrixPollTimer);
+    knowledgeState.matrixPollTimer = null;
+  }
+}
+
+function startMatrixPolling() {
+  if (knowledgeState.matrixPollTimer) return;
+  knowledgeState.matrixPollTimer = window.setInterval(async () => {
+    try {
+      const data = await knowledgeJSON(matrixApi("/status"));
+      knowledgeState.matrixRunning = data.running;
+      knowledgeState.matrixLatest = data.latest;
+      knowledgeState.matrixItems = data.items || knowledgeState.matrixItems;
+      renderKnowledgeMatrixTable();
+      renderKnowledgeStatus();
+      updateMatrixRunButtons();
+      if (!data.running) {
+        stopMatrixPolling();
+        knowledgeState.matrixFields = data.fields || knowledgeState.matrixFields;
+        renderMatrixFields();
+        renderKnowledgeMatrixTable();
+        const latest = knowledgeState.matrixLatest || {};
+        setKnowledgeMessage(
+          latest.status === "success"
+            ? `文献矩阵任务完成：成功 ${latest.completed || 0} · 失败 ${latest.failed || 0} · 无PDF ${latest.skipped_no_pdf || 0} · 跳过 ${latest.skipped_existing || 0}。`
+            : latest.status === "failed"
+              ? `文献矩阵任务失败：${latest.error || "未知错误，请检查 API 配置或本地 PDF。"}`
+              : "文献矩阵任务已停止。",
+        );
+      }
+    } catch (_err) {
+      // 下一轮重试
+    }
+  }, 3000);
+}
+
+async function runMatrix() {
+  if (!knowledgeState.activeId) {
+    window.alert("请先在左侧选择或新建知识库。");
+    return;
+  }
+  const keys = selectedMatrixItemKeys();
+  if (!keys.length) {
+    window.alert("请在矩阵表格中勾选至少一篇文献。");
+    return;
+  }
+  try {
+    const data = await knowledgeJSON(matrixApi("/run"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ item_keys: keys, mode: "skip_existing" }),
+    });
+    knowledgeState.matrixRunning = true;
+    knowledgeState.matrixLatest = data.latest || knowledgeState.matrixLatest;
+    renderKnowledgeStatus();
+    updateMatrixRunButtons();
+    startMatrixPolling();
+  } catch (error) {
+    setKnowledgeMessage(error.message);
+  }
+}
+
+async function stopMatrix() {
+  try {
+    await knowledgeJSON(matrixApi("/stop"), { method: "POST", headers: { Accept: "application/json" } });
+    stopMatrixPolling();
+    knowledgeState.matrixRunning = false;
+    updateMatrixRunButtons();
+    setKnowledgeMessage("已发送停止信号，文献矩阵将很快停止。");
+  } catch (error) {
+    setKnowledgeMessage(error.message);
+  }
+}
+
+async function loadMatrixState() {
+  if (!knowledgeState.activeId) {
+    knowledgeState.matrixFields = [];
+    knowledgeState.matrixItems = [];
+    knowledgeState.matrixRunning = false;
+    knowledgeState.matrixLatest = null;
+    renderMatrixFields();
+    renderKnowledgeMatrixTable();
+    renderKnowledgeStatus();
+    updateMatrixRunButtons();
+    return;
+  }
+  try {
+    const data = await knowledgeJSON(matrixApi(""));
+    knowledgeState.matrixFields = data.fields || [];
+    knowledgeState.matrixItems = data.items || [];
+    knowledgeState.matrixRunning = data.running;
+    knowledgeState.matrixLatest = data.latest;
+    renderMatrixFields();
+    renderKnowledgeMatrixTable();
+    renderKnowledgeStatus();
+    updateMatrixRunButtons();
+    if (data.running) startMatrixPolling();
+  } catch (error) {
+    setKnowledgeMessage(error.message);
+  }
 }
 
 function setupKnowledgePage() {
@@ -505,27 +782,28 @@ function setupKnowledgePage() {
     applyKnowledgeSidebarState();
   });
   knowledgeQuery("[data-rag-index-library]")?.addEventListener("click", refreshRagIndex);
-  knowledgeQuery("[data-add-matrix-field]")?.addEventListener("click", () => notifyKnowledgePlaceholder("add-field"));
-  knowledgeQuery("[data-recommend-matrix-fields]")?.addEventListener("click", () => notifyKnowledgePlaceholder("recommend-fields"));
-  knowledgeQuery("[data-save-matrix-fields]")?.addEventListener("click", () => notifyKnowledgePlaceholder("save-fields"));
-  knowledgeQuery("[data-run-reading-matrix]")?.addEventListener("click", () => notifyKnowledgePlaceholder("run-matrix"));
+  knowledgeQuery("[data-add-matrix-field]")?.addEventListener("click", addMatrixField);
+  knowledgeQuery("[data-recommend-matrix-fields]")?.addEventListener("click", recommendMatrixFields);
+  knowledgeQuery("[data-save-matrix-fields]")?.addEventListener("click", saveMatrixFields);
+  knowledgeQuery("[data-run-reading-matrix]")?.addEventListener("click", runMatrix);
+  knowledgeQuery("[data-stop-reading-matrix]")?.addEventListener("click", stopMatrix);
   knowledgeQuery("[data-knowledge-placeholder-action=\"create\"]")?.addEventListener("click", createKnowledgeBaseFromPrompt);
   knowledgeQuery("[data-delete-knowledge-base]")?.addEventListener("click", deleteActiveKnowledgeBase);
-  knowledgeQuery("[data-knowledge-placeholder-action=\"compress\"]")?.addEventListener("click", () => notifyKnowledgePlaceholder("compress"));
+  knowledgeQuery("[data-knowledge-placeholder-action=\"compress\"]")?.addEventListener("click", () => {
+    window.alert("压缩记忆功能将在后续接入。");
+  });
   knowledgeQuery("[data-knowledge-placeholder-action=\"send\"]")?.addEventListener("click", submitKnowledgeChat);
   knowledgeQuery(".knowledge-chat-input")?.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") submitKnowledgeChat();
   });
-  document.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-knowledge-placeholder-action=\"delete-field\"]");
-    if (button) notifyKnowledgePlaceholder("delete-field");
-  });
+  setupMatrixFieldListEvents();
   applyKnowledgeSidebarState();
   setupKnowledgeSplitters();
   renderKnowledgeList();
   renderKnowledgeMatrix();
   renderKnowledgeChat();
   loadKnowledgeBases();
+  loadMatrixState();
 }
 
 setupKnowledgePage();

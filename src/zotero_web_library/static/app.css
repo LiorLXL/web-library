@@ -507,6 +507,8 @@ button, input, select {
   min-width: 0;
   min-height: 0;
   background: white;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .workbench-panel-head {
@@ -656,6 +658,8 @@ button, input, select {
   gap: 14px;
   min-height: 0;
   padding: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .matrix-panel-head {
@@ -678,6 +682,45 @@ button, input, select {
 
 .matrix-run-btn {
   min-width: 64px;
+}
+
+.matrix-stop-btn {
+  min-width: 64px;
+}
+
+.matrix-field-empty {
+  grid-column: 1 / -1;
+  border: 1px dashed #d8e2ec;
+  border-radius: 16px;
+  padding: 16px;
+  color: var(--muted);
+  font-weight: 700;
+  text-align: center;
+}
+
+.matrix-item-title {
+  font-weight: 800;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.matrix-item-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.matrix-table .col-select {
+  width: 36px;
+  text-align: center;
+}
+
+.matrix-table .col-pdf {
+  width: 56px;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .matrix-field-list {
@@ -725,8 +768,10 @@ button, input, select {
 }
 
 .icon-action-btn {
-  width: 32px;
-  height: 32px;
+  width: 22px;
+  height: 22px;
+  font-size: 15px;
+  line-height: 1;
   border: 1px solid #e1e6f1;
   border-radius: 999px;
   background: #fff;
@@ -736,8 +781,8 @@ button, input, select {
 
 .matrix-field-card .icon-action-btn {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: 10px;
+  right: 10px;
 }
 
 .icon-action-btn.danger:hover {
@@ -756,6 +801,43 @@ button, input, select {
   color: var(--muted);
   font-weight: 700;
 }
+
+.matrix-event-log {
+  display: grid;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: 2px;
+  padding: 10px 12px;
+  border: 1px solid #e4ecf3;
+  border-radius: 12px;
+  background: #0f172a;
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: #cbd5e1;
+}
+
+.matrix-event {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 1px 0;
+}
+
+.matrix-event-info {
+  color: #cbd5e1;
+}
+
+.matrix-event-warning {
+  color: #fbbf24;
+}
+
+.matrix-event-error {
+  color: #f87171;
+}
+
 
 .knowledge-search-panel {
   display: grid;
@@ -830,13 +912,13 @@ button, input, select {
 }
 
 .matrix-table-wrap {
-  overflow: auto;
   min-height: 0;
 }
 
 .matrix-table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
   min-width: 780px;
 }
 
@@ -846,13 +928,49 @@ button, input, select {
   padding: 12px 10px;
   text-align: left;
   vertical-align: top;
+  overflow-wrap: anywhere;
 }
 
 .matrix-table th {
+  position: relative;
   color: #64748b;
   font-size: 12px;
   font-weight: 900;
   white-space: nowrap;
+}
+
+.matrix-table .col-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 9px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+  z-index: 2;
+}
+
+.matrix-table .col-resizer::after {
+  content: "";
+  position: absolute;
+  top: 25%;
+  bottom: 25%;
+  left: 4px;
+  width: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.matrix-table th:hover .col-resizer::after,
+.matrix-table th.resizing .col-resizer::after {
+  background: #93b4ff;
+}
+
+body.col-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .knowledge-agent-body {

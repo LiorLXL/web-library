@@ -9,6 +9,8 @@ from .runner import (
     run_codex_prompt,
 )
 from .prompts import build_agentic_rag_chat_prompt
+from .reading import run_reading_chat_turn
+from .matrix import recommend_matrix_fields, run_reading_matrix_for_item
 
 __all__ = [
     "build_agentic_rag_chat_prompt",
@@ -18,4 +20,7 @@ __all__ = [
     "build_runtime_config",
     "run_codex_connectivity_probe",
     "run_codex_prompt",
+    "run_reading_chat_turn",
+    "recommend_matrix_fields",
+    "run_reading_matrix_for_item",
 ]
