@@ -8,6 +8,10 @@
   --blue-soft: #eaf1ff;
   --green: #0f766e;
   --amber: #b45309;
+  /* 综述写作（writing）从 guangming-ai-workbench 搬运的强调色变量 */
+  --accent: #5b5ce2;
+  --accent-soft: #eef0ff;
+  --panel-soft: #f8f9fc;
   --shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
   font-family: "Aptos", "Segoe UI", sans-serif;
 }

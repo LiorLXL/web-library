@@ -11929,6 +11929,281 @@ def create_app() -> Flask:
         libraries = app_store.list_libraries()
         return render_template("api_config.html", library=library, libraries=libraries)
 
+    from . import writing as writing
+    from .codex_agent import writing as writing_agent
+
+    @app.get("/library/<library_id>/writing")
+    def writing_page(library_id: str):
+        library = library_or_404(library_id)
+        libraries = app_store.list_libraries()
+        writing.ensure_writing_files(library)
+        requested_stage = request.args.get("stage")
+        state = writing.load_writing_state(library)
+        if requested_stage:
+            state["stage"] = writing.normalize_writing_stage(requested_stage)
+            writing.save_writing_state(library, state)
+        papers = writing.paper_list(library)
+        selected_keys = set(state.get("selected_paper_keys") or [])
+        try:
+            knowledge_bases = rag_list_knowledge_bases(library)
+        except Exception:  # noqa: BLE001
+            knowledge_bases = []
+        from .rag.store import knowledge_base_item_keys as _kb_item_keys
+        papers_by_kb: dict[str, list[str]] = {}
+        for kb in knowledge_bases:
+            kb_id = str(kb.get("knowledge_base_id") or kb.get("id") or "")
+            try:
+                kb_keys = _kb_item_keys(library, kb_id)
+            except Exception:  # noqa: BLE001
+                kb_keys = []
+            papers_by_kb[kb_id] = kb_keys
+        return render_template(
+            "writing.html",
+            library=library,
+            libraries=libraries,
+            writing_stages=writing.WRITING_STAGES,
+            writing_stage_labels=writing.WRITING_STAGE_LABELS,
+            active_stage=state.get("stage") or "topic",
+            writing_state=state,
+            papers=papers,
+            selected_paper_keys=selected_keys,
+            knowledge_bases=knowledge_bases,
+            papers_by_kb=papers_by_kb,
+            matrix_by_paper=writing.matrix_by_paper(library),
+            writing_mapping=writing.writing_mapping_payload(library),
+            outline_text=writing.load_outline(library),
+            survey_text=writing.load_survey(library),
+            writing_chat_messages=writing.load_writing_chat(library),
+            active_writing_task=writing_agent.get_task(library_id),
+        )
+
+    @app.post("/library/<library_id>/writing/api/stage")
+    def writing_api_stage(library_id: str):
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        state = writing.load_writing_state(library)
+        if payload.get("stage") in writing.WRITING_STAGES:
+            state["stage"] = payload["stage"]
+        writing.save_writing_state(library, state)
+        return jsonify({"ok": True, "state": state})
+
+    @app.post("/library/<library_id>/writing/api/selection")
+    def writing_api_selection(library_id: str):
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        paper_keys = payload.get("paper_keys") if isinstance(payload.get("paper_keys"), list) else []
+        valid = {str(p.get("key")) for p in writing.paper_list(library)}
+        selected = [str(item) for item in paper_keys if str(item) in valid]
+        state = writing.load_writing_state(library)
+        state["selected_paper_keys"] = selected
+        state["updated_at"] = writing.now_iso()
+        writing.save_writing_state(library, state)
+        writing.refresh_writing_csv(library)
+        return jsonify({"ok": True, "state": writing.load_writing_state(library), "matrix_by_paper": writing.matrix_by_paper(library)})
+
+    @app.post("/library/<library_id>/writing/api/outline")
+    def writing_api_outline(library_id: str):
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        if payload.get("text") is not None:
+            writing.save_outline(library, str(payload["text"]))
+        mapping = writing.writing_mapping_payload(library)
+        return jsonify({"ok": True, "outline": writing.load_outline(library), "mapping": mapping})
+
+    @app.post("/library/<library_id>/writing/api/mappings")
+    def writing_api_mappings(library_id: str):
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        mappings = payload.get("mappings") if isinstance(payload.get("mappings"), list) else []
+        sections = writing.parse_outline_sections(writing.load_outline(library))
+        section_by_id = {s["section_id"]: s for s in sections}
+        papers = {str(p.get("key")): p for p in writing.paper_list(library)}
+        normalized = []
+        for item in mappings:
+            if not isinstance(item, dict):
+                continue
+            section = section_by_id.get(str(item.get("section_id") or ""))
+            if not section:
+                continue
+            row = writing.normalize_section_mapping(library, section, item, paper_lookup=papers)
+            if row:
+                normalized.append(row)
+        saved = writing.save_mappings(
+            library,
+            {
+                "sections": sections,
+                "papers": [{"paper_id": str(p.get("key")), "title": str(p.get("title") or "")} for p in writing.paper_list(library)],
+                "mappings": normalized,
+            },
+        )
+        return jsonify({"ok": True, "mapping": saved})
+
+    @app.post("/library/<library_id>/writing/api/survey")
+    def writing_api_survey(library_id: str):
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        writing.save_survey(library, str(payload.get("text") or ""))
+        return jsonify({"ok": True, "survey": writing.load_survey(library)})
+
+    @app.post("/library/<library_id>/writing/api/topic")
+    def writing_api_topic(library_id: str):
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        topic = str(payload.get("topic") or "").strip()
+        if not topic:
+            return jsonify({"ok": False, "error": "请选择或输入综述主题"}), 400
+        state = writing.load_writing_state(library)
+        state["topic"] = topic
+        state["updated_at"] = writing.now_iso()
+        writing.save_writing_state(library, state)
+        writing.append_writing_chat_message(
+            library,
+            {
+                "role": "divider",
+                "content": f"已选择主题：{topic}",
+                "created_at": writing.now_iso(),
+            },
+        )
+        return jsonify({"ok": True, "topic": topic, "state": writing.load_writing_state(library), "messages": writing.load_writing_chat(library)})
+
+    @app.post("/library/<library_id>/writing/api/run")
+    def writing_api_run(library_id: str):
+        import datetime as _dt
+        from uuid import uuid4 as _uuid4
+        library = library_or_404(library_id)
+        payload = request.get_json(silent=True) or {}
+        stage = writing.normalize_writing_stage(str(payload.get("stage") or ""))
+        user_question = str(payload.get("user_question") or "").strip()
+        if not user_question:
+            return jsonify({"ok": False, "error": "请输入综述写作问题"}), 400
+        task = writing_agent.get_task(library_id)
+        if task.get("status") == "running":
+            return jsonify({"ok": False, "error": "已有综述写作任务正在运行"}), 409
+        state = writing.load_writing_state(library)
+        state["stage"] = stage
+        writing.save_writing_state(library, state)
+        run_id = f"write-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-{_uuid4().hex[:6]}"
+        user_message = {
+            "role": "user",
+            "content": user_question,
+            "created_at": writing.now_iso(),
+            "run_id": run_id,
+            "stage": stage,
+        }
+        writing.append_writing_chat_message(library, user_message)
+        writing_agent.start_writing_task(library=library, library_id=library_id, run_id=run_id, user_question=user_question, stage=stage)
+        return jsonify({"ok": True, "run_id": run_id, "user_message": user_message, "messages": writing.load_writing_chat(library)})
+
+    @app.get("/library/<library_id>/writing/api/status")
+    def writing_api_status(library_id: str):
+        library = library_or_404(library_id)
+        task = writing_agent.get_task(library_id)
+        latest = task if task.get("status") == "running" else None
+        outline_path = writing._writing_dir(library) / "outline.md"
+        response = jsonify({
+            "running": bool(latest),
+            "latest": latest,
+            "messages": writing.load_writing_chat(library),
+            "outline": writing.load_outline(library),
+            "draft": writing.load_survey(library),
+            "mapping": writing.writing_mapping_payload(library),
+            "_debug_outline_path": str(outline_path),
+            "_debug_outline_exists": outline_path.exists(),
+            "_debug_outline_len": outline_path.stat().st_size if outline_path.exists() else 0,
+        })
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @app.post("/library/<library_id>/writing/api/stop")
+    def writing_api_stop(library_id: str):
+        library = library_or_404(library_id)
+        task = writing_agent.get_task(library_id)
+        if task.get("status") == "running":
+            run_id = task.get("run_id", "")
+            stage = task.get("stage") or "topic"
+            writing_agent.stop_writing_task(library_id, run_id)
+            writing.append_writing_chat_message(
+                library,
+                {
+                    "role": "assistant",
+                    "content": "已停止本次综述写作任务。当前对话记忆会保留，下一次可继续；如需清空记忆，请点击“重置”。",
+                    "created_at": writing.now_iso(),
+                    "run_id": run_id,
+                    "stage": stage,
+                    "stopped": True,
+                },
+            )
+        return jsonify({"ok": True, "messages": writing.load_writing_chat(library)})
+
+    @app.post("/library/<library_id>/writing/api/reset")
+    def writing_api_reset(library_id: str):
+        """完全重置写作：清空主题、大纲、正文、映射、对话，回到初始模板。"""
+        library = library_or_404(library_id)
+        task = writing_agent.get_task(library_id)
+        if task.get("status") == "running":
+            return jsonify({"ok": False, "error": "当前有综述写作任务正在运行，请完成后再重置"}), 409
+        # 重置写作状态（清空 topic + selected_paper_keys + 哈希）
+        state = writing.load_writing_state(library)
+        writing.save_writing_state(library, {
+            "stage": "topic",
+            "selected_paper_keys": [],
+            "topic": "",
+            "csv_hash": "",
+            "outline_hash": "",
+            "draft_hash": "",
+            "created_at": writing.now_iso(),
+            "updated_at": writing.now_iso(),
+        })
+        # 重写大纲、综述、映射为默认模板
+        writing.save_outline(library, writing.default_writing_outline())
+        writing.save_survey(library, "# 综述草稿\n\n请在右侧对话中让光牍生成或修改综述正文。\n")
+        writing.save_mappings(library, {"sections": [], "papers": [], "mappings": []})
+        # 清空聊天
+        writing._write_json(writing._writing_dir(library) / "writing_chat.json", [])
+        writing.save_writing_chat_state(library, {})
+        # 重新生成 CSV
+        writing.refresh_writing_csv(library)
+        divider = {"role": "divider", "content": "新的对话", "created_at": writing.now_iso()}
+        writing.append_writing_chat_message(library, divider)
+        return jsonify({
+            "ok": True,
+            "divider": divider,
+            "messages": writing.load_writing_chat(library),
+            "state": writing.load_writing_state(library),
+        })
+
+    @app.post("/library/<library_id>/writing/api/compact")
+    def writing_api_compact(library_id: str):
+        library = library_or_404(library_id)
+        chat_state = writing.load_writing_chat_state(library)
+        thread_id = chat_state.get("thread_id")
+        if not thread_id:
+            return jsonify({"ok": False, "error": "当前还没有可压缩的综述写作线程"}), 400
+        divider = {
+            "role": "divider",
+            "content": "记忆已压缩，可以继续沿用当前综述写作对话",
+            "created_at": writing.now_iso(),
+            "thread_id": thread_id,
+            "compact": True,
+        }
+        writing.append_writing_chat_message(library, divider)
+        return jsonify({"ok": True, "messages": writing.load_writing_chat(library)})
+
+    @app.get("/library/<library_id>/writing/api/export/markdown")
+    def writing_api_export_markdown(library_id: str):
+        library = library_or_404(library_id)
+        return Response(writing.build_markdown_export(library), mimetype="text/markdown; charset=utf-8")
+
+    @app.get("/library/<library_id>/writing/api/export/csv")
+    def writing_api_export_csv(library_id: str):
+        library = library_or_404(library_id)
+        return Response(writing.build_csv_export(library), mimetype="text/csv; charset=utf-8")
+
+
+
+
     @app.post("/api/sources/read-only")
     def api_read_only_source():
         payload = request.get_json(silent=True) or request.form

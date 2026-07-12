@@ -13,6 +13,7 @@
     <a class="rail-btn" title="文库" href="{{ url_for('library_page', library_id=library.library_id) }}">库</a>
     <a class="rail-btn" title="知识库" href="{{ url_for('knowledge_page', library_id=library.library_id) }}">知</a>
     <a class="rail-btn" title="文献研读" href="{{ url_for('reader_page', library_id=library.library_id) }}">读</a>
+    <a class="rail-btn" title="写作" href="{{ url_for('writing_page', library_id=library.library_id) }}">写</a>
 
     <a class="rail-btn active" title="API 配置" href="{{ url_for('api_config_page', library_id=library.library_id) }}">配</a>
   </aside>

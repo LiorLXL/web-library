@@ -1,118 +1,209 @@
-# Web Library
+# Zotero Web Library
 
-这是一个面向 Zotero 本地文库的网页端浏览与编辑工具。
+一个面向本地 Zotero 文库的 Web 工作台。它不是简单的“网页版文献列表”，而是把文库浏览、附件阅读、知识库构建、RAG 检索、多源外部检索、文献矩阵抽取、以及综述写作串成一套本地优先的研究工作流。
 
-项目与 Guangming AI Workbench 分离维护，重点是把本地 Zotero 文库以三栏高密度界面呈现出来，并在不破坏原始数据结构的前提下，提供标签语义解析、结构化字段提取、本地副本编辑等能力。
+项目当前默认有两种使用方式：
 
-![image-20260616143947757](assets/image-20260616143947757.png)
+- `只读源库模式`：直接连接现有 Zotero 数据目录，只读浏览，不修改源库。
+- `本地副本模式`：把 `zotero.sqlite + storage/` 复制到 `app-data/libraries/<library-id>/` 下，后续编辑只落在副本上。
 
-![image-20260616144115054](assets/image-20260616144115054.png)
+## 界面预览
 
-![image-20260616144151252](assets/image-20260616144151252.png)
+早期文库与阅读界面：
 
-## 当前功能
+![文库主页（早期）](assets/image-20260616143947757.png)
 
-- 三栏 Zotero 风格界面：左侧文件夹树与筛选，中间条目表，右侧条目详情。
-- 支持文件夹树浏览，以及评分、类型、`#标签`、期刊/会议等级、阅读状态、普通标签筛选。
-- 表格字段列可配置，可调整列顺序、列宽，并保留用户设置。
-- 支持条目多选；切换筛选条件或文件夹后，已勾选状态仍会保留。
-- 支持批量条目管理：删除条目、移入回收站、永久删除、移动到目标文件夹。
-- 标题列支持中文条目类型徽标，类型 key 以 Zotero 官方类型定义为准。
-- 支持条目前端语义标签解析：
-  - `#标签`
-  - 阅读状态
-  - 评分
-  - 期刊/会议等级
-- 支持文库级共享快捷标签，用于快速给条目设置 `#标签`。
-- 支持结构化字段提取与写回：
-  - `remark`
-  - `title_zh`
-  - `abstract_zh`
-- 支持在表格单元格内直接编辑结构化字段，也支持在详情区统一编辑。
-- 支持 PDF、HTML、笔记、图片、链接等附件徽标展示。
-- 支持附件编辑 v1：单条目上传本地文件、添加网页链接、重命名附件、删除附件。
-- 支持文献研读 v1：打开单篇文献 PDF，显示 PDF 内置目录、连续滚动页面、左右可调三栏布局。
-- 支持 Zotero 原生 PDF 标注 v1：文本选择后保存高亮和下划线到 `itemAnnotations`，不修改 PDF 文件本体。
-- 详情区笔记支持摘要折叠与展开。
-- 支持添加条目 v1：
-  - 按 DOI、PMID、arXiv ID、ADS Bibcode、ISBN 等标识符导入。
-  - 粘贴 RIS、BibTeX、CSL JSON、PubMed XML 引用文本导入。
-  - 导入前自动按强标识符去重，命中已有条目时不重复创建。
-- 支持引用导出 v1：
-  - 导出已勾选条目的 BibTeX、BibLaTeX、RIS、CSL JSON、CSV。
-  - 导出是只读能力，不写 Zotero SQLite，也不影响同步状态。
-- 支持左侧文件夹树内管理：根目录新建文件夹、真实文件夹重命名、移动、新建子文件夹、删除文件夹。
-- 支持只读连接真实 Zotero 数据目录。
-- 支持建立可编辑的本地副本，所有写操作只落到副本。
-- 首页源管理支持服务路径选择器：默认进入 demo 文库，可沿虚拟服务器根目录浏览后端/容器可访问的目录。
-- 支持浏览器上传本机文库文件夹创建可编辑副本，适合 Docker、局域网或云端预览场景。
+![条目详情与编辑（早期）](assets/image-20260616144115054.png)
 
-## 最近界面能力
+![阅读与附件视图（早期）](assets/image-20260616144151252.png)
 
-- 前端已按 Zotero 官方类型 key 做归一化，并提供中文类型徽标和独立类型筛选。
-- 快捷标签改为文库级共享清单；删除快捷标签只影响快捷表，不影响已有条目标签。
-- `remark`、`title_zh`、`abstract_zh` 已接入结构化解析与结构化写回。
-- 已加入多选复选框和批量操作工具栏占位，便于后续扩展批量功能。
-- “删除条目 / 移动条目”已接入批量管理；永久删除会清理本地副本中的相关附件 storage 文件夹。
-- 文件夹管理入口已整合到左侧树；根目录只提供新建文件夹，真实文件夹提供重命名、移动、删除和新建子文件夹。
-- “添加条目”按钮已接入标识符导入和引用文本导入弹窗，Import translator 路线说明见 `docs/zotero-translators.md`。
-- “引用导出”按钮已接入格式文件下载，参考 Zotero Export translators 的常用字段映射。
-- “附件编辑”按钮已接入单条目附件管理；网页链接附件 v1 只保存链接，不抓取网页快照。
-- “文献研读”按钮已接入单条目 PDF 阅读；右侧智能体对话面板是下一版占位。
-- 弹窗、文件夹行内编辑、附件编辑等表单按钮已统一尺寸和视觉样式。
-- 源管理页已改为“网页文库”入口，区分本地只读模式、副本编辑模式和浏览器上传文件夹。
-- 服务路径选择器只浏览后端允许的目录，显示当前选择目录、子目录和是否包含 `zotero.sqlite`。
+当前知识库 / 矩阵 / 写作界面：
 
-## 数据源模式
+知识库 / 文献矩阵 / RAG 对话：
 
-### 本地只读模式
+![知识库与文献矩阵](<assets/屏幕截图 2026-07-12 152431.png>)
 
-直接读取指定的 Zotero 数据目录，例如：
+综述写作工作台：
+
+![综述写作工作台](<assets/屏幕截图 2026-07-12 153149.png>)
+
+## 当前核心能力
+
+### 1. 文库与条目管理
+
+- 三栏式文库界面：左侧集合树与筛选，中间条目表，右侧条目详情。
+- 支持本地只读连接、服务端路径复制、副本上传三种入库方式。
+- 支持集合创建、重命名、移动、删除。
+- 支持条目批量移动、删除、回收站处理。
+- 支持条目字段编辑、结构化字段写回、标签编辑、评分、阅读状态维护。
+- 支持 BibTeX / BibLaTeX / RIS / CSL JSON / CSV 导出。
+- 支持通过 DOI、PMID、arXiv、ISBN 等标识符导入条目，也支持粘贴 RIS / BibTeX / CSL JSON / PubMed XML。
+
+### 2. 附件与阅读
+
+- 支持 PDF、HTML、图片、链接等附件展示与管理。
+- 支持上传本地文件附件、添加 URL 附件、重命名附件、删除附件。
+- 内置 PDF.js 阅读器，支持目录导航、连续滚动、可调三栏布局。
+- 支持 Zotero 原生 annotation 读写，当前重点支持高亮与下划线。
+- 支持单篇文献阅读对话，围绕当前条目进行 AI 问答。
+
+### 3. 知识库与 RAG
+
+- 一个文库下可以维护多个知识库。
+- 每个知识库可维护自己的文献范围。
+- 支持把文库元数据、笔记、附件解析结果切 chunk 后写入本地 RAG 索引。
+- 支持知识库级检索、关键词检索、元数据检索、chunk 阅读。
+- 支持围绕当前知识库进行证据型对话。
+- RAG 索引本地落在每个文库自己的 `rag.sqlite`，不依赖外部向量数据库。
+
+### 4. 文献矩阵
+
+- 知识库页可以为当前知识库定义矩阵字段。
+- 支持手动新增字段，也支持 AI 推荐字段。
+- 支持批量运行矩阵抽取，把每篇文献写成结构化矩阵记录。
+- 矩阵结果可直接作为后续综述写作与知识库问答的输入。
+- 当前矩阵数据按知识库隔离存储。
+
+### 5. 多源检索与候选导入
+
+- 内置多源检索与 guided search 流程。
+- 内置公共源包括：`Crossref`、`arXiv`、`PubMed`、`Semantic Scholar`、`DBLP`、`OpenReview`、`DataCite`、`Europe PMC`、`Figshare`、`OSF`、`OpenML`、`GitHub`、`GitLab`、`Hugging Face`、`Zenodo`、`Brave` 等。
+- 支持批量检索、AI 评分、覆盖度分析、候选去重、候选导入。
+- 支持文库级自定义检索源：
+  - 本地文件源
+  - HTTP JSON 源
+  - SQLite 源
+  - Manifest 源
+  - 自定义 source 配置
+- 支持 readiness / onboarding / tuning / report / config bundle 这整套接入与验收链路。
+
+### 6. 综述写作
+
+- 写作页已经是一个完整的四阶段工作台：
+  1. `拟定主题`
+  2. `大纲生成`
+  3. `内容核对`
+  4. `综述生成`
+- 写作页要求先选择知识库，再选择该知识库下的文献。
+- 选中文献会同步生成当前写作使用的 `writing_sources.csv`。
+- AI 会围绕当前知识库矩阵、写作 CSV、本地 `outline.md` / `survey.md` 工作。
+- 写作状态、映射关系、聊天状态都按“当前文库自己的 writing 目录”隔离存储。
+- 当前实现已经显式避免跨文库串写。
+
+## 页面结构
+
+### 源管理页 `/`
+
+- 配置只读源库
+- 从服务端路径创建本地副本
+- 从浏览器上传文库目录创建本地副本
+- 管理已有文库
+
+### 文库页 `/library/<library_id>`
+
+- 集合树、条目表、详情面板
+- 标签、评分、阅读状态、字段编辑
+- 附件与导入导出操作
+
+### 多源检索页 `/library/<library_id>/features`
+
+- 外部检索源管理
+- guided search / query plan / batch job / candidate import
+- 检索报告与配置打包
+
+### 知识库页 `/library/<library_id>/knowledge`
+
+- 知识库列表
+- 矩阵字段定义与矩阵表格
+- RAG 检索与知识库对话
+
+### 阅读页 `/library/<library_id>/reader`
+
+- PDF 阅读
+- Zotero annotation
+- 单篇文献 AI 对话
+
+### 写作页 `/library/<library_id>/writing`
+
+- 写作文献选择
+- 本地大纲编辑
+- 小节-文献映射卡片
+- 本地综述 Markdown 生成与维护
+
+## 本地存储结构
+
+默认情况下，应用把自己的数据保存在 `./app-data/`：
 
 ```text
-C:\Users\<你自己的用户名>\Zotero
+app-data/
+  app.sqlite
+  libraries/
+    <library-id>/
+      source.json
+      zotero.sqlite
+      storage/
+      rag.sqlite
+      matrix/
+        <knowledge-base-id>/
+          fields.json
+          items/
+            <item-key>.json
+      writing/
+        writing_state.json
+        writing_sources.csv
+        outline.md
+        writing_section_mappings.json
+        survey.md
+        writing_chat.json
+        writing_chat_state.json
 ```
 
-这种模式不会写入原始 `zotero.sqlite`、`storage/` 或 Zotero 目录中的任何文件。
+补充说明：
 
-路径输入框旁的“选择本地路径”指服务运行环境本地路径。Docker 中就是容器里的路径，本地开发时就是当前电脑上的路径。
+- `app.sqlite`：应用自己的元数据数据库，保存文库注册信息、偏好设置、检索任务、custom sources、config bundle 等。
+- `libraries/<library-id>/zotero.sqlite`：本地副本模式下的 Zotero 数据库。
+- `libraries/<library-id>/storage/`：本地副本模式下的附件目录。
+- `libraries/<library-id>/rag.sqlite`：当前文库自己的 RAG 索引与知识库关系表。
+- `libraries/<library-id>/matrix/<knowledge-base-id>/`：当前文库下、按知识库隔离的矩阵字段与矩阵结果。
+- `libraries/<library-id>/writing/`：当前文库唯一的综述写作工作区。
 
-### 副本编辑模式
+## 写作工作区约定
 
-程序会把 `zotero.sqlite` 和 `storage/` 复制到应用自己的数据目录里，后续编辑都只作用在这个副本上。
+当前代码采用“一个文库一个写作工作区”的约定：
 
-副本可以通过两种方式创建：
+- 一个文库可以有多个知识库。
+- 一个文库只有一个写作工作区目录：`writing/`。
+- 写作工作区里的核心文件组包括：
+  - `writing_state.json`
+  - `writing_sources.csv`
+  - `outline.md`
+  - `writing_section_mappings.json`
+  - `survey.md`
+  - `writing_chat.json`
+  - `writing_chat_state.json`
 
-- 从服务路径复制：选择后端/容器可访问的目录，例如 Docker 中的 `/opt/demo-data/libraries/<demo-id>`。
-- 上传本地文件夹：在浏览器中选择当前电脑上的文库文件夹，上传到服务端后创建副本。
+写作页切换知识库时，文献选择来自该知识库；但写作文件始终落在当前文库自己的 `writing/` 目录，而不会写到别的文库。
 
-同一个源路径可以创建多个副本，但副本文库名称不能重复。不填写名称时会自动生成不冲突的名称。
+## 数据原则
 
-项目明确不支持直接写用户真实 Zotero 源库。Zotero 的本地 SQLite 可以读取，但直接修改原始库风险太高。
+- Zotero 原生文献信息以 `zotero.sqlite` 为准。
+- 只读模式不写源库。
+- 编辑模式只写本地副本，不直接改用户真实 Zotero 库。
+- 应用新增状态尽量落在 `app.sqlite`、`rag.sqlite`、`matrix/`、`writing/` 等自己的层，而不是篡改 Zotero schema。
 
-## 数据规则
+更细的数据映射说明见：
 
-- Zotero 原生 `zotero.sqlite` 是文献信息的唯一真实来源。
-- `#标签`、评分、阅读状态、期刊/会议等级都来自 Zotero 原生 `tags.name`。
-- PDF 高亮和下划线来自 Zotero 原生 `itemAnnotations`，写回时创建 annotation item，不写入 PDF 文件。
-- 不新增 Zotero 原生表或字段，不修改 Zotero 原生 schema。
-- 应用自己的元数据，例如快捷标签、列设置、界面偏好等，存放在 `app-data/app.sqlite`。
-
-更详细的字段来源、解析规则和写回约束见：
-[docs/data-mapping.md](docs/data-mapping.md)
-
-Zotero translators 的调查、可复用边界和添加条目 v1 路线见：
-[docs/zotero-translators.md](docs/zotero-translators.md)
+- [docs/data-mapping.md](docs/data-mapping.md)
+- [docs/zotero-translators.md](docs/zotero-translators.md)
 
 ## 环境要求
 
-- Python 3.12
+- Python `3.12`
 - [uv](https://docs.astral.sh/uv/)
-- PDF 阅读器使用本地 vendored PDF.js `3.11.174`，文件位于 `src/zotero_web_library/static/vendor/pdfjs/`。
 
-仓库中的 `.python-version` 已固定为 `3.12`。
+仓库里的 `.python-version` 已固定为 `3.12`。
 
-## 启动方式
+## 本地启动
 
 ```powershell
 uv sync
@@ -125,7 +216,7 @@ uv run python -m zotero_web_library.web
 http://127.0.0.1:8686
 ```
 
-默认情况下，本地开发会使用 `./app-data/` 作为应用数据目录。可以用环境变量覆盖：
+常用环境变量：
 
 ```powershell
 $env:WEB_LIBRARY_DATA_DIR="C:\path\to\app-data"
@@ -136,79 +227,76 @@ $env:WEB_LIBRARY_SERVER_ROOTS="C:\"
 uv run python -m zotero_web_library.web
 ```
 
-`WEB_LIBRARY_SERVER_ROOTS` 可选，用于限制“选择本地路径”弹窗中的虚拟服务器根入口；不设置时会自动使用常见入口，例如 Docker 中的 `/opt`、`/app`，Windows 本地的可用盘符。
+其中：
+
+- `WEB_LIBRARY_DATA_DIR`：应用数据目录
+- `WEB_LIBRARY_SERVER_ROOTS`：限制“服务端路径选择器”可浏览的根目录
 
 ## Docker 启动
 
-首次 clone 仓库后，如果需要构建带完整 demo 数据的 Docker 镜像，请先拉取 Git LFS 文件：
+如果需要构建带 demo 数据的镜像，先拉取 LFS 文件：
 
 ```powershell
 git lfs pull
 ```
 
-然后构建并启动：
+然后启动：
 
 ```powershell
 docker compose up --build
 ```
 
-启动后访问：
+访问：
 
 ```text
 http://localhost:8686
 ```
 
-Docker 镜像内置 `demo-data/` 作为演示数据模板。容器首次启动时，如果 `/app/app-data/app.sqlite` 不存在，会自动把 `/opt/demo-data/` 复制到 Docker volume 中。后续重启不会覆盖已有数据。
-
-Docker 中的服务路径选择器默认会进入 `/opt/demo-data/libraries/<demo-id>`。如果要让容器读取 Windows 上的真实文库目录，建议用目录挂载方式把它挂进容器，再使用“从服务路径复制”：
-
-```powershell
-docker run -d --name web-library -p 8686:8686 -e WEB_LIBRARY_HOST=0.0.0.0 -e WEB_LIBRARY_PORT=8686 -v web-library-data:/app/app-data -v C:\Users\<你自己的用户名>\Zotero:/host-zotero:ro web-library:latest
-```
-
-然后在页面中选择 `/host-zotero`。
-
-浏览器上传文件夹也可以创建副本，但真实 Zotero 目录通常很大。默认上传上限为 8GB、最多 100000 个文件，可用下面的环境变量调整：
-
-```powershell
-$env:WEB_LIBRARY_MAX_UPLOAD_BYTES="8589934592"
-$env:WEB_LIBRARY_MAX_FORM_PARTS="100000"
-```
-
-如需重置 Docker demo 数据：
-
-```powershell
-docker compose down -v
-docker compose up --build
-```
+默认情况下，容器会把 `demo-data/` 复制到 volume 中作为初始演示数据。
 
 ## 测试
+
+运行全部测试：
 
 ```powershell
 uv run pytest
 ```
 
-## 应用数据目录
+运行写作相关测试：
 
-默认情况下，应用会把元数据和本地副本保存在：
-
-```text
-./app-data/
-  app.sqlite
-  libraries/
-    <library-id>/
-      zotero.sqlite
-      storage/
-      source.json
+```powershell
+uv run pytest tests/test_writing.py
 ```
 
-`app-data/` 已加入 Git 忽略，因为其中可能包含私人 Zotero 数据和复制出的附件文件。
+## 代码结构
 
-`demo-data/` 是可公开的演示数据模板，会进入 Docker 镜像，并通过 Git LFS 跟踪。
+```text
+src/zotero_web_library/
+  web.py              Flask 入口与 HTTP API
+  zotero_adapter.py   Zotero SQLite / storage 访问层
+  app_store.py        应用元数据库与任务状态
+  writing.py          综述写作存储层
+  rag/                知识库、chunk、RAG 索引与检索
+  retrieval/          多源检索、provider、导入与报告
+  codex_agent/        阅读/矩阵/写作智能体编排
+  templates/          页面模板
+  static/             前端脚本与样式
+```
 
-## 使用注意
+## 当前状态
 
-- 不要提交 `app-data/`。
-- 只有确认可公开的演示数据才放入 `demo-data/`。
-- 浏览真实 Zotero 文库时，优先使用只读连接模式。
-- 需要实验性编辑时，使用本地副本模式，不要直接碰源库。
+这已经不是一个“只看 Zotero”的小工具，而是一套围绕本地文库展开的研究工作台。当前最完整、最值得继续迭代的几条主链路是：
+
+- `文库浏览 -> 附件阅读 -> 阅读对话`
+- `文库 -> 多源检索 -> 候选导入`
+- `文库 -> 知识库 -> 文献矩阵 -> RAG 对话`
+- `知识库 -> 综述写作 -> 大纲/映射/正文`
+
+如果你准备继续扩展功能，建议先从这几块入手：
+
+- `src/zotero_web_library/web.py`
+- `src/zotero_web_library/rag/store.py`
+- `src/zotero_web_library/writing.py`
+- `src/zotero_web_library/static/app.js`
+- `src/zotero_web_library/static/knowledge.js`
+- `src/zotero_web_library/static/writing.js`
