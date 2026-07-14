@@ -1077,6 +1077,22 @@ body.col-resizing {
   overflow-wrap: anywhere;
 }
 
+.knowledge-tool-trace {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.knowledge-tool-trace summary {
+  cursor: pointer;
+}
+
+.knowledge-tool-trace ul {
+  display: grid;
+  gap: 4px;
+  margin: 5px 0 0;
+  padding-left: 16px;
+}
+
 .knowledge-chat-input {
   min-height: 96px;
   max-height: 180px;

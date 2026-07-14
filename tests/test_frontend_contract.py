@@ -330,8 +330,13 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "loadMatrixState" in knowledge_js
     assert "data-run-reading-matrix" in knowledge_html
     assert "data-stop-reading-matrix" in knowledge_html
+    assert "conversationId" in knowledge_js
+    assert "resetKnowledgeConversation" in knowledge_js
+    assert "function renderKnowledgeToolTrace" in knowledge_js
+    assert "检索步骤" in knowledge_js
     assert ".knowledge-workbench" in app_css
     assert ".knowledge-create-btn" in app_css
+    assert ".knowledge-tool-trace" in app_css
     assert ".matrix-table" in app_css
 
     assert "function downloadRetrievalSummaryReport" in app_js

@@ -15,6 +15,7 @@ const knowledgeState = {
   searchBusy: false,
   chatBusy: false,
   chatMessages: [],
+  conversationId: "",
   matrixFields: [],
   matrixItems: [],
   matrixRunning: false,
@@ -66,6 +67,11 @@ function matrixApi(path) {
   return `/api/library/${knowledgeState.libraryId}/matrix${path}?knowledge_base_id=${encodeURIComponent(kb)}`;
 }
 
+function resetKnowledgeConversation() {
+  knowledgeState.conversationId = "";
+  knowledgeState.chatMessages = [];
+}
+
 function setKnowledgeMessage(message) {
   knowledgeState.message = message || "";
   renderKnowledgeStatus();
@@ -113,6 +119,7 @@ function renderKnowledgeStatus() {
 
 async function loadKnowledgeBases({ keepActive = true } = {}) {
   knowledgeState.loading = true;
+  const previousActiveId = knowledgeState.activeId;
   renderKnowledgeList();
   try {
     const data = await knowledgeJSON(knowledgeApi("/knowledge-bases"));
@@ -120,9 +127,11 @@ async function loadKnowledgeBases({ keepActive = true } = {}) {
     if (!keepActive || !knowledgeState.knowledgeBases.some((item) => item.knowledge_base_id === knowledgeState.activeId)) {
       knowledgeState.activeId = knowledgeState.knowledgeBases[0]?.knowledge_base_id || "";
     }
+    if (knowledgeState.activeId !== previousActiveId) resetKnowledgeConversation();
     if (knowledgeState.activeId) await loadKnowledgeBaseDetail(knowledgeState.activeId);
     else {
       knowledgeState.activeBase = null;
+      resetKnowledgeConversation();
       renderKnowledgeList();
       renderKnowledgeMatrix();
     }
@@ -175,6 +184,7 @@ async function createKnowledgeBaseFromPrompt() {
       body: JSON.stringify({ name: String(name).trim(), item_keys: [] }),
     });
     knowledgeState.activeId = data.knowledge_base?.knowledge_base_id || "";
+    resetKnowledgeConversation();
     setKnowledgeMessage("知识库已创建。");
     await loadEmbeddingStatus();
     await loadKnowledgeBases({ keepActive: true });
@@ -208,6 +218,7 @@ async function deleteActiveKnowledgeBase() {
     knowledgeState.activeBase = null;
     knowledgeState.searchQuery = "";
     knowledgeState.searchResults = [];
+    resetKnowledgeConversation();
     setKnowledgeMessage(`知识库“${name}”已删除。`);
     await loadKnowledgeBases({ keepActive: false });
   } catch (error) {
@@ -340,7 +351,9 @@ function renderKnowledgeList() {
     .join("");
   host.querySelectorAll("[data-knowledge-item]").forEach((button) =>
     button.addEventListener("click", () => {
-      knowledgeState.activeId = button.dataset.knowledgeItem || "";
+      const nextId = button.dataset.knowledgeItem || "";
+      if (nextId !== knowledgeState.activeId) resetKnowledgeConversation();
+      knowledgeState.activeId = nextId;
       knowledgeState.searchResults = [];
       loadKnowledgeBaseDetail(knowledgeState.activeId);
     }),
@@ -572,13 +585,33 @@ function renderKnowledgeChat() {
 function renderKnowledgeChatMessage(message) {
   const roleLabel = message.role === "user" ? "你" : message.role === "error" ? "错误" : "Agent";
   const sources = Array.isArray(message.sources) ? message.sources : [];
+  const toolTrace = Array.isArray(message.toolTrace) ? message.toolTrace : [];
   return `
     <article class="knowledge-chat-message ${escapeKnowledgeHtml(message.role || "assistant")}">
       <strong>${roleLabel}</strong>
       <p>${escapeKnowledgeHtml(message.content || "")}</p>
+      ${toolTrace.length ? renderKnowledgeToolTrace(toolTrace) : ""}
       ${sources.length ? `<ul class="knowledge-chat-sources">${sources.slice(0, 5).map(renderKnowledgeChatSource).join("")}</ul>` : ""}
     </article>
   `;
+}
+
+function renderKnowledgeToolTrace(toolTrace) {
+  return `
+    <details class="knowledge-tool-trace">
+      <summary>检索步骤：${toolTrace.length} 次</summary>
+      <ul>${toolTrace.slice(0, 5).map(renderKnowledgeToolTraceItem).join("")}</ul>
+    </details>
+  `;
+}
+
+function renderKnowledgeToolTraceItem(step) {
+  const args = step.args || {};
+  const bits = [step.tool || "tool"];
+  if (args.mode) bits.push(args.mode);
+  if (typeof step.result_count === "number") bits.push(`${step.result_count} 条`);
+  if (step.error) bits.push(`错误：${step.error}`);
+  return `<li>${escapeKnowledgeHtml(bits.join(" · "))}</li>`;
 }
 
 function renderKnowledgeChatSource(source) {
@@ -622,21 +655,22 @@ async function submitKnowledgeChat() {
   if (input) input.value = "";
   renderKnowledgeChat();
   try {
+    const payload = {
+      question,
+      knowledge_base_id: knowledgeState.activeId,
+    };
+    if (knowledgeState.conversationId) payload.conversation_id = knowledgeState.conversationId;
     const data = await knowledgeJSON(knowledgeApi("/chat"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question,
-        knowledge_base_id: knowledgeState.activeId,
-        mode: "auto",
-        top_k: 8,
-        include_context: true,
-      }),
+      body: JSON.stringify(payload),
     });
+    knowledgeState.conversationId = data.conversation_id || knowledgeState.conversationId;
     knowledgeState.chatMessages.push({
       role: "assistant",
       content: data.answer || "Agent 没有返回文本。",
       sources: data.sources || [],
+      toolTrace: data.tool_trace || [],
     });
     const sourceCount = Array.isArray(data.sources) ? data.sources.length : 0;
     setKnowledgeMessage(`Agent 回答完成：引用 ${sourceCount} 条证据。`);

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .agent import run_agentic_chat
 from .embeddings import embed_missing_chunks, embedding_status
 from .ingest import index_library, index_mineru_results
 from .store import (
@@ -33,6 +34,7 @@ __all__ = [
     "metadata_search",
     "remove_knowledge_base_items",
     "retrieve",
+    "run_agentic_chat",
     "save_embedding_config",
     "semantic_search",
 ]

@@ -212,6 +212,32 @@ CREATE TABLE IF NOT EXISTS rag_knowledge_base_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rag_kb_items_item ON rag_knowledge_base_items(item_key);
+
+CREATE TABLE IF NOT EXISTS rag_chat_sessions (
+  conversation_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  knowledge_base_id TEXT NOT NULL DEFAULT '',
+  item_keys_json TEXT NOT NULL DEFAULT '[]',
+  title TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chat_sessions_library ON rag_chat_sessions(library_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chat_sessions_kb ON rag_chat_sessions(knowledge_base_id);
+
+CREATE TABLE IF NOT EXISTS rag_chat_messages (
+  message_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  turn_index INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  sources_json TEXT NOT NULL DEFAULT '[]',
+  tool_trace_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chat_msg_conv ON rag_chat_messages(conversation_id, turn_index);
 """
 
 
@@ -250,6 +276,9 @@ def _migrate_store(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''")
     if "embedding_hash" not in chunk_columns:
         conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_hash TEXT NOT NULL DEFAULT ''")
+    message_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_chat_messages)").fetchall()}
+    if message_columns and "tool_trace_json" not in message_columns:
+        conn.execute("ALTER TABLE rag_chat_messages ADD COLUMN tool_trace_json TEXT NOT NULL DEFAULT '[]'")
 
 
 def text_hash(value: str | bytes) -> str:
@@ -756,6 +785,24 @@ def delete_knowledge_base(library: dict[str, Any], knowledge_base_id: str) -> di
     clean_id = str(existing["knowledge_base_id"])
     timestamp = now_iso()
     with connect(library) as conn:
+        conn.execute(
+            """
+            DELETE FROM rag_chat_messages
+            WHERE conversation_id IN (
+              SELECT conversation_id
+              FROM rag_chat_sessions
+              WHERE library_id = ? AND knowledge_base_id = ?
+            )
+            """,
+            (str(library["library_id"]), clean_id),
+        )
+        conn.execute(
+            """
+            DELETE FROM rag_chat_sessions
+            WHERE library_id = ? AND knowledge_base_id = ?
+            """,
+            (str(library["library_id"]), clean_id),
+        )
         conn.execute("DELETE FROM rag_knowledge_base_items WHERE knowledge_base_id = ?", (clean_id,))
         conn.execute(
             """

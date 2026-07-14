@@ -29,9 +29,6 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from . import app_store
 from .citation_export import CitationExportError, export_citations, export_filename
 from .codex_agent import (
-    build_agentic_rag_chat_prompt,
-    run_codex_connectivity_probe as rag_codex_connectivity_probe,
-    run_codex_prompt as rag_codex_prompt,
     run_reading_chat_turn,
     recommend_matrix_fields,
     run_reading_matrix_for_item,
@@ -55,9 +52,11 @@ from .rag import (
     metadata_search as rag_metadata_search,
     remove_knowledge_base_items as rag_remove_knowledge_base_items,
     retrieve as rag_retrieve,
+    run_agentic_chat as rag_run_agentic_chat,
     save_embedding_config as rag_save_embedding_config,
     semantic_search as rag_semantic_search,
 )
+from .rag.agent.client import missing_model_config_fields, normalize_openai_base_url
 from .retrieval import CandidateImportError, RetrievalError, imported_items_from_candidates, retrieval_source_statuses, search_retrieval
 from .retrieval.importing import imported_item_from_candidate
 from .retrieval.models import SearchOptions, candidate_material_type, normalized_material_type
@@ -14510,12 +14509,18 @@ def create_app() -> Flask:
     @app.post("/api/library/<library_id>/rag/agent/check")
     def api_rag_agent_check(library_id: str):
         try:
-            library = library_or_404(library_id)
-            result = rag_codex_connectivity_probe(
-                library=library,
-                codex_config=api_config_codex_for_library(library_id),
+            library_or_404(library_id)
+            model_config = api_config_model_for_library(library_id)
+            missing = missing_model_config_fields(model_config)
+            return jsonify(
+                {
+                    "ok": True,
+                    "configured": not missing,
+                    "model": model_config.get("model", ""),
+                    "base_url": normalize_openai_base_url(model_config.get("base_url")),
+                    "missing": missing,
+                }
             )
-            return jsonify(result)
         except SourceError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
@@ -14527,63 +14532,25 @@ def create_app() -> Flask:
         question = str(payload.get("question") or payload.get("query") or "").strip()
         if not question:
             return jsonify({"ok": False, "error": "question 不能为空。"}), 400
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        knowledge_base_id = str(payload.get("knowledge_base_id") or "").strip()
+        if not conversation_id and not knowledge_base_id:
+            return jsonify({"ok": False, "error": "新会话必须先选择知识库。"}), 400
         try:
             library = library_or_404(library_id)
-            evidence_pack = rag_retrieve(
-                library,
-                question,
-                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
-                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
-                mode=str(payload.get("mode") or "auto"),
-                top_k=int(payload.get("top_k") or 8),
-                include_context=bool(payload.get("include_context", True)),
-                context_window=int(payload.get("context_window") or 1),
-            )
-            sources = _rag_chat_sources(evidence_pack)
-            if not evidence_pack.get("results"):
-                return jsonify(
-                    {
-                        "ok": True,
-                        "answer": "当前知识库没有检索到足够证据，无法基于文库内容回答这个问题。请先刷新 RAG 索引、扩大知识库范围，或换一个更具体的检索问题。",
-                        "sources": [],
-                        "evidence_pack": evidence_pack,
-                        "tool_calls": evidence_pack.get("tool_calls") or [],
-                        "warnings": evidence_pack.get("warnings") or [],
-                    }
-                )
-            prompt = build_agentic_rag_chat_prompt(question=question, evidence_pack=evidence_pack)
-            codex_result = rag_codex_prompt(
+            model_config = api_config_model_for_library(library_id)
+            missing = missing_model_config_fields(model_config)
+            if missing:
+                return jsonify({"ok": False, "error": f"模型 API 配置不完整，请先配置：{', '.join(missing)}。"}), 400
+            result = rag_run_agentic_chat(
                 library=library,
-                codex_config=api_config_codex_for_library(library_id),
-                prompt=prompt,
-                include_agentic_rag_skill=True,
-                ephemeral=True,
+                model_config=model_config,
+                conversation_id=conversation_id,
+                question=question,
+                knowledge_base_id=knowledge_base_id,
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
             )
-            if not codex_result.get("ok"):
-                return jsonify(
-                    {
-                        "ok": False,
-                        "error": codex_result.get("message") or codex_result.get("assistant_text") or "Codex Agent 调用失败。",
-                        "sources": sources,
-                        "evidence_pack": evidence_pack,
-                        "tool_calls": evidence_pack.get("tool_calls") or [],
-                        "diagnostics": codex_result.get("diagnostics") or {},
-                    }
-                ), 400
-            return jsonify(
-                {
-                    "ok": True,
-                    "answer": codex_result.get("assistant_text") or "",
-                    "sources": sources,
-                    "evidence_pack": evidence_pack,
-                    "tool_calls": evidence_pack.get("tool_calls") or [],
-                    "warnings": evidence_pack.get("warnings") or [],
-                    "usage": codex_result.get("usage"),
-                    "diagnostics": codex_result.get("diagnostics") or {},
-                    "turn_id": codex_result.get("turn_id", ""),
-                    "turn_status": codex_result.get("turn_status", ""),
-                }
-            )
+            return jsonify(result)
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
         except Exception as exc:  # noqa: BLE001

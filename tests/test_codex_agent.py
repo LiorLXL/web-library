@@ -60,12 +60,12 @@ def test_codex_agent_check_reports_missing_config(zotero_fixture: Path, monkeypa
 
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["ok"] is False
-    assert "Codex 模型" in payload["message"]
-    assert payload["diagnostics"]["error_type"] == "config"
+    assert payload["ok"] is True
+    assert payload["configured"] is False
+    assert payload["missing"] == ["model", "api_key"]
 
 
-def test_codex_agent_check_uses_saved_codex_config(
+def test_rag_agent_check_uses_saved_model_config(
     zotero_fixture: Path,
     monkeypatch,
     tmp_path: Path,
@@ -76,28 +76,13 @@ def test_codex_agent_check_uses_saved_codex_config(
         library["library_id"],
         API_CONFIG_PREFERENCE_KEY,
         {
-            "codex": {
+            "model": {
                 "model": "gpt-5.4",
-                "base_url": "https://api.openai.com/v1",
+                "base_url": "https://api.openai.com/v1/chat/completions",
                 "api_key": "sk-test",
-                "reasoning_effort_default": "medium",
             }
         },
     )
-    captured: dict[str, Any] = {}
-
-    def fake_probe(*, library: dict[str, Any], codex_config: dict[str, Any]) -> dict[str, Any]:
-        captured["library"] = library
-        captured["codex_config"] = codex_config
-        return {
-            "ok": True,
-            "message": "测试成功：正常",
-            "assistant_text": "正常",
-            "usage": None,
-            "diagnostics": {},
-        }
-
-    monkeypatch.setattr("zotero_web_library.web.rag_codex_connectivity_probe", fake_probe)
     client = create_app().test_client()
 
     response = client.post(f"/api/library/{library['library_id']}/rag/agent/check")
@@ -105,13 +90,13 @@ def test_codex_agent_check_uses_saved_codex_config(
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["ok"] is True
-    assert payload["assistant_text"] == "正常"
-    assert captured["library"]["library_id"] == library["library_id"]
-    assert captured["codex_config"]["model"] == "gpt-5.4"
-    assert captured["codex_config"]["api_key"] == "sk-test"
+    assert payload["configured"] is True
+    assert payload["model"] == "gpt-5.4"
+    assert payload["base_url"] == "https://api.openai.com/v1"
+    assert payload["missing"] == []
 
 
-def test_rag_chat_uses_retrieve_and_codex_runner(
+def test_rag_chat_uses_agentic_runner_and_model_config(
     zotero_fixture: Path,
     monkeypatch,
     tmp_path: Path,
@@ -124,36 +109,34 @@ def test_rag_chat_uses_retrieve_and_codex_runner(
         library["library_id"],
         API_CONFIG_PREFERENCE_KEY,
         {
-            "codex": {
+            "model": {
                 "model": "gpt-5.4",
                 "base_url": "https://api.openai.com/v1",
                 "api_key": "sk-test",
-                "reasoning_effort_default": "medium",
             }
         },
     )
     captured: dict[str, Any] = {}
 
-    def fake_prompt(**kwargs: Any) -> dict[str, Any]:
+    def fake_runner(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
-        assert kwargs["include_agentic_rag_skill"] is True
-        assert "Evidence Pack JSON" in kwargs["prompt"]
-        assert "Action chunking" in kwargs["prompt"]
         return {
             "ok": True,
-            "assistant_text": "Action chunking 用于增强长时程操作鲁棒性 [ITEM0001:chunk-test]。",
+            "conversation_id": "conv-test",
+            "answer": "Action chunking 用于增强长时程操作鲁棒性 [ITEM0001:chunk-test]。",
+            "sources": [{"citation": "[ITEM0001:chunk-test]"}],
+            "tool_trace": [{"tool": "search_evidence", "ok": True, "result_count": 1}],
             "usage": {"input_tokens": 10},
-            "diagnostics": {"mock": True},
-            "turn_id": "turn-test",
-            "turn_status": "completed",
+            "iterations": 2,
+            "warnings": [],
         }
 
-    monkeypatch.setattr("zotero_web_library.web.rag_codex_prompt", fake_prompt)
+    monkeypatch.setattr("zotero_web_library.web.rag_run_agentic_chat", fake_runner)
     client = create_app().test_client()
 
     response = client.post(
         f"/api/library/{library['library_id']}/rag/chat",
-        json={"question": "Action chunking", "top_k": 5},
+        json={"question": "Action chunking", "knowledge_base_id": "kb-test"},
     )
 
     assert response.status_code == 200
@@ -161,12 +144,12 @@ def test_rag_chat_uses_retrieve_and_codex_runner(
     assert payload["ok"] is True
     assert "Action chunking" in payload["answer"]
     assert payload["sources"]
-    assert payload["tool_calls"]
-    assert payload["diagnostics"] == {"mock": True}
-    assert captured["codex_config"]["api_key"] == "sk-test"
+    assert payload["tool_trace"]
+    assert captured["model_config"]["api_key"] == "sk-test"
+    assert captured["knowledge_base_id"] == "kb-test"
 
 
-def test_rag_chat_returns_insufficient_evidence_without_codex(
+def test_rag_chat_requires_model_config(
     zotero_fixture: Path,
     monkeypatch,
     tmp_path: Path,
@@ -177,11 +160,10 @@ def test_rag_chat_returns_insufficient_evidence_without_codex(
 
     response = client.post(
         f"/api/library/{library['library_id']}/rag/chat",
-        json={"question": "不存在的证据问题"},
+        json={"question": "不存在的证据问题", "knowledge_base_id": "kb-test"},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
     payload = response.get_json()
-    assert payload["ok"] is True
-    assert payload["sources"] == []
-    assert "没有检索到足够证据" in payload["answer"]
+    assert payload["ok"] is False
+    assert "模型 API 配置不完整" in payload["error"]
