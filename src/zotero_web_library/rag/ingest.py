@@ -8,6 +8,7 @@ from typing import Any
 from zotero_web_library.rag.chunking import chunk_markdown, chunk_plain_text, clean_text, html_to_text
 from zotero_web_library.rag.embeddings import EmbeddingConfigError, embed_missing_chunks
 from zotero_web_library.rag.store import (
+    cleanup_orphan_embeddings,
     connect,
     embedding_config,
     ensure_store,
@@ -254,7 +255,7 @@ def index_library(library: dict[str, Any]) -> dict[str, Any]:
     ensure_store(library)
     repo = ZoteroRepository(library)
     items = repo.items()
-    reset_index(library)
+    reset_index(library, preserve_embeddings=True)
     with connect(library) as conn:
         for item in items:
             doc, chunks = item_metadata_document(library, item)
@@ -288,7 +289,7 @@ def index_mineru_results(library: dict[str, Any], *, reset_existing: bool = True
     items = repo.items()
     items_by_key = item_by_key(items)
     if reset_existing:
-        reset_index(library, source_types=["mineru_markdown"])
+        reset_index(library, source_types=["mineru_markdown"], preserve_embeddings=True)
     root = Path(str(library["data_path"])) / "mineru-results"
     results = latest_mineru_results(root)
     with connect(library) as conn:
@@ -297,11 +298,6 @@ def index_mineru_results(library: dict[str, Any], *, reset_existing: bool = True
             doc, chunks, image_paths = mineru_document(library, json_path, payload, items_by_key.get(item_key))
             upsert_document(conn, doc)
             if chunks:
-                chunk_rows = conn.execute("SELECT chunk_id FROM rag_chunks WHERE doc_id = ?", (doc["doc_id"],)).fetchall()
-                chunk_ids = [str(row["chunk_id"]) for row in chunk_rows]
-                if chunk_ids:
-                    placeholders = ",".join("?" for _ in chunk_ids)
-                    conn.execute(f"DELETE FROM rag_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
                 conn.execute("DELETE FROM rag_chunk_fts WHERE doc_id = ?", (doc["doc_id"],))
                 conn.execute("DELETE FROM rag_chunk_parents WHERE doc_id = ?", (doc["doc_id"],))
                 conn.execute("DELETE FROM rag_chunks WHERE doc_id = ?", (doc["doc_id"],))
@@ -338,6 +334,7 @@ def index_mineru_results(library: dict[str, Any], *, reset_existing: bool = True
                         "created_at": now_iso(),
                     },
                 )
+        cleanup_orphan_embeddings(conn)
         conn.commit()
     if not finalize:
         return update_config_stats(library)

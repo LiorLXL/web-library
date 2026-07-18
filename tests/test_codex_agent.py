@@ -171,6 +171,73 @@ def test_rag_chat_requires_model_config(
     assert "模型 API 配置不完整" in payload["error"]
 
 
+def test_rag_chat_async_submission_and_cancel_routes(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    app_store.set_preference(
+        library["library_id"],
+        API_CONFIG_PREFERENCE_KEY,
+        {"model": {"model": "gpt-test", "base_url": "https://api.openai.com/v1", "api_key": "sk-test"}},
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_start(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "accepted": True,
+            "run_id": "run-async",
+            "conversation_id": "conv-async",
+            "status": "running",
+            "events": [],
+        }
+
+    def fake_cancel(target_library: dict[str, Any], run_id: str) -> dict[str, Any]:
+        assert target_library["library_id"] == library["library_id"]
+        assert run_id == "run-async"
+        return {"ok": True, "cancel_requested": True, "run": {"run_id": run_id, "status": "running"}}
+
+    def fake_restart(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["library"]["library_id"] == library["library_id"]
+        assert kwargs["run_id"] == "run-interrupted"
+        assert kwargs["model_config"]["api_key"] == "sk-test"
+        return {
+            "ok": True,
+            "accepted": True,
+            "run_id": "run-restarted",
+            "conversation_id": "conv-async",
+            "status": "running",
+            "events": [],
+        }
+
+    monkeypatch.setattr("zotero_web_library.web.start_agentic_chat_job", fake_start)
+    monkeypatch.setattr("zotero_web_library.web.cancel_agent_chat_job", fake_cancel)
+    monkeypatch.setattr("zotero_web_library.web.restart_agent_chat_job", fake_restart)
+    client = create_app().test_client()
+
+    response = client.post(
+        f"/api/library/{library['library_id']}/rag/chat",
+        json={"question": "异步问题", "knowledge_base_id": "kb-test", "response_mode": "async"},
+    )
+    assert response.status_code == 202
+    assert response.get_json()["run_id"] == "run-async"
+    assert captured["question"] == "异步问题"
+
+    cancel_response = client.post(f"/api/library/{library['library_id']}/rag/chat/runs/run-async/cancel")
+    assert cancel_response.status_code == 200
+    assert cancel_response.get_json()["cancel_requested"] is True
+
+    restart_response = client.post(
+        f"/api/library/{library['library_id']}/rag/chat/runs/run-interrupted/restart"
+    )
+    assert restart_response.status_code == 202
+    assert restart_response.get_json()["run_id"] == "run-restarted"
+
+
 def test_rag_chat_history_restores_latest_knowledge_base_conversation(
     zotero_fixture: Path,
     monkeypatch,

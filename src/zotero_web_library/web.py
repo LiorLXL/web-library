@@ -58,7 +58,9 @@ from .rag import (
     semantic_search as rag_semantic_search,
 )
 from .rag.agent.client import missing_model_config_fields, normalize_openai_base_url
+from .rag.agent.jobs import cancel_agent_chat_job, restart_agent_chat_job, start_agentic_chat_job
 from .rag.agent.memory import load_conversation
+from .rag.agent.runtime import load_agent_events, load_agent_run, reconcile_interrupted_runs
 from .retrieval import CandidateImportError, RetrievalError, imported_items_from_candidates, retrieval_source_statuses, search_retrieval
 from .retrieval.importing import imported_item_from_candidate
 from .retrieval.models import SearchOptions, candidate_material_type, normalized_material_type
@@ -14545,6 +14547,46 @@ def create_app() -> Flask:
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.get("/api/library/<library_id>/rag/chat/runs/<run_id>")
+    def api_rag_chat_run(library_id: str, run_id: str):
+        try:
+            library = library_or_404(library_id)
+            reconcile_interrupted_runs(library)
+            run = load_agent_run(library, run_id)
+            if not run or str(run.get("library_id") or "") != library_id:
+                return jsonify({"ok": False, "error": "Agent 运行记录不存在。"}), 404
+            after_sequence = max(0, int(request.args.get("after_sequence") or 0))
+            if after_sequence:
+                run["events"] = load_agent_events(library, run_id, after_sequence=after_sequence)
+            return jsonify({"ok": True, **run})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/chat/runs/<run_id>/cancel")
+    def api_rag_chat_run_cancel(library_id: str, run_id: str):
+        try:
+            result = cancel_agent_chat_job(library_or_404(library_id), run_id)
+            return jsonify(result)
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/chat/runs/<run_id>/restart")
+    def api_rag_chat_run_restart(library_id: str, run_id: str):
+        try:
+            library = library_or_404(library_id)
+            model_config = api_config_model_for_library(library_id)
+            missing = missing_model_config_fields(model_config)
+            if missing:
+                return jsonify({"ok": False, "error": f"模型 API 配置不完整，请先配置：{', '.join(missing)}。"}), 400
+            result = restart_agent_chat_job(
+                library=library,
+                model_config=model_config,
+                run_id=run_id,
+            )
+            return jsonify(result), 202
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.post("/api/library/<library_id>/rag/chat")
     def api_rag_chat(library_id: str):
         payload = request.get_json(silent=True) or {}
@@ -14563,6 +14605,16 @@ def create_app() -> Flask:
             missing = missing_model_config_fields(model_config)
             if missing:
                 return jsonify({"ok": False, "error": f"模型 API 配置不完整，请先配置：{', '.join(missing)}。"}), 400
+            if str(payload.get("response_mode") or "").strip().lower() == "async":
+                result = start_agentic_chat_job(
+                    library=library,
+                    model_config=model_config,
+                    conversation_id=conversation_id,
+                    question=question,
+                    knowledge_base_id=knowledge_base_id,
+                    item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                )
+                return jsonify(result), 202
             result = rag_run_agentic_chat(
                 library=library,
                 model_config=model_config,

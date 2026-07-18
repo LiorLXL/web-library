@@ -1,7 +1,7 @@
 # 语义检索
 
 状态：实现说明  
-日期：2026-07-08
+日期：2026-07-18
 
 ## 范围
 
@@ -9,7 +9,7 @@
 
 - RAG 数据仍然按文库存放在 `app-data/libraries/<library_id>/rag.sqlite`。
 - 不修改 Zotero 原生 schema。
-- `rag.sqlite` 仍然是可删除、可重建的派生索引。
+- `rag_embeddings` 是可重建的派生索引；整个 `rag.sqlite` 还包含知识库、会话和 Agent 历史，不能把删除数据库当作普通索引刷新。
 - 知识库作用域必须在向量检索前由后端强制执行。
 - 如果同时传入 `knowledge_base_id` 和 `item_keys`，实际检索范围取两者交集。
 - 未配置 embedding 时，metadata/keyword 检索和知识库问答仍然可用。
@@ -42,10 +42,11 @@ Provider 抽象位于 `src/zotero_web_library/rag/embeddings.py`。
 
 embedding 生成和 chunk 写入是分离的：
 
-1. `insert_chunks()` 只写入 `rag_chunks` 和 FTS 行。
-2. 如果当前文库已配置 embedding，新 chunk 会被标记为 `pending`。
-3. `index_library()` 和 `index_mineru_results()` 在普通 RAG 索引完成后，会执行一次有 batch 限制的 `embed_missing_chunks()`。
-4. 调用方也可以显式触发 embedding 补齐：
+1. `insert_chunks()` 写入 `rag_chunks` 和 FTS 行，并按 `chunk_id + provider + model + content_hash + content_version` 查找可复用向量。
+2. 完全匹配的旧 embedding 会恢复为 `embedded`；只有新增、正文变化、模型变化或内容版本变化的 chunk 标记为 `pending`。
+3. `index_library()` 和 `index_mineru_results()` 在普通 RAG 索引完成后，会调用 `embed_missing_chunks()` 补齐全部 pending chunk；请求按 `batch_size` 分批发送，但还会受 provider 安全上限约束（OpenAI-compatible 当前最多 10 条/批），该值不再限制一次操作的总处理量。
+4. 每个成功批次立即提交到 SQLite；中途 provider 失败只标记当前失败批次，之前成功的向量保留，后续批次维持 pending。再次补齐不会重做成功批次。
+5. 调用方也可以显式触发 embedding 补齐：
 
 ```http
 POST /api/library/<library_id>/rag/embeddings/index
@@ -100,10 +101,10 @@ POST /api/library/<library_id>/rag/tools/semantic_search
 
 - 未配置 embedding 时，会提示当前聊天仍使用关键词检索。
 - 已配置后，会显示已生成的 chunk embedding 数量、provider/model、待生成数量和失败数量。
-- “补齐语义索引”会只处理缺失或过期的 chunk。
-- “强制重建”会在当前知识库范围内重新生成 embedding。
+- “补齐全库语义索引”会一次处理文库内全部缺失或过期的 chunk，不再每次最多处理 64 个；各知识库共享这些向量，不重复生成。
+- “强制重建当前库”会在当前知识库范围内重新生成全部 embedding，仅在更换模型或确认向量损坏时使用。
 
-顶部“刷新 RAG 索引”仍然负责重建 metadata、notes、MinerU chunks 和 FTS 索引；如果 embedding 已启用，刷新后会自动补齐一批 pending chunks。
+顶部“刷新文档索引”负责重新扫描 metadata、notes、MinerU chunks 和 FTS 索引。操作前会明确确认；内容未变化的 chunk 复用已有 embedding，只为新增或变化的 chunk 调用 provider，并在刷新后补齐全部 pending chunk。文档刷新与 embedding 生成互斥，避免两个操作并发改写索引状态。
 
 ### 3. 使用知识库问答
 
@@ -154,7 +155,7 @@ MinerU Markdown 会保留完整标题路径，例如 `Paper > Method > Experimen
 
 FTS 和向量索引继续使用较小的 `rag_chunks` 做召回；每个子 chunk 通过 `parent_chunk_id` 指向 `rag_chunk_parents` 中的章节上下文。`retrieve(include_context=True)` 和 `read_chunk_context` 命中子块后优先返回父级章节文本，从而兼顾召回精度和回答上下文完整性。
 
-旧数据库会自动补齐新字段，但旧 chunk 会保留 `legacy-v1` 标记。`GET /api/library/<library_id>/rag/index/status` 返回 `requires_reindex=true` 时，使用知识库页面的“刷新 RAG 索引”或调用索引接口重建；Embedding 会因为内容版本不一致自动进入待重建状态。
+旧数据库会自动补齐新字段，但旧 chunk 会保留 `legacy-v1` 标记。`GET /api/library/<library_id>/rag/index/status` 返回 `requires_reindex=true` 时，使用知识库页面的“刷新文档索引”或调用索引接口重建；只有内容版本不一致的 Embedding 会进入待重建状态，完全匹配的向量继续复用。
 
 ## Metadata filters
 

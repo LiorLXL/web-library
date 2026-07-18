@@ -20,6 +20,12 @@ class ChatSession:
     item_keys: list[str]
 
 
+@dataclass(slots=True)
+class ChatTurn:
+    turn_index: int
+    user_message_id: str
+
+
 def get_or_create_session(
     library: dict[str, Any],
     *,
@@ -137,6 +143,9 @@ def load_conversation(
     conversation in the requested knowledge base is returned.
     """
     ensure_store(library)
+    from .runtime import reconcile_interrupted_runs
+
+    reconcile_interrupted_runs(library)
     library_id = str(library["library_id"])
     clean_conversation_id = str(conversation_id or "").strip()
     clean_knowledge_base_id = str(knowledge_base_id or "").strip()
@@ -171,12 +180,13 @@ def load_conversation(
                 "knowledge_base_id": clean_knowledge_base_id,
                 "item_keys": [],
                 "messages": [],
+                "active_run": {},
             }
 
         session = _session_from_row(dict(session_row))
         message_rows = conn.execute(
             """
-            SELECT turn_index, role, content, sources_json, tool_trace_json, created_at
+            SELECT turn_index, role, content, sources_json, tool_trace_json, run_id, created_at
             FROM rag_chat_messages
             WHERE conversation_id = ? AND role IN ('user', 'assistant')
             ORDER BY turn_index ASC,
@@ -186,22 +196,63 @@ def load_conversation(
             (session.conversation_id,),
         ).fetchall()
 
-    messages = [
-        {
+        latest_run_row = conn.execute(
+            """
+            SELECT run_id
+            FROM rag_agent_runs
+            WHERE conversation_id = ?
+            ORDER BY created_at DESC, run_id DESC
+            LIMIT 1
+            """,
+            (session.conversation_id,),
+        ).fetchone()
+
+    from .runtime import load_agent_run
+
+    run_cache: dict[str, dict[str, Any]] = {}
+    for row in message_rows:
+        run_id = str(row["run_id"] or "")
+        if run_id and run_id not in run_cache:
+            run_cache[run_id] = load_agent_run(library, run_id)
+
+    messages: list[dict[str, Any]] = []
+    for row in message_rows:
+        run_id = str(row["run_id"] or "")
+        message = {
             "turn_index": int(row["turn_index"] or 0),
             "role": str(row["role"] or ""),
             "content": str(row["content"] or ""),
             "sources": _json_list(row["sources_json"]),
             "tool_trace": _json_list(row["tool_trace_json"]),
+            "run_id": run_id,
             "created_at": str(row["created_at"] or ""),
         }
-        for row in message_rows
-    ]
+        run = run_cache.get(run_id) or {}
+        if message["role"] == "assistant" and run:
+            message.update(
+                {
+                    "agent_trace": run.get("events") or [],
+                    "agent_state": {
+                        "current_state": run.get("current_state") or "",
+                        "status": run.get("status") or "",
+                        "task_plan": run.get("task_plan") or {},
+                        "evidence_state": run.get("evidence_state") or {},
+                    },
+                    "stop_reason": run.get("stop_reason") or "",
+                    "run_status": run.get("status") or "",
+                }
+            )
+        messages.append(message)
+
+    latest_run_id = str(latest_run_row["run_id"] or "") if latest_run_row else ""
+    latest_run = run_cache.get(latest_run_id) or (load_agent_run(library, latest_run_id) if latest_run_id else {})
+    active_run = latest_run if latest_run.get("status") == "running" else {}
     return {
         "conversation_id": session.conversation_id,
         "knowledge_base_id": session.knowledge_base_id,
         "item_keys": session.item_keys,
         "messages": messages,
+        "active_run": active_run,
         "title": str(session_row["title"] or ""),
         "created_at": str(session_row["created_at"] or ""),
         "updated_at": str(session_row["updated_at"] or ""),
@@ -216,9 +267,30 @@ def save_turn(
     answer: str,
     sources: list[dict[str, Any]],
     tool_trace: list[dict[str, Any]],
+    run_id: str = "",
 ) -> None:
+    turn = begin_turn(library, session, question=question, run_id=run_id)
+    complete_turn(
+        library,
+        session,
+        turn_index=turn.turn_index,
+        answer=answer,
+        sources=sources,
+        tool_trace=tool_trace,
+        run_id=run_id,
+    )
+
+
+def begin_turn(
+    library: dict[str, Any],
+    session: ChatSession,
+    *,
+    question: str,
+    run_id: str,
+) -> ChatTurn:
     ensure_store(library)
     timestamp = now_iso()
+    message_id = f"msg-{uuid.uuid4().hex}"
     with connect(library) as conn:
         row = conn.execute(
             "SELECT COALESCE(MAX(turn_index), 0) AS turn_index FROM rag_chat_messages WHERE conversation_id = ?",
@@ -228,25 +300,69 @@ def save_turn(
         conn.execute(
             """
             INSERT INTO rag_chat_messages (
-              message_id, conversation_id, turn_index, role, content,
+              message_id, conversation_id, run_id, turn_index, role, content,
               sources_json, tool_trace_json, created_at
             )
-            VALUES (?, ?, ?, 'user', ?, '[]', '[]', ?)
+            VALUES (?, ?, ?, ?, 'user', ?, '[]', '[]', ?)
             """,
-            (f"msg-{uuid.uuid4().hex}", session.conversation_id, turn_index, str(question or ""), timestamp),
+            (
+                message_id,
+                session.conversation_id,
+                str(run_id or ""),
+                turn_index,
+                str(question or ""),
+                timestamp,
+            ),
         )
         conn.execute(
             """
+            UPDATE rag_chat_sessions
+            SET updated_at = ?
+            WHERE conversation_id = ? AND library_id = ?
+            """,
+            (timestamp, session.conversation_id, session.library_id),
+        )
+        conn.commit()
+    return ChatTurn(turn_index=turn_index, user_message_id=message_id)
+
+
+def complete_turn(
+    library: dict[str, Any],
+    session: ChatSession,
+    *,
+    turn_index: int,
+    answer: str,
+    sources: list[dict[str, Any]],
+    tool_trace: list[dict[str, Any]],
+    run_id: str,
+) -> None:
+    ensure_store(library)
+    timestamp = now_iso()
+    with connect(library) as conn:
+        existing = conn.execute(
+            """
+            SELECT message_id
+            FROM rag_chat_messages
+            WHERE conversation_id = ? AND turn_index = ? AND role = 'assistant'
+            LIMIT 1
+            """,
+            (session.conversation_id, int(turn_index)),
+        ).fetchone()
+        if existing:
+            return
+        conn.execute(
+            """
             INSERT INTO rag_chat_messages (
-              message_id, conversation_id, turn_index, role, content,
+              message_id, conversation_id, run_id, turn_index, role, content,
               sources_json, tool_trace_json, created_at
             )
-            VALUES (?, ?, ?, 'assistant', ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, 'assistant', ?, ?, ?, ?)
             """,
             (
                 f"msg-{uuid.uuid4().hex}",
                 session.conversation_id,
-                turn_index,
+                str(run_id or ""),
+                int(turn_index),
                 str(answer or ""),
                 json_dumps(sources),
                 json_dumps(tool_trace),

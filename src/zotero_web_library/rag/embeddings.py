@@ -99,14 +99,41 @@ def embedding_status(library: dict[str, Any]) -> dict[str, Any]:
     ensure_store(library)
     config = embedding_config(library)
     with connect(library) as conn:
-        rows = conn.execute(
-            """
-            SELECT embedding_status, COUNT(*) AS chunk_count
-            FROM rag_chunks
-            GROUP BY embedding_status
-            ORDER BY embedding_status
-            """
-        ).fetchall()
+        if config.get("enabled") and config.get("provider") and config.get("model"):
+            provider_name = str(config.get("provider") or "").strip().lower()
+            model = str(config.get("model") or "").strip()
+            model_label = f"{provider_name}:{model}"
+            rows = conn.execute(
+                """
+                SELECT normalized_status AS embedding_status, COUNT(*) AS chunk_count
+                FROM (
+                  SELECT CASE
+                    WHEN e.chunk_id IS NOT NULL
+                      AND e.provider = ? AND e.model = ?
+                      AND e.content_hash = c.content_hash
+                      AND e.content_version = c.content_version
+                      AND c.embedding_model = ?
+                    THEN 'embedded'
+                    WHEN c.embedding_status = 'failed' THEN 'failed'
+                    ELSE 'pending'
+                  END AS normalized_status
+                  FROM rag_chunks c
+                  LEFT JOIN rag_embeddings e ON e.chunk_id = c.chunk_id
+                )
+                GROUP BY normalized_status
+                ORDER BY normalized_status
+                """,
+                (provider_name, model, model_label),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT embedding_status, COUNT(*) AS chunk_count
+                FROM rag_chunks
+                GROUP BY embedding_status
+                ORDER BY embedding_status
+                """
+            ).fetchall()
         stored = conn.execute("SELECT COUNT(*) FROM rag_embeddings").fetchone()[0]
     return {
         "configured": bool(config.get("enabled") and config.get("provider") and config.get("model")),
@@ -151,14 +178,16 @@ def embed_missing_chunks(
     if knowledge_base_id and not scope:
         return _empty_index_result(active_provider, status="empty_scope")
 
-    limit = max(1, min(int(batch_size or config.get("batch_size") or DEFAULT_EMBEDDING_BATCH_SIZE), 512))
+    provider_batch_size = max(
+        1,
+        min(int(batch_size or config.get("batch_size") or DEFAULT_EMBEDDING_BATCH_SIZE), 512),
+    )
     model_label = _model_label(active_provider)
     rows = _chunks_needing_embedding(
         library,
         provider=active_provider,
         model_label=model_label,
         item_keys=scope,
-        limit=limit,
         force=force,
     )
     if not rows:
@@ -167,123 +196,136 @@ def embed_missing_chunks(
             "configured": True,
         }
 
-    texts = [str(row["content"] or "") for row in rows]
     timestamp = now_iso()
     embedded_count = 0
     failed_count = 0
-    try:
-        vectors = _embed_texts_batched(active_provider, texts)
-    except Exception as exc:  # noqa: BLE001
+    processed_count = 0
+    error_message = ""
+    batch_limit = _embedding_batch_limit(active_provider, provider_batch_size)
+    for start in range(0, len(rows), batch_limit):
+        batch_rows = rows[start : start + batch_limit]
+        batch_texts = [str(row["content"] or "") for row in batch_rows]
+        try:
+            vectors = active_provider.embed_texts(batch_texts)
+            if len(vectors) != len(batch_rows):
+                raise EmbeddingConfigError(
+                    f"Embedding provider returned {len(vectors)} vectors for {len(batch_rows)} input texts."
+                )
+        except Exception as exc:  # noqa: BLE001
+            error_message = str(exc)
+            with connect(library) as conn:
+                for row in batch_rows:
+                    conn.execute(
+                        """
+                        UPDATE rag_chunks
+                        SET embedding_status = 'failed', embedding_model = ?, embedding_hash = ''
+                        WHERE chunk_id = ?
+                        """,
+                        (model_label, row["chunk_id"]),
+                    )
+                conn.commit()
+            failed_count += len(batch_rows)
+            processed_count += len(batch_rows)
+            break
+
+        batch_embedded = 0
+        batch_failed = 0
+        observed_dim: int | None = None
         with connect(library) as conn:
-            for row in rows:
+            for row, vector in zip(batch_rows, vectors):
+                if not vector:
+                    batch_failed += 1
+                    conn.execute(
+                        "UPDATE rag_chunks SET embedding_status = 'failed', embedding_model = ?, embedding_hash = '' WHERE chunk_id = ?",
+                        (model_label, row["chunk_id"]),
+                    )
+                    continue
+                normalized = _normalize([float(value) for value in vector])
+                observed_dim = observed_dim or len(normalized)
+                packed = pack_embedding(normalized)
+                payload = {
+                    "chunk_id": row["chunk_id"],
+                    "library_id": str(library["library_id"]),
+                    "provider": active_provider.provider_name,
+                    "model": active_provider.model,
+                    "dim": len(normalized),
+                    "embedding": packed,
+                    "content_hash": row["content_hash"],
+                    "content_version": row["content_version"],
+                    "embedding_hash": text_hash(packed),
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                }
+                conn.execute(
+                    """
+                    INSERT INTO rag_embeddings (
+                      chunk_id, library_id, provider, model, dim, embedding,
+                      content_hash, content_version, embedding_hash, created_at, updated_at
+                    )
+                    VALUES (
+                      :chunk_id, :library_id, :provider, :model, :dim, :embedding,
+                      :content_hash, :content_version, :embedding_hash, :created_at, :updated_at
+                    )
+                    ON CONFLICT(chunk_id) DO UPDATE SET
+                      library_id = excluded.library_id,
+                      provider = excluded.provider,
+                      model = excluded.model,
+                      dim = excluded.dim,
+                      embedding = excluded.embedding,
+                      content_hash = excluded.content_hash,
+                      content_version = excluded.content_version,
+                      embedding_hash = excluded.embedding_hash,
+                      updated_at = excluded.updated_at
+                    """,
+                    payload,
+                )
                 conn.execute(
                     """
                     UPDATE rag_chunks
-                    SET embedding_status = 'failed',
-                        embedding_model = ?,
-                        embedding_hash = ''
+                    SET embedding_status = 'embedded', embedding_model = ?, embedding_hash = ?
                     WHERE chunk_id = ?
                     """,
-                    (model_label, row["chunk_id"]),
+                    (model_label, payload["embedding_hash"], row["chunk_id"]),
+                )
+                batch_embedded += 1
+            if observed_dim:
+                conn.execute(
+                    """
+                    UPDATE rag_config
+                    SET embedding_dim = ?, embedding_provider = ?, embedding_model = ?,
+                        vector_store_type = CASE WHEN vector_store_type = 'none' THEN 'sqlite_blob' ELSE vector_store_type END,
+                        updated_at = ?
+                    WHERE library_id = ?
+                    """,
+                    (
+                        observed_dim,
+                        active_provider.provider_name,
+                        active_provider.model,
+                        timestamp,
+                        str(library["library_id"]),
+                    ),
                 )
             conn.commit()
-        return {
-            "ok": False,
-            "status": "failed",
-            "error": str(exc),
-            "provider": active_provider.provider_name,
-            "model": active_provider.model,
-            "processed_chunks": len(rows),
-            "embedded_chunks": 0,
-            "failed_chunks": len(rows),
-        }
+        embedded_count += batch_embedded
+        failed_count += batch_failed
+        processed_count += len(batch_rows)
 
-    with connect(library) as conn:
-        for row, vector in zip(rows, vectors):
-            if not vector:
-                failed_count += 1
-                conn.execute(
-                    "UPDATE rag_chunks SET embedding_status = 'failed', embedding_model = ?, embedding_hash = '' WHERE chunk_id = ?",
-                    (model_label, row["chunk_id"]),
-                )
-                continue
-            normalized = _normalize([float(value) for value in vector])
-            dim = len(normalized)
-            payload = {
-                "chunk_id": row["chunk_id"],
-                "library_id": str(library["library_id"]),
-                "provider": active_provider.provider_name,
-                "model": active_provider.model,
-                "dim": dim,
-                "embedding": pack_embedding(normalized),
-                "content_hash": row["content_hash"],
-                "content_version": row["content_version"],
-                "embedding_hash": text_hash(pack_embedding(normalized)),
-                "created_at": timestamp,
-                "updated_at": timestamp,
-            }
-            conn.execute(
-                """
-                INSERT INTO rag_embeddings (
-                  chunk_id, library_id, provider, model, dim, embedding,
-                  content_hash, content_version, embedding_hash, created_at, updated_at
-                )
-                VALUES (
-                  :chunk_id, :library_id, :provider, :model, :dim, :embedding,
-                  :content_hash, :content_version, :embedding_hash, :created_at, :updated_at
-                )
-                ON CONFLICT(chunk_id) DO UPDATE SET
-                  library_id = excluded.library_id,
-                  provider = excluded.provider,
-                  model = excluded.model,
-                  dim = excluded.dim,
-                  embedding = excluded.embedding,
-                  content_hash = excluded.content_hash,
-                  content_version = excluded.content_version,
-                  embedding_hash = excluded.embedding_hash,
-                  updated_at = excluded.updated_at
-                """,
-                payload,
-            )
-            conn.execute(
-                """
-                UPDATE rag_chunks
-                SET embedding_status = 'embedded',
-                    embedding_model = ?,
-                    embedding_hash = ?
-                WHERE chunk_id = ?
-                """,
-                (model_label, payload["embedding_hash"], row["chunk_id"]),
-            )
-            embedded_count += 1
-        conn.execute(
-            """
-            UPDATE rag_config
-            SET embedding_dim = COALESCE(embedding_dim, ?),
-                embedding_provider = ?,
-                embedding_model = ?,
-                vector_store_type = CASE WHEN vector_store_type = 'none' THEN 'sqlite_blob' ELSE vector_store_type END,
-                updated_at = ?
-            WHERE library_id = ?
-            """,
-            (
-                len(vectors[0]) if vectors and vectors[0] else None,
-                active_provider.provider_name,
-                active_provider.model,
-                timestamp,
-                str(library["library_id"]),
-            ),
-        )
-        conn.commit()
-
+    remaining_count = max(0, len(rows) - processed_count)
+    status = "completed"
+    if error_message and embedded_count == 0:
+        status = "failed"
+    elif error_message or failed_count:
+        status = "partial"
     return {
-        "ok": failed_count == 0,
-        "status": "completed" if failed_count == 0 else "partial",
+        "ok": not error_message and failed_count == 0,
+        "status": status,
+        **({"error": error_message} if error_message else {}),
         "provider": active_provider.provider_name,
         "model": active_provider.model,
-        "processed_chunks": len(rows),
+        "processed_chunks": processed_count,
         "embedded_chunks": embedded_count,
         "failed_chunks": failed_count,
+        "remaining_chunks": remaining_count,
     }
 
 
@@ -370,7 +412,6 @@ def _chunks_needing_embedding(
     provider: EmbeddingProvider,
     model_label: str,
     item_keys: list[str] | None,
-    limit: int,
     force: bool,
 ) -> list[dict[str, Any]]:
     where = ["c.content != ''"]
@@ -406,9 +447,8 @@ def _chunks_needing_embedding(
             LEFT JOIN rag_embeddings e ON e.chunk_id = c.chunk_id
             WHERE {" AND ".join(where)}
             ORDER BY c.created_at, c.doc_id, c.chunk_index
-            LIMIT ?
             """,
-            [*params, limit],
+            params,
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -544,8 +584,13 @@ def _model_label(provider: EmbeddingProvider) -> str:
     return f"{provider.provider_name}:{provider.model}"
 
 
-def _embed_texts_batched(provider: EmbeddingProvider, texts: list[str]) -> list[list[float]]:
-    limit = max(1, min(int(getattr(provider, "max_batch_size", DEFAULT_PROVIDER_MAX_BATCH_SIZE) or DEFAULT_PROVIDER_MAX_BATCH_SIZE), 512))
+def _embed_texts_batched(
+    provider: EmbeddingProvider,
+    texts: list[str],
+    *,
+    batch_size: int | None = None,
+) -> list[list[float]]:
+    limit = _embedding_batch_limit(provider, batch_size)
     vectors: list[list[float]] = []
     for start in range(0, len(texts), limit):
         batch = texts[start : start + limit]
@@ -556,6 +601,18 @@ def _embed_texts_batched(provider: EmbeddingProvider, texts: list[str]) -> list[
             )
         vectors.extend(batch_vectors)
     return vectors
+
+
+def _embedding_batch_limit(provider: EmbeddingProvider, batch_size: int | None = None) -> int:
+    provider_limit = max(
+        1,
+        min(
+            int(getattr(provider, "max_batch_size", DEFAULT_PROVIDER_MAX_BATCH_SIZE) or DEFAULT_PROVIDER_MAX_BATCH_SIZE),
+            512,
+        ),
+    )
+    requested_limit = max(1, min(int(batch_size or provider_limit), 512))
+    return min(provider_limit, requested_limit)
 
 
 def _hashed_bag(text: str, dim: int) -> list[float]:

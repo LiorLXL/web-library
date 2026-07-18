@@ -117,6 +117,9 @@ def test_query_plan_classifies_and_decomposes_comparative_query() -> None:
         ("生成文献矩阵字段", "matrix"),
         ("写一段相关工作综述", "writing"),
         ("列出知识库有哪些文献", "scope"),
+        ("这是一个什么知识库", "scope"),
+        ("这个知识库里的三篇论文是什么关系", "comparative"),
+        ("这是一个什么知识库，它里面的三篇论文有什么关系", "comparative"),
         ("OpenVLA 的作者是谁", "factual"),
     ],
 )

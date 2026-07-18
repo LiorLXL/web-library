@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +15,15 @@ from zotero_web_library.rag import (
     retrieve,
     semantic_search,
 )
-from zotero_web_library.rag.store import connect, create_knowledge_base, insert_chunks, save_embedding_config, upsert_document
+from zotero_web_library.rag.embeddings import provider_from_config
+from zotero_web_library.rag.store import (
+    connect,
+    create_knowledge_base,
+    ensure_store,
+    insert_chunks,
+    save_embedding_config,
+    upsert_document,
+)
 from zotero_web_library.rag.store import rag_db_path
 from zotero_web_library.sources import create_local_copy
 from zotero_web_library.web import create_app
@@ -40,6 +49,98 @@ def write_mineru_fixture(library: dict[str, str]) -> None:
     image_dir = root / stem / "images"
     image_dir.mkdir(parents=True)
     (image_dir / "figure-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+
+def test_existing_phase1_chat_store_migrates_before_run_id_index(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    database_path = rag_db_path(library)
+    with sqlite3.connect(database_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE rag_chat_messages (
+              message_id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL,
+              turn_index INTEGER NOT NULL,
+              role TEXT NOT NULL,
+              content TEXT NOT NULL DEFAULT '',
+              sources_json TEXT NOT NULL DEFAULT '[]',
+              tool_trace_json TEXT NOT NULL DEFAULT '[]',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO rag_chat_messages (
+              message_id, conversation_id, turn_index, role, content
+            ) VALUES ('legacy-message', 'legacy-conversation', 1, 'user', '保留旧消息')
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE rag_agent_runs (
+              run_id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL,
+              library_id TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'running',
+              current_state TEXT NOT NULL DEFAULT 'plan',
+              task_plan_json TEXT NOT NULL DEFAULT '{}',
+              evidence_state_json TEXT NOT NULL DEFAULT '{}',
+              budget_json TEXT NOT NULL DEFAULT '{}',
+              usage_json TEXT NOT NULL DEFAULT '{}',
+              stop_reason TEXT NOT NULL DEFAULT '',
+              error_code TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              finished_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO rag_agent_runs (run_id, conversation_id, library_id)
+            VALUES ('legacy-run', 'legacy-conversation', ?)
+            """,
+            (library["library_id"],),
+        )
+        conn.commit()
+
+    ensure_store(library)
+
+    with connect(library) as conn:
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_chat_messages)")}
+        indexes = {str(row["name"]) for row in conn.execute("PRAGMA index_list(rag_chat_messages)")}
+        message = conn.execute(
+            "SELECT content, run_id FROM rag_chat_messages WHERE message_id = 'legacy-message'"
+        ).fetchone()
+        agent_tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'rag_agent_%'"
+            )
+        }
+        run_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_agent_runs)")}
+        legacy_run = conn.execute(
+            "SELECT run_id, status, checkpoint_json, worker_id, heartbeat_at FROM rag_agent_runs WHERE run_id = 'legacy-run'"
+        ).fetchone()
+
+    assert "run_id" in columns
+    assert "idx_rag_chat_msg_run" in indexes
+    assert dict(message) == {"content": "保留旧消息", "run_id": ""}
+    assert agent_tables == {"rag_agent_runs", "rag_agent_events"}
+    assert {"checkpoint_json", "worker_id", "heartbeat_at"} <= run_columns
+    assert dict(legacy_run) == {
+        "run_id": "legacy-run",
+        "status": "running",
+        "checkpoint_json": "{}",
+        "worker_id": "",
+        "heartbeat_at": "",
+    }
 
 
 def test_rag_indexes_metadata_notes_and_mineru_results(zotero_fixture: Path, monkeypatch, tmp_path: Path) -> None:
@@ -302,6 +403,111 @@ def test_embed_missing_chunks_is_incremental(
     assert result["status"] == "up_to_date"
     assert result["processed_chunks"] == 0
 
+    save_embedding_config(
+        library,
+        enabled=False,
+        provider="deterministic",
+        model="deterministic-hash-v1",
+        dim=64,
+    )
+    disabled_status = embedding_status(library)
+    assert disabled_status["configured"] is False
+    assert disabled_status["stored_embeddings"] > 0
+    save_embedding_config(
+        library,
+        enabled=True,
+        provider="deterministic",
+        model="deterministic-hash-v1",
+        dim=64,
+    )
+    restored = embed_missing_chunks(library)
+    assert restored["status"] == "up_to_date"
+    assert restored["processed_chunks"] == 0
+
+
+def test_rag_refresh_reuses_unchanged_embeddings_and_only_reembeds_changed_chunks(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    write_mineru_fixture(library)
+    save_embedding_config(
+        library,
+        enabled=True,
+        provider="deterministic",
+        model="deterministic-hash-v1",
+        dim=64,
+    )
+    first_status = index_library(library)
+    assert first_status["embedding_index"]["embedded_chunks"] > 0
+    with connect(library) as conn:
+        before = {
+            str(row["chunk_id"]): (str(row["embedding_hash"]), str(row["created_at"]), str(row["updated_at"]))
+            for row in conn.execute(
+                "SELECT chunk_id, embedding_hash, created_at, updated_at FROM rag_embeddings"
+            ).fetchall()
+        }
+
+    unchanged_status = index_library(library)
+    with connect(library) as conn:
+        unchanged = {
+            str(row["chunk_id"]): (str(row["embedding_hash"]), str(row["created_at"]), str(row["updated_at"]))
+            for row in conn.execute(
+                "SELECT chunk_id, embedding_hash, created_at, updated_at FROM rag_embeddings"
+            ).fetchall()
+        }
+    assert unchanged_status["embedding_index"]["status"] == "up_to_date"
+    assert unchanged_status["embedding_index"]["processed_chunks"] == 0
+    assert unchanged == before
+
+    markdown_path = next((Path(library["data_path"]) / "mineru-results").glob("*.md"))
+    markdown_path.write_text(
+        markdown_path.read_text(encoding="utf-8") + "\n\nA newly added finding requires a new vector.",
+        encoding="utf-8",
+    )
+    changed_status = index_library(library)
+    assert changed_status["embedding_index"]["embedded_chunks"] > 0
+    with connect(library) as conn:
+        after = {
+            str(row["chunk_id"]): str(row["embedding_hash"])
+            for row in conn.execute("SELECT chunk_id, embedding_hash FROM rag_embeddings").fetchall()
+        }
+        chunk_count = int(conn.execute("SELECT COUNT(*) FROM rag_chunks").fetchone()[0])
+    assert set(before) & set(after)
+    assert all(after[chunk_id] == before[chunk_id][0] for chunk_id in set(before) & set(after))
+    assert len(after) == chunk_count
+
+
+def test_embedding_status_reports_missing_vector_as_pending(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    write_mineru_fixture(library)
+    save_embedding_config(
+        library,
+        enabled=True,
+        provider="deterministic",
+        model="deterministic-hash-v1",
+        dim=64,
+    )
+    index_library(library)
+    with connect(library) as conn:
+        chunk_id = str(conn.execute("SELECT chunk_id FROM rag_embeddings ORDER BY chunk_id LIMIT 1").fetchone()[0])
+        conn.execute("DELETE FROM rag_embeddings WHERE chunk_id = ?", (chunk_id,))
+        conn.commit()
+
+    payload = embedding_status(library)
+    counts = {str(row["embedding_status"]): int(row["chunk_count"]) for row in payload["statuses"]}
+    assert counts["pending"] == 1
+    repaired = embed_missing_chunks(library)
+    assert repaired["processed_chunks"] == 1
+    assert repaired["embedded_chunks"] == 1
+
 
 def test_embed_missing_chunks_splits_provider_requests(
     zotero_fixture: Path,
@@ -334,7 +540,7 @@ def test_embed_missing_chunks_splits_provider_requests(
             section_level=1,
             estimated_page=None,
         )
-        for index in range(25)
+        for index in range(130)
     ]
     with connect(library) as conn:
         upsert_document(conn, doc)
@@ -359,9 +565,97 @@ def test_embed_missing_chunks_splits_provider_requests(
     result = embed_missing_chunks(library, batch_size=64, provider=provider)
 
     assert result["ok"] is True
-    assert result["processed_chunks"] == 25
-    assert result["embedded_chunks"] == 25
-    assert provider.calls == [10, 10, 5]
+    assert result["processed_chunks"] == 130
+    assert result["embedded_chunks"] == 130
+    assert provider.calls == [10] * 13
+
+
+def test_openai_compatible_provider_uses_safe_batch_limit() -> None:
+    provider = provider_from_config(
+        {
+            "enabled": True,
+            "provider": "openai",
+            "model": "text-embedding-v3",
+            "api_key": "sk-test",
+            "base_url": "https://embedding.example/v1",
+        }
+    )
+
+    assert provider is not None
+    assert provider.max_batch_size == 10
+
+
+def test_embedding_batch_failure_keeps_completed_batches_for_retry(
+    zotero_fixture: Path,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("WEB_LIBRARY_DATA_DIR", str(tmp_path / "app-data"))
+    library = create_local_copy(zotero_fixture)
+    save_embedding_config(
+        library,
+        enabled=True,
+        provider="openai",
+        model="partial-test",
+        api_key="sk-test",
+        batch_size=10,
+    )
+    doc = {
+        "doc_id": "doc-partial-batch-test",
+        "library_id": library["library_id"],
+        "item_key": "ITEM0001",
+        "attachment_key": "ATTACH01",
+        "source_type": "test",
+        "title": "Partial Batch Test",
+    }
+    chunks = [
+        SimpleNamespace(
+            content=f"partial semantic chunk {index}",
+            chunk_type="text",
+            section_title="Batch",
+            section_level=1,
+            estimated_page=None,
+        )
+        for index in range(25)
+    ]
+    with connect(library) as conn:
+        upsert_document(conn, doc)
+        insert_chunks(conn, doc, chunks)
+        conn.commit()
+
+    class FlakyProvider:
+        provider_name = "openai"
+        model = "partial-test"
+        dim = 3
+        max_batch_size = 10
+
+        def __init__(self, *, fail_second: bool) -> None:
+            self.fail_second = fail_second
+            self.calls: list[int] = []
+
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(len(texts))
+            if self.fail_second and len(self.calls) == 2:
+                raise RuntimeError("temporary provider failure")
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+    first_provider = FlakyProvider(fail_second=True)
+    first = embed_missing_chunks(library, batch_size=10, provider=first_provider)
+    assert first["status"] == "partial"
+    assert first["embedded_chunks"] == 10
+    assert first["failed_chunks"] == 10
+    assert first["remaining_chunks"] == 5
+    with connect(library) as conn:
+        assert int(conn.execute("SELECT COUNT(*) FROM rag_embeddings").fetchone()[0]) == 10
+
+    retry_provider = FlakyProvider(fail_second=False)
+    retry = embed_missing_chunks(library, batch_size=10, provider=retry_provider)
+    assert retry["status"] == "completed"
+    assert retry["processed_chunks"] == 15
+    assert retry["embedded_chunks"] == 15
+    assert retry_provider.calls == [10, 5]
+    with connect(library) as conn:
+        assert int(conn.execute("SELECT COUNT(*) FROM rag_embeddings").fetchone()[0]) == 25
 
 
 def test_retrieve_hybrid_uses_semantic_results_when_configured(

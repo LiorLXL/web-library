@@ -93,14 +93,9 @@ def execute_tool(
     scope: ScopeContext,
     accumulator: EvidenceAccumulator,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    name = _tool_name(call)
-    args_payload = _tool_arguments(call)
-    try:
-        args = json.loads(args_payload or "{}")
-        if not isinstance(args, dict):
-            raise ValueError("tool arguments must be a JSON object")
-    except Exception as exc:  # noqa: BLE001
-        result = {"error": "invalid_tool_arguments", "message": str(exc)}
+    name, args, argument_error = parse_tool_call(call)
+    if argument_error:
+        result = {"error": "invalid_tool_arguments", "message": argument_error}
         return result, summarize_tool_trace(name or "unknown", {}, result)
 
     try:
@@ -110,11 +105,43 @@ def execute_tool(
             result = read_context_scoped(library, scope, accumulator, args)
         elif name == "list_scope_documents":
             result = list_scope_documents(library, scope, args)
+            documents = result.get("documents") if isinstance(result.get("documents"), list) else []
+            registered = accumulator.register(
+                [
+                    {
+                        **document,
+                        "source_type": "metadata",
+                        "citation": f"[{document.get('item_key')}:metadata]",
+                        "excerpt": _scope_document_excerpt(document),
+                    }
+                    for document in documents
+                    if isinstance(document, dict)
+                ],
+                include_text=False,
+            )
+            by_item = {str(item.get("item_key") or ""): item for item in registered}
+            result["documents"] = [
+                {**document, **by_item.get(str(document.get("item_key") or ""), {})}
+                for document in documents
+                if isinstance(document, dict)
+            ]
         else:
             result = {"error": "unknown_tool", "message": f"unknown tool: {name}"}
     except Exception as exc:  # noqa: BLE001
         result = {"error": "tool_failed", "message": str(exc)}
     return result, summarize_tool_trace(name or "unknown", args, result)
+
+
+def parse_tool_call(call: Any) -> tuple[str, dict[str, Any], str]:
+    name = _tool_name(call)
+    args_payload = _tool_arguments(call)
+    try:
+        args = json.loads(args_payload or "{}")
+        if not isinstance(args, dict):
+            raise ValueError("tool arguments must be a JSON object")
+    except Exception as exc:  # noqa: BLE001
+        return name, {}, str(exc)
+    return name, args, ""
 
 
 def search_evidence(
@@ -207,6 +234,10 @@ def list_scope_documents(library: dict[str, Any], scope: ScopeContext, args: dic
     ensure_store(library)
     placeholders = ",".join("?" for _ in scoped_keys)
     with connect(library) as conn:
+        knowledge_base = conn.execute(
+            "SELECT knowledge_base_id, name, description FROM rag_knowledge_bases WHERE knowledge_base_id = ?",
+            (scope.knowledge_base_id,),
+        ).fetchone()
         rows = conn.execute(
             f"""
             SELECT
@@ -234,10 +265,44 @@ def list_scope_documents(library: dict[str, Any], scope: ScopeContext, args: dic
             "source_types": [item for item in str(row["source_types"] or "").split(",") if item],
             "document_count": int(row["document_count"] or 0),
             "has_full_text": bool(int(row["has_full_text"] or 0)),
+            "knowledge_base_id": scope.knowledge_base_id,
+            "knowledge_base_name": str(knowledge_base["name"] or "") if knowledge_base else "",
+            "knowledge_base_description": str(knowledge_base["description"] or "") if knowledge_base else "",
+            "scope_item_count": len(scoped_keys),
         }
         for row in rows
     ]
-    return {"count": len(documents), "documents": documents}
+    return {
+        "count": len(documents),
+        "knowledge_base": {
+            "knowledge_base_id": scope.knowledge_base_id,
+            "name": str(knowledge_base["name"] or "") if knowledge_base else "",
+            "description": str(knowledge_base["description"] or "") if knowledge_base else "",
+            "item_count": len(scoped_keys),
+            "full_text_count": sum(bool(item.get("has_full_text")) for item in documents),
+        },
+        "documents": documents,
+    }
+
+
+def _scope_document_excerpt(document: dict[str, Any]) -> str:
+    source_types = ", ".join(str(value) for value in document.get("source_types") or [])
+    return "; ".join(
+        part
+        for part in (
+            f"Knowledge base: {document.get('knowledge_base_name')}" if document.get("knowledge_base_name") else "",
+            f"Knowledge base description: {document.get('knowledge_base_description')}"
+            if document.get("knowledge_base_description")
+            else "",
+            f"Knowledge base item count: {int(document.get('scope_item_count') or 0)}",
+            f"Title: {document.get('title')}",
+            f"Authors: {document.get('authors_text')}" if document.get("authors_text") else "",
+            f"Year: {document.get('year')}" if document.get("year") else "",
+            f"Indexed source types: {source_types}" if source_types else "",
+            f"Full text parsed: {'yes' if document.get('has_full_text') else 'no'}",
+        )
+        if part
+    )
 
 
 def summarize_tool_trace(name: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:

@@ -9,9 +9,24 @@ TASK_TYPES = {"factual", "summary", "comparative", "matrix", "writing", "scope"}
 
 _TASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("matrix", re.compile(r"文献矩阵|矩阵字段|literature\s+matrix|evidence\s+table", re.IGNORECASE)),
-    ("scope", re.compile(r"知识库.*(?:哪些|什么|范围)|有哪些文献|列出.*文献|scope|list\s+(?:the\s+)?papers", re.IGNORECASE)),
     ("writing", re.compile(r"(?:撰写|写一|起草|生成).*(?:综述|段落|章节|摘要)|\b(?:write|draft|compose)\b", re.IGNORECASE)),
-    ("comparative", re.compile(r"比较|对比|区别|差异|异同|\bcompare\b|\bcomparison\b|\bversus\b|\bvs\.?\b", re.IGNORECASE)),
+    (
+        "comparative",
+        re.compile(
+            r"比较|对比|区别|差异|异同|关系|关联|联系|脉络|演进|"
+            r"\bcompare\b|\bcomparison\b|\brelationship\b|\brelated\b|\bversus\b|\bvs\.?\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "scope",
+        re.compile(
+            r"知识库.*(?:有哪些|包含哪些|范围|文献清单|概览|简介|主题|定位)|"
+            r"(?:这是|这个|当前).*(?:什么|怎样|哪类).*知识库|有哪些文献|列出.*文献|"
+            r"\bscope\b|\blist\s+(?:the\s+)?papers\b",
+            re.IGNORECASE,
+        ),
+    ),
     ("summary", re.compile(r"总结|概述|综述|归纳|主要(?:方法|贡献|结论)|\bsummary\b|\bsummar(?:y|ize)\b|\boverview\b", re.IGNORECASE)),
 )
 

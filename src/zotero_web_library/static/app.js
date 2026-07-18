@@ -517,7 +517,7 @@ function renderApiConfigPage() {
       <div class="api-config-head">
         <div>
           <h2>Embedding 配置</h2>
-          <p>用于 RAG 语义检索和混合排序。开启后刷新 RAG 索引会自动补齐 chunk embedding。</p>
+          <p>用于 RAG 语义检索和混合排序。刷新文档索引时会复用内容未变化的 embedding，只补齐新增或变化的 chunk。</p>
         </div>
         <span class="api-status ${embedding.configured ? "ok" : "failed"}">${embedding.configured ? "已配置" : "未配置"}</span>
       </div>
@@ -549,6 +549,7 @@ function renderApiConfigPage() {
           <label>
             <span>Batch Size</span>
             <input name="embedding_batch_size" type="number" min="1" max="512" value="${escapeHtml(embedding.batch_size || "64")}">
+            <em>控制期望的请求批量，不限制一次补齐的总 chunk 数；后端会按 provider 安全上限自动拆分（OpenAI-compatible 当前最多 10 条/批）。</em>
           </label>
           <label>
             <span>维度</span>
@@ -565,7 +566,7 @@ function renderApiConfigPage() {
           <button type="button" class="form-action-btn" data-save-embedding-config ${state.apiConfigBusy ? "disabled" : ""}>${state.apiConfigBusy ? "保存中..." : "保存 Embedding 配置"}</button>
           <button type="button" class="ghost-btn" data-toggle-embedding-config-secret>${state.apiConfigShowEmbeddingSecret ? "隐藏 key" : "显示 key"}</button>
         </div>
-        <p class="api-config-message">保存后回到知识库页刷新 RAG 索引或补齐语义索引。</p>
+        <p class="api-config-message">保存后回到知识库页补齐语义索引；只有文档内容变化时才需要刷新文档索引。</p>
         ${state.apiConfigEmbeddingMessage ? `<p class="api-config-message">${escapeHtml(state.apiConfigEmbeddingMessage)}</p>` : ""}
       </form>
     </section>
@@ -7165,8 +7166,7 @@ async function submitKnowledgeImport(event) {
       if (!knowledgeBaseId) throw new Error("请选择目标知识库");
       await postJSON(`/api/library/${state.libraryId}/rag/knowledge-bases/${knowledgeBaseId}/items`, { item_keys: keys });
     }
-    await postJSON(`/api/library/${state.libraryId}/rag/index`, {});
-    state.knowledgeImportMessage = `已导入 ${keys.length} 条文献，并刷新 RAG 索引。`;
+    state.knowledgeImportMessage = `已导入 ${keys.length} 条文献到知识库；现有文档索引和 embedding 未改动。`;
     await loadKnowledgeBasesForImport();
     renderKnowledgeImportModal();
   } catch (error) {

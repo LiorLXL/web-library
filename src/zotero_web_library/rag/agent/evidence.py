@@ -6,6 +6,7 @@ from typing import Any
 class EvidenceAccumulator:
     def __init__(self) -> None:
         self._by_key: dict[str, dict[str, Any]] = {}
+        self._support_text_by_key: dict[str, str] = {}
         self._order: list[str] = []
         self._counter = 0
 
@@ -26,6 +27,24 @@ class EvidenceAccumulator:
     def all_sources(self) -> list[dict[str, Any]]:
         return [dict(self._by_key[key]) for key in self._order if key in self._by_key]
 
+    def sources_by_evidence_ids(self, evidence_ids: list[str] | set[str]) -> list[dict[str, Any]]:
+        allowed = {str(value or "") for value in evidence_ids}
+        return [
+            dict(self._by_key[key])
+            for key in self._order
+            if key in self._by_key and str(self._by_key[key].get("evidence_id") or "") in allowed
+        ]
+
+    def verification_evidence(self) -> list[dict[str, Any]]:
+        return [
+            {
+                **dict(self._by_key[key]),
+                "support_text": self._support_text_by_key.get(key) or str(self._by_key[key].get("excerpt") or ""),
+            }
+            for key in self._order
+            if key in self._by_key
+        ]
+
     def _register_one(self, raw: dict[str, Any]) -> tuple[dict[str, Any], str]:
         evidence = _normalize_evidence(raw)
         key = _evidence_key(evidence)
@@ -33,11 +52,14 @@ class EvidenceAccumulator:
         if key in self._by_key:
             evidence_id = str(self._by_key[key].get("evidence_id") or "")
             evidence["evidence_id"] = evidence_id
+            if len(text) > len(self._support_text_by_key.get(key, "")):
+                self._support_text_by_key[key] = text[:6000]
             return self._by_key[key], text
 
         self._counter += 1
         evidence["evidence_id"] = f"ev-{self._counter}"
         self._by_key[key] = evidence
+        self._support_text_by_key[key] = (text or str(evidence.get("excerpt") or ""))[:6000]
         self._order.append(key)
         return evidence, text
 

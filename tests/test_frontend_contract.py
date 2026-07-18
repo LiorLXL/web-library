@@ -168,8 +168,24 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert "data-toggle-mineru-config-secret" in app_js
     assert "data-embedding-index" in knowledge_js
     assert "data-embedding-rebuild" in knowledge_js
+    assert "内容未变化的 chunk 会保留并复用现有 embedding" in knowledge_js
+    assert "强制重建当前知识库" in knowledge_js
+    assert "补齐全库语义索引" in knowledge_js
+    assert 'knowledge_base_id: force ? knowledgeState.activeId : ""' in knowledge_js
+    assert "现有文档索引和 embedding 未改动" in app_js
+    assert 'await postJSON(`/api/library/${state.libraryId}/rag/index`, {});' not in app_js
     assert "/embeddings/status" in knowledge_js
     assert "/embeddings/index" in knowledge_js
+    assert 'response_mode: "async"' in knowledge_js
+    assert "function pollKnowledgeChatRun" in knowledge_js
+    assert "function cancelKnowledgeChat" in knowledge_js
+    assert "function restartKnowledgeChat" in knowledge_js
+    assert "data-restart-agent-run" in knowledge_js
+    assert "/restart`" in knowledge_js
+    assert "function renderKnowledgeAgentTrace" in knowledge_js
+    assert "knowledge-citation-chip" in knowledge_js
+    assert ".knowledge-agent-timeline" in app_css
+    assert ".knowledge-run-restart" in app_css
     assert ".api-config-field-grid" in app_css
     assert ".knowledge-embedding-panel" in app_css
     assert "data-attachment-editor-modal" in library_html

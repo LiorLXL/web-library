@@ -15,8 +15,13 @@ const knowledgeState = {
   searchBusy: false,
   chatLoading: false,
   chatBusy: false,
+  chatCancelBusy: false,
+  chatError: "",
   chatMessages: [],
   conversationId: "",
+  activeRun: null,
+  chatLastSequence: 0,
+  chatPollTimer: null,
   matrixFields: [],
   matrixItems: [],
   matrixRunning: false,
@@ -69,9 +74,15 @@ function matrixApi(path) {
 }
 
 function resetKnowledgeConversation() {
+  stopKnowledgeChatPolling();
   knowledgeState.chatLoading = false;
+  knowledgeState.chatBusy = false;
+  knowledgeState.chatCancelBusy = false;
+  knowledgeState.chatError = "";
   knowledgeState.conversationId = "";
   knowledgeState.chatMessages = [];
+  knowledgeState.activeRun = null;
+  knowledgeState.chatLastSequence = 0;
 }
 
 function persistActiveKnowledgeBase() {
@@ -207,15 +218,27 @@ async function loadKnowledgeConversation(knowledgeBaseId) {
       content: message.content || "",
       sources: message.sources || [],
       toolTrace: message.tool_trace || [],
+      runId: message.run_id || "",
+      turnIndex: message.turn_index || 0,
+      agentTrace: message.agent_trace || [],
+      agentState: message.agent_state || {},
+      stopReason: message.stop_reason || "",
+      runStatus: message.run_status || "",
     }));
+    if (data.active_run?.run_id && data.active_run.status === "running") {
+      knowledgeState.activeRun = normalizeKnowledgeAgentRun(data.active_run);
+      knowledgeState.chatBusy = true;
+      knowledgeState.chatLastSequence = lastKnowledgeRunSequence(knowledgeState.activeRun.events);
+    }
   } catch (error) {
     if (cleanId !== knowledgeState.activeId) return;
     resetKnowledgeConversation();
-    setKnowledgeMessage(`恢复知识库会话失败：${error.message}`);
+    knowledgeState.chatError = `恢复知识库会话失败：${error.message}`;
   } finally {
     if (cleanId === knowledgeState.activeId) {
       knowledgeState.chatLoading = false;
       renderKnowledgeChat();
+      if (knowledgeState.activeRun?.status === "running") startKnowledgeChatPolling();
     }
   }
 }
@@ -279,11 +302,16 @@ async function deleteActiveKnowledgeBase() {
 }
 
 async function refreshRagIndex() {
-  if (knowledgeState.indexBusy) return;
+  if (knowledgeState.indexBusy || knowledgeState.embeddingBusy) return;
+  const confirmed = window.confirm(
+    "确认刷新文档索引？\n\n内容未变化的 chunk 会保留并复用现有 embedding；只有新增或正文发生变化的 chunk 才会生成新 embedding。",
+  );
+  if (!confirmed) return;
   knowledgeState.indexBusy = true;
   setKnowledgeMessage("正在刷新 RAG 索引...");
   const button = knowledgeQuery("[data-rag-index-library]");
   if (button) button.disabled = true;
+  renderKnowledgeSearchPanel();
   try {
     const data = await knowledgeJSON(knowledgeApi("/index"), {
       method: "POST",
@@ -291,30 +319,43 @@ async function refreshRagIndex() {
       body: "{}",
     });
     const status = data.status || {};
-    setKnowledgeMessage(`RAG 索引已刷新：${Number(status.total_documents || 0)} 份文档，${Number(status.total_chunks || 0)} 个 chunk。`);
+    const embeddingIndex = status.embedding_index || null;
+    const embedded = Number(embeddingIndex?.embedded_chunks || 0);
+    const embeddingNote = embeddingIndex?.ok === false
+      ? `；embedding 补齐失败：${embeddingIndex.error || embeddingIndex.status || "未知错误"}`
+      : embedded
+        ? `，新增/更新 ${embedded} 个 embedding`
+        : embeddingIndex?.status === "up_to_date"
+          ? "，现有 embedding 已复用"
+          : "";
+    setKnowledgeMessage(`RAG 索引已刷新：${Number(status.total_documents || 0)} 份文档，${Number(status.total_chunks || 0)} 个 chunk${embeddingNote}。`);
     await loadKnowledgeBases({ keepActive: true });
+    await loadEmbeddingStatus();
   } catch (error) {
     setKnowledgeMessage(error.message);
   } finally {
     knowledgeState.indexBusy = false;
     if (button) button.disabled = false;
+    renderKnowledgeSearchPanel();
   }
 }
 
 async function rebuildEmbeddingIndex({ force = false } = {}) {
-  if (knowledgeState.embeddingBusy) return;
+  if (knowledgeState.embeddingBusy || knowledgeState.indexBusy) return;
   const active = activeKnowledgeLibrary();
   if (!active) return;
   if (force && !window.confirm("确认强制重建当前知识库的语义索引？这会重新生成该知识库范围内的 chunk embedding。")) return;
   knowledgeState.embeddingBusy = true;
   setKnowledgeMessage(force ? "正在强制重建语义索引..." : "正在补齐语义索引...");
+  const indexButton = knowledgeQuery("[data-rag-index-library]");
+  if (indexButton) indexButton.disabled = true;
   renderKnowledgeSearchPanel();
   try {
     const data = await knowledgeJSON(knowledgeApi("/embeddings/index"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        knowledge_base_id: knowledgeState.activeId,
+        knowledge_base_id: force ? knowledgeState.activeId : "",
         force,
         batch_size: 64,
       }),
@@ -322,9 +363,11 @@ async function rebuildEmbeddingIndex({ force = false } = {}) {
     setKnowledgeMessage(`语义索引完成：处理 ${Number(data.processed_chunks || 0)} 个 chunk，成功 ${Number(data.embedded_chunks || 0)} 个。`);
     await loadEmbeddingStatus();
   } catch (error) {
-    setKnowledgeMessage(error.message);
+    setKnowledgeMessage(`语义索引中断：${error.message}。已完成批次已经保留，再次点击只会重试失败或未处理的 chunk。`);
+    await loadEmbeddingStatus();
   } finally {
     knowledgeState.embeddingBusy = false;
+    if (indexButton) indexButton.disabled = false;
     renderKnowledgeSearchPanel();
   }
 }
@@ -570,9 +613,9 @@ function renderEmbeddingStatusPanel(active) {
   const configured = Boolean(status.configured);
   const provider = config.provider || "";
   const model = config.model || "";
-  const busy = knowledgeState.embeddingBusy;
+  const busy = knowledgeState.embeddingBusy || knowledgeState.indexBusy;
   const summary = configured
-    ? `已生成 ${embedded}/${total} 个 chunk embedding`
+    ? `全库已生成 ${embedded}/${total} 个 chunk embedding`
     : "未配置 embedding，当前聊天仍会使用关键词检索";
   const detail = configured
     ? `${provider} / ${model}${failed ? ` / 失败 ${failed}` : ""}${pending ? ` / 待生成 ${pending}` : ""}`
@@ -585,8 +628,8 @@ function renderEmbeddingStatusPanel(active) {
         <small>${escapeKnowledgeHtml(detail)}</small>
       </div>
       <div class="knowledge-embedding-actions">
-        <button type="button" class="ghost-btn small" data-embedding-index ${!active || !configured || busy ? "disabled" : ""}>${busy ? "处理中..." : "补齐语义索引"}</button>
-        <button type="button" class="ghost-btn small" data-embedding-rebuild ${!active || !configured || busy ? "disabled" : ""}>强制重建</button>
+        <button type="button" class="ghost-btn small" data-embedding-index ${!active || !configured || busy ? "disabled" : ""}>${busy ? "处理中..." : "补齐全库语义索引"}</button>
+        <button type="button" class="ghost-btn small" data-embedding-rebuild title="仅在更换模型或确认向量损坏时使用" ${!active || !configured || busy ? "disabled" : ""}>强制重建当前知识库</button>
       </div>
     </section>
   `;
@@ -603,47 +646,268 @@ function renderKnowledgeSearchResult(result) {
   `;
 }
 
+function normalizeKnowledgeAgentRun(run) {
+  return {
+    ...(run || {}),
+    events: Array.isArray(run?.events) ? run.events : [],
+  };
+}
+
+function lastKnowledgeRunSequence(events) {
+  return (Array.isArray(events) ? events : []).reduce(
+    (latest, event) => Math.max(latest, Number(event?.sequence) || 0),
+    0,
+  );
+}
+
+function mergeKnowledgeRunEvents(current, incoming) {
+  const merged = new Map();
+  for (const event of [...(current || []), ...(incoming || [])]) {
+    const key = event?.event_id || `${event?.sequence || 0}:${event?.event_type || "event"}`;
+    merged.set(key, event);
+  }
+  return Array.from(merged.values()).sort((left, right) => (Number(left.sequence) || 0) - (Number(right.sequence) || 0));
+}
+
+function stopKnowledgeChatPolling() {
+  if (knowledgeState.chatPollTimer) window.clearTimeout(knowledgeState.chatPollTimer);
+  knowledgeState.chatPollTimer = null;
+}
+
+function startKnowledgeChatPolling() {
+  stopKnowledgeChatPolling();
+  if (!knowledgeState.activeRun?.run_id || knowledgeState.activeRun.status !== "running") return;
+  knowledgeState.chatPollTimer = window.setTimeout(pollKnowledgeChatRun, 250);
+}
+
+async function pollKnowledgeChatRun() {
+  const runId = knowledgeState.activeRun?.run_id;
+  if (!runId) return;
+  knowledgeState.chatPollTimer = null;
+  try {
+    const query = new URLSearchParams({ after_sequence: String(knowledgeState.chatLastSequence || 0) });
+    const data = await knowledgeJSON(knowledgeApi(`/chat/runs/${encodeURIComponent(runId)}?${query.toString()}`));
+    if (knowledgeState.activeRun?.run_id !== runId) return;
+    const events = mergeKnowledgeRunEvents(knowledgeState.activeRun.events, data.events || []);
+    knowledgeState.activeRun = normalizeKnowledgeAgentRun({ ...knowledgeState.activeRun, ...data, events });
+    knowledgeState.chatLastSequence = lastKnowledgeRunSequence(events);
+    knowledgeState.chatError = "";
+    renderKnowledgeChat();
+    if (data.status !== "running") {
+      knowledgeState.chatBusy = false;
+      knowledgeState.chatCancelBusy = false;
+      stopKnowledgeChatPolling();
+      await new Promise((resolve) => window.setTimeout(resolve, 160));
+      if (knowledgeState.activeId) await loadKnowledgeConversation(knowledgeState.activeId);
+      return;
+    }
+  } catch (error) {
+    if (knowledgeState.activeRun?.run_id !== runId) return;
+    knowledgeState.chatError = `运行状态更新失败，正在重试：${error.message}`;
+    renderKnowledgeChat();
+  }
+  if (knowledgeState.activeRun?.run_id === runId && knowledgeState.activeRun.status === "running") {
+    knowledgeState.chatPollTimer = window.setTimeout(pollKnowledgeChatRun, 900);
+  }
+}
+
+async function cancelKnowledgeChat() {
+  const runId = knowledgeState.activeRun?.run_id;
+  if (!runId || knowledgeState.chatCancelBusy) return;
+  knowledgeState.chatCancelBusy = true;
+  knowledgeState.chatError = "";
+  renderKnowledgeChat();
+  try {
+    const data = await knowledgeJSON(knowledgeApi(`/chat/runs/${encodeURIComponent(runId)}/cancel`), {
+      method: "POST",
+    });
+    if (knowledgeState.activeRun?.run_id !== runId) return;
+    if (data.run) {
+      const events = mergeKnowledgeRunEvents(knowledgeState.activeRun.events, data.run.events || []);
+      knowledgeState.activeRun = normalizeKnowledgeAgentRun({ ...knowledgeState.activeRun, ...data.run, events });
+      knowledgeState.chatLastSequence = lastKnowledgeRunSequence(events);
+    }
+  } catch (error) {
+    knowledgeState.chatCancelBusy = false;
+    knowledgeState.chatError = `停止任务失败：${error.message}`;
+  }
+  renderKnowledgeChat();
+}
+
+async function restartKnowledgeChat(runId) {
+  const cleanRunId = String(runId || "").trim();
+  if (!cleanRunId || knowledgeState.chatBusy || knowledgeState.chatLoading) return;
+  knowledgeState.chatBusy = true;
+  knowledgeState.chatError = "";
+  renderKnowledgeChat();
+  try {
+    const data = await knowledgeJSON(knowledgeApi(`/chat/runs/${encodeURIComponent(cleanRunId)}/restart`), {
+      method: "POST",
+    });
+    knowledgeState.conversationId = data.conversation_id || knowledgeState.conversationId;
+    const userMessage = data.user_message || {};
+    if (userMessage.content && !knowledgeState.chatMessages.some((message) => message.runId === data.run_id && message.role === "user")) {
+      knowledgeState.chatMessages.push({
+        role: "user",
+        content: userMessage.content,
+        sources: [],
+        runId: data.run_id || "",
+        turnIndex: userMessage.turn_index || 0,
+      });
+    }
+    knowledgeState.activeRun = normalizeKnowledgeAgentRun(data);
+    knowledgeState.chatLastSequence = lastKnowledgeRunSequence(knowledgeState.activeRun.events);
+    if (knowledgeState.activeRun.status === "running") {
+      startKnowledgeChatPolling();
+    } else {
+      knowledgeState.chatBusy = false;
+      await loadKnowledgeConversation(knowledgeState.activeId);
+    }
+  } catch (error) {
+    knowledgeState.chatBusy = false;
+    knowledgeState.chatError = `重新开始任务失败：${error.message}`;
+  }
+  renderKnowledgeChat();
+}
+
 function renderKnowledgeChat() {
   const host = knowledgeQuery("[data-knowledge-chat-messages]");
   const status = knowledgeQuery("[data-knowledge-chat-status]");
   const input = knowledgeQuery(".knowledge-chat-input");
   const sendButton = knowledgeQuery("[data-knowledge-placeholder-action=\"send\"]");
+  const active = activeKnowledgeLibrary();
   if (host) {
     const messages = knowledgeState.chatMessages || [];
-    host.innerHTML = messages.length
-      ? messages.map(renderKnowledgeChatMessage).join("")
-      : `<p class="inline-status-copy">选择知识库后，可基于 RAG 证据向 Agent 提问。</p>`;
+    const transcript = messages.map(renderKnowledgeChatMessage).join("");
+    const activeRun = knowledgeState.activeRun?.status === "running"
+      ? renderKnowledgeActiveRun(knowledgeState.activeRun)
+      : "";
+    host.innerHTML = transcript || activeRun
+      ? `${transcript}${activeRun}`
+      : `<p class="inline-status-copy">${active ? "可以基于当前知识库的 RAG 证据向 Agent 提问。" : "选择知识库后，可基于 RAG 证据向 Agent 提问。"}</p>`;
     host.scrollTop = host.scrollHeight;
   }
-  const active = activeKnowledgeLibrary();
   if (status) {
-    status.textContent = knowledgeState.chatBusy
-      ? "Agent 正在检索证据并生成回答..."
+    status.textContent = knowledgeState.chatError || (knowledgeState.chatBusy
+      ? knowledgeRunActivityLabel(knowledgeState.activeRun)
       : knowledgeState.chatLoading
         ? "正在恢复该知识库最近的会话..."
       : active
         ? "围绕当前知识库条目、矩阵字段与解析资产继续提问。"
-        : "请先选择知识库。";
+        : "请先选择知识库。");
   }
   if (input) input.disabled = knowledgeState.chatBusy || knowledgeState.chatLoading || !active;
   if (sendButton) {
-    sendButton.disabled = knowledgeState.chatBusy || knowledgeState.chatLoading || !active;
-    sendButton.textContent = knowledgeState.chatBusy ? "生成中..." : knowledgeState.chatLoading ? "恢复中..." : "发送任务";
+    sendButton.dataset.runAction = knowledgeState.chatBusy ? "cancel" : "send";
+    sendButton.disabled = knowledgeState.chatLoading || !active || knowledgeState.chatCancelBusy;
+    sendButton.textContent = knowledgeState.chatCancelBusy
+      ? "停止中..."
+      : knowledgeState.chatBusy
+        ? "停止"
+        : knowledgeState.chatLoading
+          ? "恢复中..."
+          : "发送任务";
   }
 }
 
 function renderKnowledgeChatMessage(message) {
   const roleLabel = message.role === "user" ? "你" : message.role === "error" ? "错误" : "Agent";
+  const role = ["user", "assistant", "error"].includes(message.role) ? message.role : "assistant";
   const sources = Array.isArray(message.sources) ? message.sources : [];
   const toolTrace = Array.isArray(message.toolTrace) ? message.toolTrace : [];
+  const agentTrace = Array.isArray(message.agentTrace) ? message.agentTrace : [];
+  const messageKey = knowledgeMessageKey(message);
+  const restartAction = role === "assistant" && message.runStatus === "interrupted" && message.runId
+    ? `<button class="knowledge-run-restart" type="button" data-restart-agent-run="${escapeKnowledgeHtml(message.runId)}">重新开始</button>`
+    : "";
   return `
-    <article class="knowledge-chat-message ${escapeKnowledgeHtml(message.role || "assistant")}">
-      <strong>${roleLabel}</strong>
-      <p>${escapeKnowledgeHtml(message.content || "")}</p>
-      ${toolTrace.length ? renderKnowledgeToolTrace(toolTrace) : ""}
-      ${sources.length ? `<ul class="knowledge-chat-sources">${sources.slice(0, 5).map(renderKnowledgeChatSource).join("")}</ul>` : ""}
+    <article class="knowledge-chat-message ${role}">
+      <div class="knowledge-chat-message-heading"><strong>${roleLabel}</strong>${restartAction}</div>
+      ${agentTrace.length ? renderKnowledgeAgentTrace(agentTrace, { running: false }) : toolTrace.length ? renderKnowledgeToolTrace(toolTrace) : ""}
+      <div class="knowledge-chat-answer">${renderKnowledgeMarkdown(message.content || "", sources, messageKey)}</div>
+      ${sources.length ? renderKnowledgeChatSources(sources, messageKey) : ""}
     </article>
   `;
+}
+
+function renderKnowledgeActiveRun(run) {
+  return `
+    <article class="knowledge-chat-message assistant knowledge-active-run">
+      <div class="knowledge-active-run-heading">
+        <strong>Agent</strong>
+        <span class="knowledge-run-badge"><i></i>${knowledgeState.chatCancelBusy ? "正在停止" : "运行中"}</span>
+      </div>
+      ${renderKnowledgeAgentTrace(run.events || [], { running: true })}
+    </article>
+  `;
+}
+
+function knowledgeRunActivityLabel(run) {
+  const events = Array.isArray(run?.events) ? run.events : [];
+  const latest = [...events].reverse().find((event) => event?.summary && event.visibility !== "internal");
+  return latest?.summary || "Agent 正在规划下一步...";
+}
+
+function renderKnowledgeAgentTrace(events, { running = false } = {}) {
+  const visible = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    if (!event?.summary || event.visibility === "internal") continue;
+    const previous = visible.at(-1);
+    if (previous?.summary === event.summary && previous?.state === event.state) continue;
+    visible.push(event);
+  }
+  const toolCount = visible.filter((event) => event?.payload?.tool).length;
+  const duration = knowledgeTraceDuration(visible);
+  const label = running
+    ? `正在工作 · ${visible.length} 个步骤${toolCount ? ` · ${toolCount} 次工具调用` : ""}`
+    : `运行过程 · ${visible.length} 个步骤${toolCount ? ` · ${toolCount} 次工具调用` : ""}${duration ? ` · ${duration}` : ""}`;
+  return `
+    <details class="knowledge-agent-trace"${running ? " open" : ""}>
+      <summary><span class="knowledge-agent-trace-title">${running ? '<i class="knowledge-running-dot"></i>' : ""}${label}</span><span class="knowledge-trace-chevron">›</span></summary>
+      <ol class="knowledge-agent-timeline">
+        ${visible.length ? visible.map(renderKnowledgeAgentEvent).join("") : '<li class="knowledge-agent-event pending"><span class="knowledge-event-dot"></span><div><b>规划</b><p>正在建立任务计划...</p></div></li>'}
+      </ol>
+    </details>
+  `;
+}
+
+function knowledgeTraceDuration(events) {
+  const timestamps = (events || [])
+    .map((event) => Date.parse(event?.created_at || ""))
+    .filter((value) => Number.isFinite(value));
+  if (timestamps.length < 2) return "";
+  const milliseconds = Math.max(...timestamps) - Math.min(...timestamps);
+  if (milliseconds < 1000) return `${milliseconds}ms`;
+  return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 1 : 0)}s`;
+}
+
+function renderKnowledgeAgentEvent(event) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  const state = String(event.state || "inspect");
+  const tool = payload.tool ? ` · ${payload.tool}` : "";
+  const hasDetails = event.visibility !== "summary" && Object.keys(payload).length > 0;
+  return `
+    <li class="knowledge-agent-event ${escapeKnowledgeHtml(event.status || "ok")}" data-state="${escapeKnowledgeHtml(state)}">
+      <span class="knowledge-event-dot"></span>
+      <div>
+        <b>${escapeKnowledgeHtml(knowledgeAgentStateLabel(state))}${escapeKnowledgeHtml(tool)}</b>
+        <p>${escapeKnowledgeHtml(event.summary || "")}</p>
+        ${hasDetails ? `<details class="knowledge-event-details"><summary>查看调用详情</summary><pre>${escapeKnowledgeHtml(JSON.stringify(payload, null, 2))}</pre></details>` : ""}
+      </div>
+    </li>
+  `;
+}
+
+function knowledgeAgentStateLabel(state) {
+  return ({
+    plan: "规划",
+    retrieve: "检索",
+    inspect: "检查",
+    read: "深读",
+    verify: "验证",
+    answer: "回答",
+    abstain: "停止",
+  })[state] || "运行";
 }
 
 function renderKnowledgeToolTrace(toolTrace) {
@@ -664,11 +928,86 @@ function renderKnowledgeToolTraceItem(step) {
   return `<li>${escapeKnowledgeHtml(bits.join(" · "))}</li>`;
 }
 
-function renderKnowledgeChatSource(source) {
+function knowledgeMessageKey(message) {
+  const value = message.runId || `turn-${message.turnIndex || 0}`;
+  return String(value).replace(/[^A-Za-z0-9_-]/g, "-") || "message";
+}
+
+function renderKnowledgeMarkdown(content, sources, messageKey) {
+  let text = String(content || "").replaceAll("\r\n", "\n");
+  const citations = [];
+  for (const [index, source] of (sources || []).entries()) {
+    const citation = String(source?.citation || "").trim();
+    if (!citation) continue;
+    const token = `@@KNOWLEDGE_CITATION_${index}@@`;
+    text = text.split(citation).join(token);
+    citations.push({ index, token });
+  }
+  const lines = escapeKnowledgeHtml(text).split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let list = [];
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push(`<p>${renderKnowledgeInlineMarkdown(paragraph.join(" "))}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!list.length) return;
+    blocks.push(`<ul>${list.map((item) => `<li>${renderKnowledgeInlineMarkdown(item)}</li>`).join("")}</ul>`);
+    list = [];
+  };
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(5, heading[1].length + 2);
+      blocks.push(`<h${level}>${renderKnowledgeInlineMarkdown(heading[2])}</h${level}>`);
+    } else if (bullet) {
+      flushParagraph();
+      list.push(bullet[1]);
+    } else if (!line.trim()) {
+      flushParagraph();
+      flushList();
+    } else {
+      flushList();
+      paragraph.push(line.trim());
+    }
+  }
+  flushParagraph();
+  flushList();
+  let html = blocks.join("") || "<p></p>";
+  for (const { index, token } of citations) {
+    html = html.replaceAll(
+      token,
+      `<a class="knowledge-citation-chip" href="#knowledge-source-${messageKey}-${index + 1}" title="跳转到证据 ${index + 1}">[${index + 1}]</a>`,
+    );
+  }
+  return html;
+}
+
+function renderKnowledgeInlineMarkdown(value) {
+  return String(value || "")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+
+function renderKnowledgeChatSources(sources, messageKey) {
+  return `
+    <details class="knowledge-chat-sources">
+      <summary>引用与证据 · ${sources.length}</summary>
+      <ol>${sources.map((source, index) => renderKnowledgeChatSource(source, index, messageKey)).join("")}</ol>
+    </details>
+  `;
+}
+
+function renderKnowledgeChatSource(source, index, messageKey) {
   const title = source.title || source.item_key || "来源";
   const section = source.section_title ? ` · ${source.section_title}` : "";
   const citation = source.citation ? ` · ${source.citation}` : "";
-  return `<li>${escapeKnowledgeHtml(title)}${escapeKnowledgeHtml(section)}${escapeKnowledgeHtml(citation)}</li>`;
+  return `<li id="knowledge-source-${messageKey}-${index + 1}"><span>${index + 1}</span><div>${escapeKnowledgeHtml(title)}${escapeKnowledgeHtml(section)}<small>${escapeKnowledgeHtml(citation)}</small></div></li>`;
 }
 
 async function submitKnowledgeSearch(event) {
@@ -700,14 +1039,16 @@ async function submitKnowledgeChat() {
   const input = knowledgeQuery(".knowledge-chat-input");
   const question = String(input?.value || "").trim();
   if (!question || !knowledgeState.activeId || knowledgeState.chatBusy || knowledgeState.chatLoading) return;
-  knowledgeState.chatMessages.push({ role: "user", content: question, sources: [] });
+  knowledgeState.chatMessages.push({ role: "user", content: question, sources: [], runId: "", turnIndex: 0 });
   knowledgeState.chatBusy = true;
+  knowledgeState.chatError = "";
   if (input) input.value = "";
   renderKnowledgeChat();
   try {
     const payload = {
       question,
       knowledge_base_id: knowledgeState.activeId,
+      response_mode: "async",
     };
     if (knowledgeState.conversationId) payload.conversation_id = knowledgeState.conversationId;
     const data = await knowledgeJSON(knowledgeApi("/chat"), {
@@ -716,21 +1057,31 @@ async function submitKnowledgeChat() {
       body: JSON.stringify(payload),
     });
     knowledgeState.conversationId = data.conversation_id || knowledgeState.conversationId;
-    knowledgeState.chatMessages.push({
-      role: "assistant",
-      content: data.answer || "Agent 没有返回文本。",
-      sources: data.sources || [],
-      toolTrace: data.tool_trace || [],
-    });
-    const sourceCount = Array.isArray(data.sources) ? data.sources.length : 0;
-    setKnowledgeMessage(`Agent 回答完成：引用 ${sourceCount} 条证据。`);
+    const pendingUserMessage = knowledgeState.chatMessages.at(-1);
+    if (pendingUserMessage?.role === "user") pendingUserMessage.runId = data.run_id || "";
+    knowledgeState.activeRun = normalizeKnowledgeAgentRun(data);
+    knowledgeState.chatLastSequence = lastKnowledgeRunSequence(knowledgeState.activeRun.events);
+    if (knowledgeState.activeRun.status === "running") {
+      startKnowledgeChatPolling();
+    } else {
+      knowledgeState.chatBusy = false;
+      await new Promise((resolve) => window.setTimeout(resolve, 160));
+      await loadKnowledgeConversation(knowledgeState.activeId);
+    }
   } catch (error) {
     knowledgeState.chatMessages.push({ role: "error", content: error.message, sources: [] });
-    setKnowledgeMessage(error.message);
-  } finally {
     knowledgeState.chatBusy = false;
-    renderKnowledgeChat();
+    knowledgeState.chatError = error.message;
   }
+  renderKnowledgeChat();
+}
+
+function handleKnowledgeChatAction() {
+  if (knowledgeState.chatBusy) {
+    cancelKnowledgeChat();
+    return;
+  }
+  submitKnowledgeChat();
 }
 
 function selectedMatrixItemKeys() {
@@ -956,7 +1307,11 @@ function setupKnowledgePage() {
   knowledgeQuery("[data-knowledge-placeholder-action=\"compress\"]")?.addEventListener("click", () => {
     window.alert("压缩记忆功能将在后续接入。");
   });
-  knowledgeQuery("[data-knowledge-placeholder-action=\"send\"]")?.addEventListener("click", submitKnowledgeChat);
+  knowledgeQuery("[data-knowledge-placeholder-action=\"send\"]")?.addEventListener("click", handleKnowledgeChatAction);
+  knowledgeQuery("[data-knowledge-chat-messages]")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-restart-agent-run]");
+    if (button) restartKnowledgeChat(button.dataset.restartAgentRun);
+  });
   knowledgeQuery(".knowledge-chat-input")?.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") submitKnowledgeChat();
   });
