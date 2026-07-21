@@ -10,6 +10,8 @@ Agentic RAG citation markers are internal evidence markers. They are not final b
 - Figure or table: `[<item_key>:figure:<asset_id>]`
 - Citation record: `[<item_key>:citation:<citation_id>]`
 
+`parent_chunk_id` is never a citation marker. Parent section text returned by `read_chunk_context` keeps the target chunk's supplied citation.
+
 ## Rules
 
 - Preserve markers exactly as provided in the Evidence Pack.
@@ -17,6 +19,8 @@ Agentic RAG citation markers are internal evidence markers. They are not final b
 - Use multiple markers when a claim synthesizes multiple sources.
 - Do not create new markers.
 - Do not cite evidence that does not support the claim.
+- Cite a `table` or `figure_caption` text chunk with its supplied chunk marker. Use a figure/table marker only when an actual figure/table evidence object provides it.
+- Do not infer image pixels, chart values, layout, or trends from a caption-only chunk.
 - If the user requests formal references, say that final bibliography formatting should be generated from Zotero citation export, not from these internal markers.
 
 ## Examples

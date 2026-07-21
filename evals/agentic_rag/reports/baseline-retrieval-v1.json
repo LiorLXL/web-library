@@ -1,0 +1,2345 @@
+{
+  "schema_version": "agentic-rag-eval-report/v1",
+  "run_id": "eval-c4818cdcb84a",
+  "suite_id": "agentic-rag-smoke-v1",
+  "target": "retrieve",
+  "started_at": "2026-07-14T04:17:47+00:00",
+  "duration_ms": 224.601,
+  "config": {
+    "library_id": "eval-vla-synthetic-v1",
+    "default_top_k": 8,
+    "model": ""
+  },
+  "summary": {
+    "total_cases": 20,
+    "passed_cases": 20,
+    "failed_cases": 0,
+    "error_cases": 0,
+    "pass_rate": 1.0,
+    "duration_ms": 224.601,
+    "mean_case_latency_ms": 11.095,
+    "p95_case_latency_ms": 18.381,
+    "mean_result_count": 5.15
+  },
+  "cases": [
+    {
+      "case_id": "action-chunking-purpose",
+      "question": "Action chunking long-horizon manipulation robustness",
+      "task_type": "factual",
+      "mode": "keyword",
+      "status": "passed",
+      "latency_ms": 8.749,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 4
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "ACTION2024"
+          ],
+          "actual": [
+            "ACTION2024",
+            "DEXCAP24",
+            "DIFFVLA24",
+            "HAMSTER25"
+          ]
+        },
+        {
+          "name": "required_section:Method",
+          "passed": true,
+          "expected": "Method",
+          "actual": [
+            "Method",
+            "Capture System",
+            "Architecture",
+            "Hierarchical Method"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-a81105ea20e8cd415aa4670c",
+            "source_type": "chunk",
+            "retrieval_type": "scope_context",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Method",
+            "citation": "[ACTION2024:chunk-a81105ea20e8cd415aa4670c]",
+            "rank": 1
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "DEXCAP24",
+            "chunk_id": "chunk-1a8d48d2f416099104b15695",
+            "source_type": "chunk",
+            "retrieval_type": "scope_context",
+            "title": "DexCap: Portable Motion Capture for Dexterous Robot Demonstrations",
+            "section_title": "Capture System",
+            "citation": "[DEXCAP24:chunk-1a8d48d2f416099104b15695]",
+            "rank": 2
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-33d92a63f049517e448ff4d5",
+            "source_type": "chunk",
+            "retrieval_type": "scope_context",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Architecture",
+            "citation": "[DIFFVLA24:chunk-33d92a63f049517e448ff4d5]",
+            "rank": 3
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-00a5a38b1a8b7a115b49fb12",
+            "source_type": "chunk",
+            "retrieval_type": "scope_context",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Hierarchical Method",
+            "citation": "[HAMSTER25:chunk-00a5a38b1a8b7a115b49fb12]",
+            "rank": 4
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "keyword_search",
+            "query": "Action chunking long-horizon manipulation robustness",
+            "result_count": 0
+          },
+          {
+            "tool": "scope_context_read",
+            "query": "Action chunking long-horizon manipulation robustness",
+            "result_count": 4,
+            "status": "fallback"
+          }
+        ],
+        "usage": {},
+        "warnings": [
+          "keyword_no_match_used_scope_context"
+        ]
+      }
+    },
+    {
+      "case_id": "action-sequence-mechanism",
+      "question": "temporally coherent action sequences temporal ensembling",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 15.258,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "ACTION2024"
+          ],
+          "actual": [
+            "ACTION2024",
+            "DIFFVLA24",
+            "HAMSTER25"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-fc3eb142f6eb09a137f64900",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Metadata",
+            "citation": "[ACTION2024:metadata]",
+            "rank": 1,
+            "score": 0.35
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-a81105ea20e8cd415aa4670c",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Method",
+            "citation": "[ACTION2024:chunk-a81105ea20e8cd415aa4670c]",
+            "rank": 2,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-fde060fb20cd82d7c16c05cb",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Metadata",
+            "citation": "[DIFFVLA24:metadata]",
+            "rank": 3,
+            "score": 0.11666666666666665
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-33d92a63f049517e448ff4d5",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Architecture",
+            "citation": "[DIFFVLA24:chunk-33d92a63f049517e448ff4d5]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-d9a8c16d94cf56a653f7258d",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Experiments",
+            "citation": "[ACTION2024:chunk-d9a8c16d94cf56a653f7258d]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-8ae4e3926844100c8729a140",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Ablation",
+            "citation": "[DIFFVLA24:chunk-8ae4e3926844100c8729a140]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-cce538479f5b30a7b55f3ac6",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Metadata",
+            "citation": "[HAMSTER25:metadata]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-7340da0bdbc7e03ebac0f8c2",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Limitations",
+            "citation": "[ACTION2024:chunk-7340da0bdbc7e03ebac0f8c2]",
+            "rank": 8,
+            "score": 0.04375
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "temporally coherent action sequences temporal ensembling",
+            "result_count": 0
+          },
+          {
+            "tool": "keyword_search",
+            "query": "temporally coherent action sequences temporal ensembling",
+            "result_count": 0
+          },
+          {
+            "tool": "semantic_search",
+            "query": "temporally coherent action sequences temporal ensembling",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "diffusion-action-expert",
+      "question": "conditional diffusion action expert LIBERO",
+      "task_type": "factual",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 19.188,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 2,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "DIFFVLA24"
+          ],
+          "actual": [
+            "ACTION2024",
+            "DIFFVLA24",
+            "HAMSTER25",
+            "XVLA2025"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-ba43be1fb21556845d4b5b14",
+            "source_type": "chunk",
+            "retrieval_type": "keyword",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Evaluation",
+            "citation": "[DIFFVLA24:chunk-ba43be1fb21556845d4b5b14]",
+            "rank": 1,
+            "score": 0.55
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-fde060fb20cd82d7c16c05cb",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Metadata",
+            "citation": "[DIFFVLA24:metadata]",
+            "rank": 2,
+            "score": 0.35
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-d3a2bf0c29651879cd8bad09",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Architecture",
+            "citation": "[DIFFVLA24:chunk-d3a2bf0c29651879cd8bad09]",
+            "rank": 3,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-33d92a63f049517e448ff4d5",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Architecture",
+            "citation": "[DIFFVLA24:chunk-33d92a63f049517e448ff4d5]",
+            "rank": 4,
+            "score": 0.11666666666666665
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-fc3eb142f6eb09a137f64900",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Metadata",
+            "citation": "[ACTION2024:metadata]",
+            "rank": 5,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-7b7971a4b757366398c7452c",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Limitations",
+            "citation": "[XVLA2025:chunk-7b7971a4b757366398c7452c]",
+            "rank": 6,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-bcbf3fd85936003a962cbc25",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Long-Horizon Results",
+            "citation": "[HAMSTER25:chunk-bcbf3fd85936003a962cbc25]",
+            "rank": 7,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-daa2e14eb1b9e68b082de488",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Cross-Embodiment Method",
+            "citation": "[XVLA2025:chunk-daa2e14eb1b9e68b082de488]",
+            "rank": 8,
+            "score": 0.049999999999999996
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "conditional diffusion action expert LIBERO",
+            "result_count": 0
+          },
+          {
+            "tool": "keyword_search",
+            "query": "conditional diffusion action expert LIBERO",
+            "result_count": 1
+          },
+          {
+            "tool": "semantic_search",
+            "query": "conditional diffusion action expert LIBERO",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "self-generated-reasoning",
+      "question": "self-generated reasoning spatially ambiguous instructions",
+      "task_type": "factual",
+      "mode": "keyword",
+      "status": "passed",
+      "latency_ms": 4.448,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "DIFFVLA24"
+          ],
+          "actual": [
+            "DIFFVLA24"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-8ae4e3926844100c8729a140",
+            "source_type": "chunk",
+            "retrieval_type": "keyword",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Ablation",
+            "citation": "[DIFFVLA24:chunk-8ae4e3926844100c8729a140]",
+            "rank": 1,
+            "score": -17.04722734847088
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "keyword_search",
+            "query": "self-generated reasoning spatially ambiguous instructions",
+            "result_count": 1
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "hamster-hierarchy",
+      "question": "hierarchical 2D trajectory low-level policy",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 14.784,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "HAMSTER25"
+          ],
+          "actual": [
+            "ACTION2024",
+            "HAMSTER25"
+          ]
+        },
+        {
+          "name": "required_section:Hierarchical",
+          "passed": true,
+          "expected": "Hierarchical",
+          "actual": [
+            "Hierarchical Method",
+            "Hierarchical Method",
+            "Metadata",
+            "Limitations",
+            "Long-Horizon Results",
+            "Method",
+            "Metadata",
+            "Long-Horizon Results"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-00a5a38b1a8b7a115b49fb12",
+            "source_type": "chunk",
+            "retrieval_type": "hybrid",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Hierarchical Method",
+            "citation": "[HAMSTER25:chunk-00a5a38b1a8b7a115b49fb12]",
+            "rank": 1,
+            "score": 0.9
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-41fcb54ba8e24e1ad19d8668",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Hierarchical Method",
+            "citation": "[HAMSTER25:chunk-41fcb54ba8e24e1ad19d8668]",
+            "rank": 2,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-cce538479f5b30a7b55f3ac6",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Metadata",
+            "citation": "[HAMSTER25:metadata]",
+            "rank": 3,
+            "score": 0.11666666666666665
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-0fc0d975d10f2a554f56a8d1",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Limitations",
+            "citation": "[HAMSTER25:chunk-0fc0d975d10f2a554f56a8d1]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-432382aaf7ba1140f07482a3",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Long-Horizon Results",
+            "citation": "[HAMSTER25:chunk-432382aaf7ba1140f07482a3]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-a81105ea20e8cd415aa4670c",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Method",
+            "citation": "[ACTION2024:chunk-a81105ea20e8cd415aa4670c]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-fc3eb142f6eb09a137f64900",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Metadata",
+            "citation": "[ACTION2024:metadata]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-bcbf3fd85936003a962cbc25",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Long-Horizon Results",
+            "citation": "[HAMSTER25:chunk-bcbf3fd85936003a962cbc25]",
+            "rank": 8,
+            "score": 0.04375
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "hierarchical trajectory low-level policy",
+            "result_count": 0
+          },
+          {
+            "tool": "keyword_search",
+            "query": "hierarchical trajectory low-level policy",
+            "result_count": 1
+          },
+          {
+            "tool": "semantic_search",
+            "query": "hierarchical 2D trajectory low-level policy",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "xvla-soft-prompt",
+      "question": "soft prompt cross embodiment bridge data",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 16.617,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "XVLA2025"
+          ],
+          "actual": [
+            "HAMSTER25",
+            "SMOLVLA25",
+            "SURVEY25",
+            "XVLA2025"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-b48337722eae71d7e1a841b4",
+            "source_type": "metadata",
+            "retrieval_type": "hybrid",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Metadata",
+            "citation": "[XVLA2025:metadata]",
+            "rank": 1,
+            "score": 0.8250000000000001
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-7b7971a4b757366398c7452c",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Limitations",
+            "citation": "[XVLA2025:chunk-7b7971a4b757366398c7452c]",
+            "rank": 2,
+            "score": 0.35
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-daa2e14eb1b9e68b082de488",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Cross-Embodiment Method",
+            "citation": "[XVLA2025:chunk-daa2e14eb1b9e68b082de488]",
+            "rank": 3,
+            "score": 0.11666666666666665
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-5ec9d0c69dc757ea2e32bfc2",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Transfer Results",
+            "citation": "[XVLA2025:chunk-5ec9d0c69dc757ea2e32bfc2]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-df0ff85e05f2b38f90ef5975",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Metadata",
+            "citation": "[SMOLVLA25:metadata]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-d4927fcf6fd26d680c6d9ad7",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Results",
+            "citation": "[SMOLVLA25:chunk-d4927fcf6fd26d680c6d9ad7]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-432382aaf7ba1140f07482a3",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Long-Horizon Results",
+            "citation": "[HAMSTER25:chunk-432382aaf7ba1140f07482a3]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "SURVEY25",
+            "chunk_id": "chunk-0f477d74e9bc998adf0a1fb2",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Vision-Language-Action Models: Progress, Applications, and Open Challenges",
+            "section_title": "Open Challenges",
+            "citation": "[SURVEY25:chunk-0f477d74e9bc998adf0a1fb2]",
+            "rank": 8,
+            "score": 0.04375
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "soft prompt cross embodiment bridge data",
+            "result_count": 1
+          },
+          {
+            "tool": "keyword_search",
+            "query": "soft prompt cross embodiment bridge data",
+            "result_count": 1
+          },
+          {
+            "tool": "semantic_search",
+            "query": "soft prompt cross embodiment bridge data",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "smolvla-efficiency",
+      "question": "450M consumer GPU asynchronous inference",
+      "task_type": "factual",
+      "mode": "keyword",
+      "status": "passed",
+      "latency_ms": 4.573,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "SMOLVLA25"
+          ],
+          "actual": [
+            "SMOLVLA25"
+          ]
+        },
+        {
+          "name": "required_section:Efficiency",
+          "passed": true,
+          "expected": "Efficiency",
+          "actual": [
+            "Efficiency"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-09b6e86fc3f3b6fedee77cf7",
+            "source_type": "chunk",
+            "retrieval_type": "keyword",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Efficiency",
+            "citation": "[SMOLVLA25:chunk-09b6e86fc3f3b6fedee77cf7]",
+            "rank": 1,
+            "score": -11.339506401751223
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "keyword_search",
+            "query": "consumer GPU asynchronous inference",
+            "result_count": 1
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "rt2-web-transfer",
+      "question": "web knowledge robotic control actions text tokens",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 18.381,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "RT2VLA23"
+          ],
+          "actual": [
+            "RT2VLA23",
+            "SMOLVLA25"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-d1246ed05f3826479f1c6318",
+            "source_type": "chunk",
+            "retrieval_type": "hybrid",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Co-Fine-Tuning",
+            "citation": "[RT2VLA23:chunk-d1246ed05f3826479f1c6318]",
+            "rank": 1,
+            "score": 0.6666666666666667
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-1c03db7b29c3d6a8363196ec",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Metadata",
+            "citation": "[RT2VLA23:metadata]",
+            "rank": 2,
+            "score": 0.35
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-76d65659d41a41e4920c78b1",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Emergent Skills",
+            "citation": "[RT2VLA23:chunk-76d65659d41a41e4920c78b1]",
+            "rank": 3,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-a988a8940b107196a7d4fbd4",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Emergent Skills",
+            "citation": "[RT2VLA23:chunk-a988a8940b107196a7d4fbd4]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-7047a0c9db698eb4b1ae5d87",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Limitations",
+            "citation": "[SMOLVLA25:chunk-7047a0c9db698eb4b1ae5d87]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-df0ff85e05f2b38f90ef5975",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Metadata",
+            "citation": "[SMOLVLA25:metadata]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-09b6e86fc3f3b6fedee77cf7",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Efficiency",
+            "citation": "[SMOLVLA25:chunk-09b6e86fc3f3b6fedee77cf7]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-38c155e19ebc02ce1a55c533",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Limitations",
+            "citation": "[RT2VLA23:chunk-38c155e19ebc02ce1a55c533]",
+            "rank": 8,
+            "score": 0.04375
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "web knowledge robotic control actions text tokens",
+            "result_count": 0
+          },
+          {
+            "tool": "keyword_search",
+            "query": "web knowledge robotic control actions text tokens",
+            "result_count": 1
+          },
+          {
+            "tool": "semantic_search",
+            "query": "web knowledge robotic control actions text tokens",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "dexcap-portable-mocap",
+      "question": "portable motion capture mocap dexterous demonstrations",
+      "task_type": "factual",
+      "mode": "keyword",
+      "status": "passed",
+      "latency_ms": 4.515,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "DEXCAP24"
+          ],
+          "actual": [
+            "DEXCAP24"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "DEXCAP24",
+            "chunk_id": "chunk-08cb01c76ae6e93a654f150a",
+            "source_type": "metadata",
+            "retrieval_type": "keyword",
+            "title": "DexCap: Portable Motion Capture for Dexterous Robot Demonstrations",
+            "section_title": "Metadata",
+            "citation": "[DEXCAP24:metadata]",
+            "rank": 1,
+            "score": -14.88471024272343
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "keyword_search",
+            "query": "portable motion capture mocap dexterous demonstrations",
+            "result_count": 1
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "survey-open-challenges",
+      "question": "safety data diversity evaluation challenges",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 15.825,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "SURVEY25"
+          ],
+          "actual": [
+            "DIFFVLA24",
+            "RT2VLA23",
+            "SMOLVLA25",
+            "SURVEY25"
+          ]
+        },
+        {
+          "name": "required_section:Open Challenges",
+          "passed": true,
+          "expected": "Open Challenges",
+          "actual": [
+            "Open Challenges",
+            "Evaluation",
+            "Evaluation",
+            "Metadata",
+            "Open Challenges",
+            "Results",
+            "Co-Fine-Tuning",
+            "Evaluation"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "SURVEY25",
+            "chunk_id": "chunk-0f477d74e9bc998adf0a1fb2",
+            "source_type": "chunk",
+            "retrieval_type": "hybrid",
+            "title": "Vision-Language-Action Models: Progress, Applications, and Open Challenges",
+            "section_title": "Open Challenges",
+            "citation": "[SURVEY25:chunk-0f477d74e9bc998adf0a1fb2]",
+            "rank": 1,
+            "score": 0.9
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "SURVEY25",
+            "chunk_id": "chunk-afbe2df002ce832dc67dfdfd",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Vision-Language-Action Models: Progress, Applications, and Open Challenges",
+            "section_title": "Evaluation",
+            "citation": "[SURVEY25:chunk-afbe2df002ce832dc67dfdfd]",
+            "rank": 2,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-10459641e439be7615dc5f63",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Evaluation",
+            "citation": "[DIFFVLA24:chunk-10459641e439be7615dc5f63]",
+            "rank": 3,
+            "score": 0.11666666666666665
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "SURVEY25",
+            "chunk_id": "chunk-8d7632194fd37234764be374",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "Vision-Language-Action Models: Progress, Applications, and Open Challenges",
+            "section_title": "Metadata",
+            "citation": "[SURVEY25:metadata]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "SURVEY25",
+            "chunk_id": "chunk-377136d9902a7d99cb56ea42",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Vision-Language-Action Models: Progress, Applications, and Open Challenges",
+            "section_title": "Open Challenges",
+            "citation": "[SURVEY25:chunk-377136d9902a7d99cb56ea42]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-d4927fcf6fd26d680c6d9ad7",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Results",
+            "citation": "[SMOLVLA25:chunk-d4927fcf6fd26d680c6d9ad7]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-d1246ed05f3826479f1c6318",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Co-Fine-Tuning",
+            "citation": "[RT2VLA23:chunk-d1246ed05f3826479f1c6318]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "SURVEY25",
+            "chunk_id": "chunk-41e3c0c45168673f37582552",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Vision-Language-Action Models: Progress, Applications, and Open Challenges",
+            "section_title": "Evaluation",
+            "citation": "[SURVEY25:chunk-41e3c0c45168673f37582552]",
+            "rank": 8,
+            "score": 0.04375
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "safety data diversity evaluation challenges",
+            "result_count": 0
+          },
+          {
+            "tool": "keyword_search",
+            "query": "safety data diversity evaluation challenges",
+            "result_count": 1
+          },
+          {
+            "tool": "semantic_search",
+            "query": "safety data diversity evaluation challenges",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "compare-long-horizon-methods",
+      "question": "action chunking hierarchical planning long horizon",
+      "task_type": "comparative",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 15.129,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 2,
+          "actual": 10
+        },
+        {
+          "name": "min_distinct_items",
+          "passed": true,
+          "expected": 2,
+          "actual": 3
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "ACTION2024",
+            "HAMSTER25"
+          ],
+          "actual": [
+            "ACTION2024",
+            "DIFFVLA24",
+            "HAMSTER25"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-fc3eb142f6eb09a137f64900",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Metadata",
+            "citation": "[ACTION2024:metadata]",
+            "rank": 1,
+            "score": 0.35
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-cce538479f5b30a7b55f3ac6",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Metadata",
+            "citation": "[HAMSTER25:metadata]",
+            "rank": 2,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-41fcb54ba8e24e1ad19d8668",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Hierarchical Method",
+            "citation": "[HAMSTER25:chunk-41fcb54ba8e24e1ad19d8668]",
+            "rank": 3,
+            "score": 0.11666666666666665
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-33d92a63f049517e448ff4d5",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Architecture",
+            "citation": "[DIFFVLA24:chunk-33d92a63f049517e448ff4d5]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-a81105ea20e8cd415aa4670c",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Method",
+            "citation": "[ACTION2024:chunk-a81105ea20e8cd415aa4670c]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-432382aaf7ba1140f07482a3",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Long-Horizon Results",
+            "citation": "[HAMSTER25:chunk-432382aaf7ba1140f07482a3]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-fde060fb20cd82d7c16c05cb",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Metadata",
+            "citation": "[DIFFVLA24:metadata]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-d9a8c16d94cf56a653f7258d",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Experiments",
+            "citation": "[ACTION2024:chunk-d9a8c16d94cf56a653f7258d]",
+            "rank": 8,
+            "score": 0.04375
+          },
+          {
+            "evidence_id": "ev-9",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-8ae4e3926844100c8729a140",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Ablation",
+            "citation": "[DIFFVLA24:chunk-8ae4e3926844100c8729a140]",
+            "rank": 9,
+            "score": 0.03888888888888888
+          },
+          {
+            "evidence_id": "ev-10",
+            "item_key": "ACTION2024",
+            "chunk_id": "chunk-7340da0bdbc7e03ebac0f8c2",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+            "section_title": "Limitations",
+            "citation": "[ACTION2024:chunk-7340da0bdbc7e03ebac0f8c2]",
+            "rank": 10,
+            "score": 0.034999999999999996
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "action chunking hierarchical planning long horizon",
+            "result_count": 0
+          },
+          {
+            "tool": "keyword_search",
+            "query": "action chunking hierarchical planning long horizon",
+            "result_count": 0
+          },
+          {
+            "tool": "semantic_search",
+            "query": "action chunking hierarchical planning long horizon",
+            "result_count": 10,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "libero-benchmark",
+      "question": "LIBERO benchmark eight percentage points",
+      "task_type": "factual",
+      "mode": "keyword",
+      "status": "passed",
+      "latency_ms": 4.484,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "DIFFVLA24"
+          ],
+          "actual": [
+            "DIFFVLA24"
+          ]
+        },
+        {
+          "name": "required_section:Evaluation",
+          "passed": true,
+          "expected": "Evaluation",
+          "actual": [
+            "Evaluation"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-ba43be1fb21556845d4b5b14",
+            "source_type": "chunk",
+            "retrieval_type": "keyword",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Evaluation",
+            "citation": "[DIFFVLA24:chunk-ba43be1fb21556845d4b5b14]",
+            "rank": 1,
+            "score": -14.936745903021531
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "keyword_search",
+            "query": "LIBERO benchmark eight percentage points",
+            "result_count": 1
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "smolvla-semantic-paraphrase",
+      "question": "affordable compact robot policy consumer hardware efficient control",
+      "task_type": "factual",
+      "mode": "semantic",
+      "status": "passed",
+      "latency_ms": 8.694,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "SMOLVLA25"
+          ],
+          "actual": [
+            "RT2VLA23",
+            "SMOLVLA25",
+            "XVLA2025"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-df0ff85e05f2b38f90ef5975",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Metadata",
+            "citation": "[SMOLVLA25:metadata]",
+            "rank": 1,
+            "score": 0.35
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-1c03db7b29c3d6a8363196ec",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Metadata",
+            "citation": "[RT2VLA23:metadata]",
+            "rank": 2,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-09b6e86fc3f3b6fedee77cf7",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Efficiency",
+            "citation": "[SMOLVLA25:chunk-09b6e86fc3f3b6fedee77cf7]",
+            "rank": 3,
+            "score": 0.11666666666666665
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-b48337722eae71d7e1a841b4",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Metadata",
+            "citation": "[XVLA2025:metadata]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-5ec9d0c69dc757ea2e32bfc2",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Transfer Results",
+            "citation": "[XVLA2025:chunk-5ec9d0c69dc757ea2e32bfc2]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-76d65659d41a41e4920c78b1",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Emergent Skills",
+            "citation": "[RT2VLA23:chunk-76d65659d41a41e4920c78b1]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-d1246ed05f3826479f1c6318",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Co-Fine-Tuning",
+            "citation": "[RT2VLA23:chunk-d1246ed05f3826479f1c6318]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-daa2e14eb1b9e68b082de488",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Cross-Embodiment Method",
+            "citation": "[XVLA2025:chunk-daa2e14eb1b9e68b082de488]",
+            "rank": 8,
+            "score": 0.04375
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "semantic_search",
+            "query": "affordable compact robot policy consumer hardware efficient control",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "rt2-co-finetuning",
+      "question": "co-fine-tuning web data robot trajectories",
+      "task_type": "factual",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 14.746,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "RT2VLA23"
+          ],
+          "actual": [
+            "RT2VLA23",
+            "SMOLVLA25",
+            "XVLA2025"
+          ]
+        },
+        {
+          "name": "required_section:Co-Fine-Tuning",
+          "passed": true,
+          "expected": "Co-Fine-Tuning",
+          "actual": [
+            "Co-Fine-Tuning",
+            "Co-Fine-Tuning",
+            "Metadata",
+            "Efficiency",
+            "Metadata",
+            "Transfer Results",
+            "Metadata",
+            "Limitations"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-d1246ed05f3826479f1c6318",
+            "source_type": "chunk",
+            "retrieval_type": "hybrid",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Co-Fine-Tuning",
+            "citation": "[RT2VLA23:chunk-d1246ed05f3826479f1c6318]",
+            "rank": 1,
+            "score": 0.6666666666666667
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-a1c5569e99689b06591af0eb",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Co-Fine-Tuning",
+            "citation": "[RT2VLA23:chunk-a1c5569e99689b06591af0eb]",
+            "rank": 2,
+            "score": 0.35
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-1c03db7b29c3d6a8363196ec",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Metadata",
+            "citation": "[RT2VLA23:metadata]",
+            "rank": 3,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-09b6e86fc3f3b6fedee77cf7",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Efficiency",
+            "citation": "[SMOLVLA25:chunk-09b6e86fc3f3b6fedee77cf7]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-b48337722eae71d7e1a841b4",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Metadata",
+            "citation": "[XVLA2025:metadata]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-5ec9d0c69dc757ea2e32bfc2",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Transfer Results",
+            "citation": "[XVLA2025:chunk-5ec9d0c69dc757ea2e32bfc2]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-df0ff85e05f2b38f90ef5975",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Metadata",
+            "citation": "[SMOLVLA25:metadata]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-7b7971a4b757366398c7452c",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Limitations",
+            "citation": "[XVLA2025:chunk-7b7971a4b757366398c7452c]",
+            "rank": 8,
+            "score": 0.04375
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "co-fine-tuning web data robot trajectories",
+            "result_count": 0
+          },
+          {
+            "tool": "keyword_search",
+            "query": "co-fine-tuning web data robot trajectories",
+            "result_count": 1
+          },
+          {
+            "tool": "semantic_search",
+            "query": "co-fine-tuning web data robot trajectories",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "xvla-zero-shot-transfer",
+      "question": "cross embodiment zero-shot new robot platform",
+      "task_type": "factual",
+      "mode": "semantic",
+      "status": "passed",
+      "latency_ms": 7.574,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "XVLA2025"
+          ],
+          "actual": [
+            "RT2VLA23",
+            "SMOLVLA25",
+            "XVLA2025"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-5ec9d0c69dc757ea2e32bfc2",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Transfer Results",
+            "citation": "[XVLA2025:chunk-5ec9d0c69dc757ea2e32bfc2]",
+            "rank": 1,
+            "score": 0.35
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-7b7971a4b757366398c7452c",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Limitations",
+            "citation": "[XVLA2025:chunk-7b7971a4b757366398c7452c]",
+            "rank": 2,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-b48337722eae71d7e1a841b4",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Metadata",
+            "citation": "[XVLA2025:metadata]",
+            "rank": 3,
+            "score": 0.11666666666666665
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-daa2e14eb1b9e68b082de488",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Cross-Embodiment Method",
+            "citation": "[XVLA2025:chunk-daa2e14eb1b9e68b082de488]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-d1246ed05f3826479f1c6318",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Co-Fine-Tuning",
+            "citation": "[RT2VLA23:chunk-d1246ed05f3826479f1c6318]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-1c03db7b29c3d6a8363196ec",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Metadata",
+            "citation": "[RT2VLA23:metadata]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-09b6e86fc3f3b6fedee77cf7",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Efficiency",
+            "citation": "[SMOLVLA25:chunk-09b6e86fc3f3b6fedee77cf7]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-df0ff85e05f2b38f90ef5975",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Metadata",
+            "citation": "[SMOLVLA25:metadata]",
+            "rank": 8,
+            "score": 0.04375
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "semantic_search",
+            "query": "cross embodiment zero-shot new robot platform",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "dexcap-capture-hardware",
+      "question": "instrumented gloves RGB-D cameras object poses",
+      "task_type": "factual",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 16.889,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 8
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "DEXCAP24"
+          ],
+          "actual": [
+            "DEXCAP24",
+            "DIFFVLA24",
+            "HAMSTER25",
+            "RT2VLA23",
+            "XVLA2025"
+          ]
+        },
+        {
+          "name": "required_section:Capture System",
+          "passed": true,
+          "expected": "Capture System",
+          "actual": [
+            "Capture System",
+            "Dataset",
+            "Limitations",
+            "Limitations",
+            "Limitations",
+            "Ablation",
+            "Emergent Skills",
+            "Metadata"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "DEXCAP24",
+            "chunk_id": "chunk-1a8d48d2f416099104b15695",
+            "source_type": "chunk",
+            "retrieval_type": "hybrid",
+            "title": "DexCap: Portable Motion Capture for Dexterous Robot Demonstrations",
+            "section_title": "Capture System",
+            "citation": "[DEXCAP24:chunk-1a8d48d2f416099104b15695]",
+            "rank": 1,
+            "score": 0.9
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "DEXCAP24",
+            "chunk_id": "chunk-1e68332c1c479dbaf741f953",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "DexCap: Portable Motion Capture for Dexterous Robot Demonstrations",
+            "section_title": "Dataset",
+            "citation": "[DEXCAP24:chunk-1e68332c1c479dbaf741f953]",
+            "rank": 2,
+            "score": 0.175
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "DEXCAP24",
+            "chunk_id": "chunk-00f2ce7ec8f8adccca84a6cd",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "DexCap: Portable Motion Capture for Dexterous Robot Demonstrations",
+            "section_title": "Limitations",
+            "citation": "[DEXCAP24:chunk-00f2ce7ec8f8adccca84a6cd]",
+            "rank": 3,
+            "score": 0.11666666666666665
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-7b7971a4b757366398c7452c",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Limitations",
+            "citation": "[XVLA2025:chunk-7b7971a4b757366398c7452c]",
+            "rank": 4,
+            "score": 0.0875
+          },
+          {
+            "evidence_id": "ev-5",
+            "item_key": "HAMSTER25",
+            "chunk_id": "chunk-0fc0d975d10f2a554f56a8d1",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+            "section_title": "Limitations",
+            "citation": "[HAMSTER25:chunk-0fc0d975d10f2a554f56a8d1]",
+            "rank": 5,
+            "score": 0.06999999999999999
+          },
+          {
+            "evidence_id": "ev-6",
+            "item_key": "DIFFVLA24",
+            "chunk_id": "chunk-8ae4e3926844100c8729a140",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+            "section_title": "Ablation",
+            "citation": "[DIFFVLA24:chunk-8ae4e3926844100c8729a140]",
+            "rank": 6,
+            "score": 0.05833333333333333
+          },
+          {
+            "evidence_id": "ev-7",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-76d65659d41a41e4920c78b1",
+            "source_type": "chunk",
+            "retrieval_type": "semantic",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Emergent Skills",
+            "citation": "[RT2VLA23:chunk-76d65659d41a41e4920c78b1]",
+            "rank": 7,
+            "score": 0.049999999999999996
+          },
+          {
+            "evidence_id": "ev-8",
+            "item_key": "DEXCAP24",
+            "chunk_id": "chunk-08cb01c76ae6e93a654f150a",
+            "source_type": "metadata",
+            "retrieval_type": "semantic",
+            "title": "DexCap: Portable Motion Capture for Dexterous Robot Demonstrations",
+            "section_title": "Metadata",
+            "citation": "[DEXCAP24:metadata]",
+            "rank": 8,
+            "score": 0.04375
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "instrumented gloves RGB-D cameras object poses",
+            "result_count": 0
+          },
+          {
+            "tool": "keyword_search",
+            "query": "instrumented gloves RGB-D cameras object poses",
+            "result_count": 1
+          },
+          {
+            "tool": "semantic_search",
+            "query": "instrumented gloves RGB-D cameras object poses",
+            "result_count": 8,
+            "status": "ok"
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "metadata-title-smolvla",
+      "question": "SmolVLA",
+      "task_type": "factual",
+      "mode": "metadata",
+      "status": "passed",
+      "latency_ms": 4.718,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 1
+        },
+        {
+          "name": "required_item_keys",
+          "passed": true,
+          "expected": [
+            "SMOLVLA25"
+          ],
+          "actual": [
+            "SMOLVLA25"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-df0ff85e05f2b38f90ef5975",
+            "source_type": "metadata",
+            "retrieval_type": "metadata",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Metadata",
+            "citation": "[SMOLVLA25:metadata]",
+            "rank": 1,
+            "score": -2.4451012188317294
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "SmolVLA",
+            "result_count": 1
+          }
+        ],
+        "usage": {},
+        "warnings": []
+      }
+    },
+    {
+      "case_id": "negative-metadata-no-match",
+      "question": "nonexistent quantum protein folding catalyst",
+      "task_type": "negative",
+      "mode": "metadata",
+      "status": "passed",
+      "latency_ms": 4.872,
+      "checks": [
+        {
+          "name": "max_results",
+          "passed": true,
+          "expected": 0,
+          "actual": 0
+        },
+        {
+          "name": "required_warnings",
+          "passed": true,
+          "expected": [
+            "no_evidence_found"
+          ],
+          "actual": [
+            "no_evidence_found"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "nonexistent quantum protein folding catalyst",
+            "result_count": 0
+          }
+        ],
+        "usage": {},
+        "warnings": [
+          "no_evidence_found"
+        ]
+      }
+    },
+    {
+      "case_id": "scope-blocks-diffusion-paper",
+      "question": "conditional diffusion action expert",
+      "task_type": "scope",
+      "mode": "keyword",
+      "status": "passed",
+      "latency_ms": 8.366,
+      "checks": [
+        {
+          "name": "min_results",
+          "passed": true,
+          "expected": 1,
+          "actual": 4
+        },
+        {
+          "name": "excluded_item_keys",
+          "passed": true,
+          "expected": [
+            "DIFFVLA24"
+          ],
+          "actual": [
+            "RT2VLA23",
+            "SMOLVLA25",
+            "XVLA2025"
+          ]
+        },
+        {
+          "name": "allowed_item_keys",
+          "passed": true,
+          "expected": [
+            "RT2VLA23",
+            "SMOLVLA25",
+            "XVLA2025"
+          ],
+          "actual": [
+            "RT2VLA23",
+            "SMOLVLA25",
+            "XVLA2025"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [
+          {
+            "evidence_id": "ev-1",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-d1246ed05f3826479f1c6318",
+            "source_type": "chunk",
+            "retrieval_type": "scope_context",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Co-Fine-Tuning",
+            "citation": "[RT2VLA23:chunk-d1246ed05f3826479f1c6318]",
+            "rank": 1
+          },
+          {
+            "evidence_id": "ev-2",
+            "item_key": "SMOLVLA25",
+            "chunk_id": "chunk-09b6e86fc3f3b6fedee77cf7",
+            "source_type": "chunk",
+            "retrieval_type": "scope_context",
+            "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+            "section_title": "Efficiency",
+            "citation": "[SMOLVLA25:chunk-09b6e86fc3f3b6fedee77cf7]",
+            "rank": 2
+          },
+          {
+            "evidence_id": "ev-3",
+            "item_key": "XVLA2025",
+            "chunk_id": "chunk-daa2e14eb1b9e68b082de488",
+            "source_type": "chunk",
+            "retrieval_type": "scope_context",
+            "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+            "section_title": "Cross-Embodiment Method",
+            "citation": "[XVLA2025:chunk-daa2e14eb1b9e68b082de488]",
+            "rank": 3
+          },
+          {
+            "evidence_id": "ev-4",
+            "item_key": "RT2VLA23",
+            "chunk_id": "chunk-76d65659d41a41e4920c78b1",
+            "source_type": "chunk",
+            "retrieval_type": "scope_context",
+            "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+            "section_title": "Emergent Skills",
+            "citation": "[RT2VLA23:chunk-76d65659d41a41e4920c78b1]",
+            "rank": 4
+          }
+        ],
+        "tool_trace": [
+          {
+            "tool": "keyword_search",
+            "query": "conditional diffusion action expert",
+            "result_count": 0
+          },
+          {
+            "tool": "scope_context_read",
+            "query": "conditional diffusion action expert",
+            "result_count": 4,
+            "status": "fallback"
+          }
+        ],
+        "usage": {},
+        "warnings": [
+          "keyword_no_match_used_scope_context"
+        ]
+      }
+    },
+    {
+      "case_id": "empty-knowledge-base",
+      "question": "action chunking manipulation",
+      "task_type": "negative",
+      "mode": "hybrid",
+      "status": "passed",
+      "latency_ms": 14.099,
+      "checks": [
+        {
+          "name": "max_results",
+          "passed": true,
+          "expected": 0,
+          "actual": 0
+        },
+        {
+          "name": "required_warnings",
+          "passed": true,
+          "expected": [
+            "no_evidence_found",
+            "semantic_search_empty_scope"
+          ],
+          "actual": [
+            "no_evidence_found",
+            "semantic_search_empty_scope"
+          ]
+        }
+      ],
+      "error": "",
+      "actual": {
+        "answer": "",
+        "sources": [],
+        "tool_trace": [
+          {
+            "tool": "metadata_search",
+            "query": "action chunking manipulation",
+            "result_count": 0
+          },
+          {
+            "tool": "keyword_search",
+            "query": "action chunking manipulation",
+            "result_count": 0
+          },
+          {
+            "tool": "semantic_search",
+            "query": "action chunking manipulation",
+            "result_count": 0,
+            "status": "empty_scope"
+          }
+        ],
+        "usage": {},
+        "warnings": [
+          "semantic_search_empty_scope",
+          "no_evidence_found"
+        ]
+      }
+    }
+  ]
+}

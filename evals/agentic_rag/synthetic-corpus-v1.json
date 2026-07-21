@@ -1,0 +1,142 @@
+{
+  "schema_version": "agentic-rag-eval-corpus/v1",
+  "corpus_id": "vla-synthetic-corpus-v1",
+  "library_id": "eval-vla-synthetic-v1",
+  "name": "Agentic RAG Synthetic VLA Library",
+  "papers": [
+    {
+      "item_key": "ACTION2024",
+      "title": "ActionChunk: Temporal Action Chunking for Robust Long-Horizon Manipulation",
+      "year": "2024",
+      "venue": "Robotics Science",
+      "authors": "Lin Chen; Maya Ortiz",
+      "tags": ["action chunking", "long horizon", "manipulation"],
+      "abstract": "ActionChunk improves robust long-horizon robot manipulation by predicting temporally coherent action sequences instead of isolated actions.",
+      "sections": [
+        {"title": "Method", "text": "The policy predicts action chunks containing eight temporally coherent actions. Chunk overlap and temporal ensembling reduce compounding control errors during long-horizon manipulation."},
+        {"title": "Experiments", "text": "On the RoboSuite LongBench tasks, action chunking improves success rate by 12 percentage points over single-step behavior cloning."},
+        {"title": "Limitations", "text": "Fixed chunk length can be inefficient when a task alternates between fast contact events and slow free-space motion."}
+      ]
+    },
+    {
+      "item_key": "DIFFVLA24",
+      "title": "Diffusion-VLA: Robot Control with a Conditional Diffusion Action Expert",
+      "year": "2024",
+      "venue": "CoRL",
+      "authors": "Rui Wen; Jia Li",
+      "tags": ["diffusion", "VLA", "reasoning"],
+      "abstract": "Diffusion-VLA combines self-generated reasoning with a conditional diffusion action expert for generalizable robot control.",
+      "sections": [
+        {"title": "Architecture", "text": "A vision-language backbone produces self-generated reasoning tokens. A conditional diffusion action expert then denoises continuous robot action trajectories conditioned on those tokens."},
+        {"title": "Evaluation", "text": "The model is evaluated on the LIBERO benchmark and improves average task success by eight percentage points over the autoregressive baseline."},
+        {"title": "Ablation", "text": "Removing self-generated reasoning reduces performance on spatially ambiguous instructions."}
+      ]
+    },
+    {
+      "item_key": "HAMSTER25",
+      "title": "HAMSTER: Hierarchical Action Models for Open-World Robot Manipulation",
+      "year": "2025",
+      "venue": "ICRA",
+      "authors": "Y. Li; P. Shah",
+      "tags": ["hierarchical planning", "trajectory", "long horizon"],
+      "abstract": "HAMSTER separates high-level spatial planning from low-level motor control for open-world long-horizon manipulation.",
+      "sections": [
+        {"title": "Hierarchical Method", "text": "The high-level model predicts a two-dimensional end-effector trajectory over the image. A low-level policy grounds the 2D trajectory into closed-loop robot actions."},
+        {"title": "Long-Horizon Results", "text": "Hierarchical planning improves completion of multi-stage kitchen and tabletop tasks, especially when intermediate goals are far apart."},
+        {"title": "Limitations", "text": "The two-dimensional plan can lose depth information in cluttered scenes."}
+      ]
+    },
+    {
+      "item_key": "XVLA2025",
+      "title": "X-VLA: Soft-Prompted Cross-Embodiment Vision-Language-Action Learning",
+      "year": "2025",
+      "venue": "RSS",
+      "authors": "Kai Zheng; Ana Silva",
+      "tags": ["cross embodiment", "soft prompt", "transfer"],
+      "abstract": "X-VLA uses embodiment-specific soft prompts and bridge data to scale a shared VLA transformer across robot platforms.",
+      "sections": [
+        {"title": "Cross-Embodiment Method", "text": "A shared transformer is conditioned by a learned soft prompt for each robot embodiment. Small bridge datasets align action spaces without changing the shared backbone."},
+        {"title": "Transfer Results", "text": "Soft prompting enables zero-shot instruction transfer and few-shot adaptation to a new robot platform."},
+        {"title": "Limitations", "text": "A new embodiment still needs calibrated bridge data when its action space differs substantially."}
+      ]
+    },
+    {
+      "item_key": "SMOLVLA25",
+      "title": "SmolVLA: An Affordable Vision-Language-Action Model for Efficient Robotics",
+      "year": "2025",
+      "venue": "arXiv",
+      "authors": "Omar Shukor; Lea Martin",
+      "tags": ["efficient", "affordable", "asynchronous inference"],
+      "abstract": "SmolVLA is a compact 450M parameter policy designed for affordable robotics and consumer hardware.",
+      "sections": [
+        {"title": "Efficiency", "text": "The 450M parameter model runs on a consumer GPU. Asynchronous inference overlaps visual encoding with robot execution to reduce control latency."},
+        {"title": "Results", "text": "SmolVLA retains competitive manipulation success while using substantially less memory than multi-billion-parameter baselines."},
+        {"title": "Limitations", "text": "The compact model is weaker on rare visual concepts that require broad world knowledge."}
+      ]
+    },
+    {
+      "item_key": "DEXCAP24",
+      "title": "DexCap: Portable Motion Capture for Dexterous Robot Demonstrations",
+      "year": "2024",
+      "venue": "SIGGRAPH Asia",
+      "authors": "Hao Wang; Iris Kim",
+      "tags": ["mocap", "dexterous manipulation", "data collection"],
+      "abstract": "DexCap provides a portable motion capture system for collecting dexterous manipulation demonstrations outside a robot laboratory.",
+      "sections": [
+        {"title": "Capture System", "text": "The operator wears instrumented gloves while portable RGB-D cameras estimate hand and object poses. The pipeline retargets the captured motion to a dexterous robot hand."},
+        {"title": "Dataset", "text": "The system collects scalable in-the-wild demonstrations for tool use, object handover, and articulated object manipulation."},
+        {"title": "Limitations", "text": "Severe hand-object occlusion can reduce pose reconstruction accuracy."}
+      ]
+    },
+    {
+      "item_key": "RT2VLA23",
+      "title": "RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control",
+      "year": "2023",
+      "venue": "CoRL",
+      "authors": "Anthony Brohan; Noah Brown",
+      "tags": ["web knowledge", "co-fine-tuning", "robot control"],
+      "abstract": "RT-2 transfers semantic concepts learned from web-scale vision-language data into end-to-end robotic control.",
+      "sections": [
+        {"title": "Co-Fine-Tuning", "text": "RT-2 co-fine-tunes web vision-language data and robot trajectories. Robot actions are represented as text tokens in the same vocabulary used by the vision-language model."},
+        {"title": "Emergent Skills", "text": "Web knowledge transfer improves semantic reasoning, symbol understanding, and novel object generalization in robotic control tasks."},
+        {"title": "Limitations", "text": "Large-model inference cost limits high-frequency control and on-device deployment."}
+      ]
+    },
+    {
+      "item_key": "SURVEY25",
+      "title": "Vision-Language-Action Models: Progress, Applications, and Open Challenges",
+      "year": "2025",
+      "venue": "Robotics Review",
+      "authors": "N. Sapkota; F. Zhao",
+      "tags": ["survey", "safety", "evaluation"],
+      "abstract": "This survey reviews VLA architectures, datasets, applications, evaluation protocols, and open research challenges.",
+      "sections": [
+        {"title": "Open Challenges", "text": "The main open challenges are safety guarantees, data diversity, long-horizon evaluation, reproducibility, and robustness under distribution shift."},
+        {"title": "Evaluation", "text": "The field lacks standardized evaluation protocols that jointly measure task success, semantic generalization, latency, and safe failure behavior."},
+        {"title": "Research Directions", "text": "Future systems should combine grounded reasoning, efficient adaptation, uncertainty estimation, and auditable evidence."}
+      ]
+    }
+  ],
+  "knowledge_bases": [
+    {
+      "name": "VLA Core",
+      "description": "All synthetic VLA papers",
+      "item_keys": ["ACTION2024", "DIFFVLA24", "HAMSTER25", "XVLA2025", "SMOLVLA25", "DEXCAP24", "RT2VLA23", "SURVEY25"]
+    },
+    {
+      "name": "Long Horizon",
+      "description": "Long-horizon planning and action generation",
+      "item_keys": ["ACTION2024", "DIFFVLA24", "HAMSTER25"]
+    },
+    {
+      "name": "Efficient and Transfer",
+      "description": "Efficient or transfer-oriented VLA models",
+      "item_keys": ["XVLA2025", "SMOLVLA25", "RT2VLA23"]
+    },
+    {
+      "name": "Empty Scope",
+      "description": "Empty knowledge base for negative tests",
+      "item_keys": []
+    }
+  ]
+}

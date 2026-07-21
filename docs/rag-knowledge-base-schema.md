@@ -1,7 +1,7 @@
 # Agentic RAG 知识库数据结构设计
 
-版本：v1.2  
-日期：2026-07-06  
+版本：v1.4
+日期：2026-07-18
 基于：Zotero metadata、MinerU 解析结果、HTML 附件、Zotero notes、写作项目材料
 
 ---
@@ -25,6 +25,9 @@
 5. **需要显式记录来源和可重建信息**  
    所有 chunk、图片、笔记和矩阵单元格都必须记录来源路径、source_hash、item_key、attachment_key、section/page 等信息，保证可以增量更新和追证。
 
+6. **索引数据和运行时数据必须分开管理**
+   当前实现继续把两类数据放在同一个文库级 `rag.sqlite` 中，但普通索引刷新只允许重建 `rag_documents`、`rag_chunks`、FTS、Embedding 等派生索引，不能删除 `rag_chat_*`、`rag_agent_*`、矩阵或写作运行记录。显式删除整个 `rag.sqlite` 会同时丢失索引和运行时历史，不再属于普通“重建索引”操作。
+
 ---
 
 ## 二、存储布局
@@ -36,7 +39,7 @@ app-data/libraries/<library_id>/
   zotero.sqlite              # Zotero 原生副本，不修改 schema
   storage/                   # Zotero 附件
   mineru-results/            # MinerU API 解析结果
-  rag.sqlite                 # RAG 派生索引
+  rag.sqlite                 # RAG 派生索引 + 知识库/对话/Agent 运行时记录
   rag-assets/                # 可选：后续缓存、导出、写作项目材料
 ```
 
@@ -47,16 +50,24 @@ app-data/libraries/<library_id>/
 - 检索源偏好。
 - UI 偏好。
 
-`rag.sqlite` 保存：
+`rag.sqlite` 当前保存两类数据：
+
+派生索引数据，可由 Zotero、MinerU 和附件重新生成：
 
 - RAG 文档索引。
 - chunk 和 FTS5。
 - 图表/图片资产。
 - 笔记索引。
+- Embedding。
+
+运行时与用户工作数据，不参与普通索引重建：
+
 - 知识库定义。
 - 文献矩阵。
-- 对话和工具调用证据。
+- 对话、AgentRun、状态事件和工具调用证据。
 - 写作项目材料。
+
+长期如需支持“删除全部派生索引但绝不影响用户历史”，可再拆出 `rag-runtime.sqlite`；Phase 2 先通过清晰的表级重建边界保证安全，不提前引入第二个数据库。
 
 ---
 
@@ -96,8 +107,10 @@ rag_matrix_fields
 rag_matrix_runs
 rag_matrix_cells
 
-rag_conversations
-rag_messages
+rag_chat_sessions
+rag_chat_messages
+rag_agent_runs
+rag_agent_events
 
 rag_writing_projects
 rag_writing_materials
@@ -113,9 +126,10 @@ rag_writing_outputs
 ```sql
 CREATE TABLE IF NOT EXISTS rag_config (
     library_id TEXT PRIMARY KEY,
-    schema_version INTEGER NOT NULL DEFAULT 1,
+    schema_version INTEGER NOT NULL DEFAULT 4,
 
-    chunk_strategy TEXT NOT NULL DEFAULT 'markdown_heading',
+    chunk_strategy TEXT NOT NULL DEFAULT 'structured_markdown_parent_child',
+    chunk_content_version TEXT NOT NULL DEFAULT 'structured-parent-v1',
     chunk_size INTEGER NOT NULL DEFAULT 900,
     chunk_overlap INTEGER NOT NULL DEFAULT 120,
 
@@ -347,6 +361,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 DELETE FROM rag_chunk_fts WHERE doc_id = ?;
 DELETE FROM rag_chunks WHERE doc_id = ?;
 ```
+
+普通“刷新文档索引”会在删除并重插 chunk 的短暂窗口内保留 `rag_embeddings`，新 chunk 写入时用稳定 `chunk_id + provider + model + content_hash + content_version` 恢复完全匹配的向量。索引完成后只删除已没有对应 chunk 的孤儿 embedding。显式清空派生索引时才直接删除相关向量。
 
 ---
 
@@ -598,44 +614,99 @@ CREATE INDEX IF NOT EXISTS idx_rag_matrix_cells_status ON rag_matrix_cells(statu
 
 ## 十一、对话和 Agent 证据
 
-### 11.1 rag_conversations
+### 11.1 rag_chat_sessions
 
 ```sql
-CREATE TABLE IF NOT EXISTS rag_conversations (
+CREATE TABLE IF NOT EXISTS rag_chat_sessions (
     conversation_id TEXT PRIMARY KEY,
     library_id TEXT NOT NULL,
     knowledge_base_id TEXT NOT NULL DEFAULT '',
+    item_keys_json TEXT NOT NULL DEFAULT '[]',
     title TEXT NOT NULL DEFAULT '',
-    scope_json TEXT NOT NULL DEFAULT '{}',
-    message_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_rag_conversations_library ON rag_conversations(library_id);
-CREATE INDEX IF NOT EXISTS idx_rag_conversations_kb ON rag_conversations(knowledge_base_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chat_sessions_library ON rag_chat_sessions(library_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chat_sessions_kb ON rag_chat_sessions(knowledge_base_id);
 ```
 
-### 11.2 rag_messages
+`item_keys_json` 是会话首轮建立的知识库作用域快照。后续追问不能通过请求体扩大该范围。
+
+### 11.2 rag_chat_messages
 
 ```sql
-CREATE TABLE IF NOT EXISTS rag_messages (
+CREATE TABLE IF NOT EXISTS rag_chat_messages (
     message_id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
+    run_id TEXT NOT NULL DEFAULT '',
+    turn_index INTEGER NOT NULL,
     role TEXT NOT NULL,
-    -- user / assistant / tool / system
-
-    content TEXT NOT NULL,
+    -- 当前持久化 user / assistant final answer
+    content TEXT NOT NULL DEFAULT '',
     sources_json TEXT NOT NULL DEFAULT '[]',
-    tool_calls_json TEXT NOT NULL DEFAULT '[]',
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-
+    tool_trace_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_rag_messages_conv ON rag_messages(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_rag_messages_role ON rag_messages(role);
+CREATE INDEX IF NOT EXISTS idx_rag_chat_msg_conv ON rag_chat_messages(conversation_id, turn_index);
+CREATE INDEX IF NOT EXISTS idx_rag_chat_msg_run ON rag_chat_messages(run_id);
 ```
+
+`tool_trace_json` 保留一期精简工具轨迹，用于向后兼容。Phase 2 的权威执行过程改由 `rag_agent_events` 保存；不持久化模型原始隐式推理或完整 tool result。
+
+### 11.3 rag_agent_runs
+
+```sql
+CREATE TABLE IF NOT EXISTS rag_agent_runs (
+    run_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    library_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    current_state TEXT NOT NULL DEFAULT 'plan',
+    task_plan_json TEXT NOT NULL DEFAULT '{}',
+    evidence_state_json TEXT NOT NULL DEFAULT '{}',
+    budget_json TEXT NOT NULL DEFAULT '{}',
+    usage_json TEXT NOT NULL DEFAULT '{}',
+    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+    worker_id TEXT NOT NULL DEFAULT '',
+    heartbeat_at TEXT NOT NULL DEFAULT '',
+    stop_reason TEXT NOT NULL DEFAULT '',
+    error_code TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT NOT NULL DEFAULT ''
+);
+```
+
+约束：
+
+- `status`：`running`、`completed`、`abstained`、`failed`、`cancelled`、`interrupted`。
+- `current_state`：`plan`、`retrieve`、`inspect`、`read`、`verify`、`answer`、`abstain`。
+- `stop_reason`：`completed`、`insufficient_evidence`、`budget_exceeded`、`provider_unavailable`、`user_action_required`、`cancelled`、`interrupted` 或 `internal_error`。
+- `checkpoint_json` 在状态边界保存 TaskPlan、EvidenceState、事件序号、运行计数和恢复策略；敏感键落库前过滤。
+- `worker_id` / `heartbeat_at` 用于识别旧工作进程遗留的 `running` 记录。当前安全恢复策略是将其标为 `interrupted`，再显式 `restart_from_user_turn`，不重放半截调用。
+- 当前以 JSON 快照保存 TaskPlan、EvidenceState 和 verifier 结果；后续只有在出现明确查询需求时才拆成更多关系表。
+
+### 11.4 rag_agent_events
+
+```sql
+CREATE TABLE IF NOT EXISTS rag_agent_events (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    visibility TEXT NOT NULL DEFAULT 'summary',
+    summary TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (run_id, sequence)
+);
+```
+
+事件只保存可审计过程：计划摘要、状态转换、工具名和安全参数摘要、结果数量、证据覆盖变化、warning、验证结果和停止原因。`visibility` 分为 `summary`、`detail`、`diagnostic`、`internal`，前端默认只展示前两级。
 
 ---
 
@@ -928,11 +999,12 @@ MVP 的 `auto` / `hybrid` 使用轻量规则编排：
 
 - [x] 创建 knowledge_bases / knowledge_base_items。
 - [x] 实现知识库 CRUD API 和按知识库限定检索。
-- [ ] 定义并实现统一 `retrieve` 返回 Evidence Pack。
-- [ ] 创建 conversations/messages。
-- [ ] 接入 OpenAI Codex Agent runtime 最小 runner。
-- [ ] 通过 `SkillInput` 注入 `skills/agentic-rag/SKILL.md`。
-- [ ] 回答必须保存 sources_json 和 tool_calls_json。
+- [x] 定义并实现统一 `retrieve` 返回 Evidence Pack。
+- [x] 创建 `rag_chat_sessions` / `rag_chat_messages`。
+- [x] 实现 OpenAI-compatible Function Calling AgentRun、显式状态机与异步任务入口；RAG 主链路不依赖 Codex runtime。
+- [x] 统一加载并注入 `skills/agentic-rag/` bundle。
+- [x] 保存最终回答的 verified sources、精简 tool trace、TaskPlan、EvidenceState、checkpoint 和事件流。
+- [x] 实现 hard gate、逐 claim verifier、单次受控修复、取消、中断收敛与显式重启。
 
 ### Phase 3：文献矩阵
 
@@ -955,7 +1027,7 @@ MVP 的 `auto` / `hybrid` 使用轻量规则编排：
 
 ## 十八、验收标准
 
-- 删除 `rag.sqlite` 后可以从 Zotero + MinerU 结果重建。
+- 普通索引重建只清理派生索引表，可从 Zotero + MinerU 恢复且不删除知识库、会话或 Agent 历史；删除整个 `rag.sqlite` 属于显式清空全部 RAG 数据。
 - 不修改 `zotero.sqlite` schema。
 - 不重新调用 MinerU，也可以索引已有 PDF 解析结果。
 - `keyword_search` 可以搜到 MinerU Markdown 正文。

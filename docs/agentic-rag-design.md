@@ -307,15 +307,15 @@ POST /api/library/<library_id>/rag/chat
 
 ### 7.2 Skill 的职责
 
-`skills/agentic-rag/SKILL.md` 不直接实现检索，也不保存知识库数据。它的职责是告诉智能体：
+`skills/agentic-rag/SKILL.md` 不直接实现检索，也不保存知识库数据。它和三个 references 共同告诉智能体：
 
-- 只能基于当前请求附带的 Evidence Pack 回答。
+- 只能基于当前受控 scope 内的工具结果或 Evidence Pack 回答。
 - 证据不足时必须说明“不足以回答”，不能编造论文、页码、实验结论或引用。
 - 回答中必须保留来源标记，来源标记来自 Evidence Pack。
 - 区分“原文证据”“模型归纳”“用户笔记”。
 - 做矩阵或综述时，必须让每个结论可回溯到 chunk、note、metadata 或 figure。
 
-真正执行检索的是后端 `rag/retriever.py` 和 `rag/tools.py`。Skill 是智能体行为契约，不是数据库查询层。
+真正执行检索和 scope 强制的是后端 `rag/retriever.py` 和 `rag/tools.py`。Skill 是智能体行为契约，不是数据库查询层。Phase 1.5 起，Function Calling Agent 会把主 Skill 与 references 直接注入 system prompt；Codex SDK 的 `SkillInput` 与它复用同一个路径解析函数。
 
 ### 7.3 统一检索入口
 
@@ -501,13 +501,13 @@ POST /api/library/<library_id>/rag/writing-projects/<project_id>/draft
 - [x] 支持 `metadata_search` / `keyword_search` 按 `knowledge_base_id` 限定范围。
 - [x] 文库页批量“导入知识库”接入真实 API。
 - [x] `knowledge.html` 接入真实知识库列表、条目状态和 scoped keyword_search 预览。
-- [ ] 新增 `skills/agentic-rag/SKILL.md` 和引用规范文档。
-- [ ] 新增 `rag/retriever.py` 统一检索入口。
+- [x] 新增 `skills/agentic-rag/SKILL.md`、引用规范和 Function Calling 注入。
+- [x] 新增 `rag/retriever.py` 统一检索入口。
 - [x] 新增 `codex_agent/runner.py`，迁移 OpenAI Codex Agent runtime 最小封装。
 - [x] 实现 `/rag/agent/check`。
-- [ ] 实现 `/rag/chat`。
-- [ ] 接入 `knowledge.html` 右侧智能体对话。
-- [ ] 展示来源、chunk 摘录和工具调用过程。
+- [x] 实现 `/rag/chat`。
+- [x] 接入 `knowledge.html` 右侧智能体对话。
+- [x] 展示来源、chunk 摘录和工具调用过程。
 
 ### Phase 3：文献矩阵
 
@@ -555,4 +555,5 @@ MVP 完成时至少满足：
 - `docs/multi-source-retrieval-design.md`：约束外部多源检索和候选导入。
 - `docs/rag-knowledge-base-schema.md`：约束 RAG 派生索引表结构。
 - `docs/openai-codex-agentic-rag-plan.md`：约束 OpenAI Codex Agent runtime、仓库内 skill 和统一检索的迁移计划。
+- `docs/agentic-rag-optimization-roadmap.md`：作为后续质量优化、Agency 演进和阶段验收的主执行路线。
 - `docs/retrieval-deployment.md`：继续负责外部检索源部署，不承担 RAG 索引部署。

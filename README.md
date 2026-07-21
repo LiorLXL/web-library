@@ -61,7 +61,7 @@
 - 知识库页可以为当前知识库定义矩阵字段。
 - 支持手动新增字段，也支持 AI 推荐字段。
 - 支持批量运行矩阵抽取，把每篇文献写成结构化矩阵记录。
-- 矩阵结果可直接作为后续综述写作与知识库问答的输入。
+- 矩阵结果已作为后续综述写作的输入；接入知识库 Agentic RAG 对话仍待补齐。
 - 当前矩阵数据按知识库隔离存储。
 
 ### 5. 多源检索与候选导入
@@ -267,6 +267,19 @@ uv run pytest
 ```powershell
 uv run pytest tests/test_writing.py
 ```
+
+运行不依赖外部 API 的 Agentic RAG 确定性基线：
+
+```powershell
+uv run python -m zotero_web_library.rag_eval_cli run `
+  --suite evals/agentic_rag/smoke-v1.json `
+  --synthetic-corpus evals/agentic_rag/synthetic-corpus-v1.json `
+  --target retrieve `
+  --output-dir evals/agentic_rag/reports `
+  --report-stem baseline-retrieval-v1
+```
+
+评测集格式、完整 Agent 评测和真实文库评测方式见 [evals/agentic_rag/README.md](evals/agentic_rag/README.md)。
 
 ## 代码结构
 

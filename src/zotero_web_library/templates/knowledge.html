@@ -26,7 +26,7 @@
       <div class="topbar-actions">
         <span class="mode-pill">{{ library.name }}</span>
         <span class="mode-pill">界面占位版</span>
-        <button class="ghost-btn" type="button" data-rag-index-library>刷新 RAG 索引</button>
+        <button class="ghost-btn" type="button" data-rag-index-library title="重新扫描文档；内容未变化的 chunk 会复用现有 embedding">刷新文档索引</button>
         <a class="nav-action-btn" href="{{ url_for('library_page', library_id=library.library_id) }}">返回文库</a>
       </div>
     </header>

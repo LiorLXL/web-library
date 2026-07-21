@@ -19,6 +19,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
+from zotero_web_library.agentic_rag_skill import agentic_rag_skill_path as shared_agentic_rag_skill_path
 from zotero_web_library.paths import app_data_dir
 
 
@@ -64,7 +65,7 @@ def repo_root() -> Path:
 
 
 def agentic_rag_skill_path() -> Path:
-    return repo_root() / "skills" / "agentic-rag" / "SKILL.md"
+    return shared_agentic_rag_skill_path()
 
 
 def model_to_json(value: Any) -> Any:

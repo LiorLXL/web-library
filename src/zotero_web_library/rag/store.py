@@ -9,11 +9,16 @@ from typing import Any, Iterable
 from zotero_web_library.utils import now_iso
 
 
+RAG_SCHEMA_VERSION = 4
+CHUNK_CONTENT_VERSION = "structured-parent-v1"
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS rag_config (
   library_id TEXT PRIMARY KEY,
-  schema_version INTEGER NOT NULL DEFAULT 1,
-  chunk_strategy TEXT NOT NULL DEFAULT 'markdown_heading',
+  schema_version INTEGER NOT NULL DEFAULT 4,
+  chunk_strategy TEXT NOT NULL DEFAULT 'structured_markdown_parent_child',
+  chunk_content_version TEXT NOT NULL DEFAULT 'structured-parent-v1',
   chunk_size INTEGER NOT NULL DEFAULT 900,
   chunk_overlap INTEGER NOT NULL DEFAULT 120,
   embedding_enabled INTEGER NOT NULL DEFAULT 0,
@@ -80,7 +85,9 @@ CREATE TABLE IF NOT EXISTS rag_chunks (
   item_key TEXT NOT NULL,
   attachment_key TEXT NOT NULL DEFAULT '',
   chunk_index INTEGER NOT NULL,
+  parent_chunk_id TEXT NOT NULL DEFAULT '',
   chunk_type TEXT NOT NULL,
+  content_version TEXT NOT NULL DEFAULT 'structured-parent-v1',
   content TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   excerpt TEXT NOT NULL DEFAULT '',
@@ -109,6 +116,42 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_type ON rag_chunks(chunk_type);
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_section ON rag_chunks(section_title);
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_hash ON rag_chunks(content_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_chunks_unique_index ON rag_chunks(doc_id, chunk_index);
+CREATE TABLE IF NOT EXISTS rag_chunk_parents (
+  parent_chunk_id TEXT PRIMARY KEY,
+  doc_id TEXT NOT NULL,
+  library_id TEXT NOT NULL,
+  item_key TEXT NOT NULL,
+  attachment_key TEXT NOT NULL DEFAULT '',
+  section_title TEXT NOT NULL DEFAULT '',
+  section_path TEXT NOT NULL DEFAULT '',
+  section_level INTEGER NOT NULL DEFAULT 0,
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  child_count INTEGER NOT NULL DEFAULT 0,
+  char_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunk_parents_doc ON rag_chunk_parents(doc_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chunk_parents_item ON rag_chunk_parents(item_key);
+
+CREATE TABLE IF NOT EXISTS rag_embeddings (
+  chunk_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  embedding BLOB NOT NULL,
+  content_hash TEXT NOT NULL,
+  content_version TEXT NOT NULL DEFAULT 'structured-parent-v1',
+  embedding_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_embeddings_library ON rag_embeddings(library_id);
+CREATE INDEX IF NOT EXISTS idx_rag_embeddings_model ON rag_embeddings(provider, model);
+CREATE INDEX IF NOT EXISTS idx_rag_embeddings_hash ON rag_embeddings(content_hash);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunk_fts USING fts5(
   chunk_id UNINDEXED,
@@ -195,6 +238,72 @@ CREATE TABLE IF NOT EXISTS rag_knowledge_base_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rag_kb_items_item ON rag_knowledge_base_items(item_key);
+
+CREATE TABLE IF NOT EXISTS rag_chat_sessions (
+  conversation_id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL,
+  knowledge_base_id TEXT NOT NULL DEFAULT '',
+  item_keys_json TEXT NOT NULL DEFAULT '[]',
+  title TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chat_sessions_library ON rag_chat_sessions(library_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chat_sessions_kb ON rag_chat_sessions(knowledge_base_id);
+
+CREATE TABLE IF NOT EXISTS rag_chat_messages (
+  message_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  run_id TEXT NOT NULL DEFAULT '',
+  turn_index INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  sources_json TEXT NOT NULL DEFAULT '[]',
+  tool_trace_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chat_msg_conv ON rag_chat_messages(conversation_id, turn_index);
+
+CREATE TABLE IF NOT EXISTS rag_agent_runs (
+  run_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  library_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  current_state TEXT NOT NULL DEFAULT 'plan',
+  task_plan_json TEXT NOT NULL DEFAULT '{}',
+  evidence_state_json TEXT NOT NULL DEFAULT '{}',
+  budget_json TEXT NOT NULL DEFAULT '{}',
+  usage_json TEXT NOT NULL DEFAULT '{}',
+  checkpoint_json TEXT NOT NULL DEFAULT '{}',
+  worker_id TEXT NOT NULL DEFAULT '',
+  heartbeat_at TEXT NOT NULL DEFAULT '',
+  stop_reason TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_agent_runs_conv ON rag_agent_runs(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_rag_agent_runs_status ON rag_agent_runs(library_id, status, updated_at);
+
+CREATE TABLE IF NOT EXISTS rag_agent_events (
+  event_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '',
+  visibility TEXT NOT NULL DEFAULT 'summary',
+  summary TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (run_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_agent_events_run ON rag_agent_events(run_id, sequence);
 """
 
 
@@ -221,7 +330,56 @@ def ensure_store(library: dict[str, Any]) -> None:
             """,
             (str(library["library_id"]), now_iso(), now_iso()),
         )
+        _migrate_store(conn)
+        conn.execute(
+            """
+            UPDATE rag_config
+            SET schema_version = ?, chunk_strategy = ?, chunk_content_version = ?, updated_at = ?
+            WHERE library_id = ?
+            """,
+            (
+                RAG_SCHEMA_VERSION,
+                "structured_markdown_parent_child",
+                CHUNK_CONTENT_VERSION,
+                now_iso(),
+                str(library["library_id"]),
+            ),
+        )
         conn.commit()
+
+
+def _migrate_store(conn: sqlite3.Connection) -> None:
+    config_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_config)").fetchall()}
+    if "chunk_content_version" not in config_columns:
+        conn.execute("ALTER TABLE rag_config ADD COLUMN chunk_content_version TEXT NOT NULL DEFAULT 'legacy-v1'")
+    chunk_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_chunks)").fetchall()}
+    if "parent_chunk_id" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN parent_chunk_id TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_chunks_parent ON rag_chunks(parent_chunk_id)")
+    if "embedding_status" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_status TEXT NOT NULL DEFAULT 'not_configured'")
+    if "embedding_model" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''")
+    if "embedding_hash" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN embedding_hash TEXT NOT NULL DEFAULT ''")
+    if "content_version" not in chunk_columns:
+        conn.execute("ALTER TABLE rag_chunks ADD COLUMN content_version TEXT NOT NULL DEFAULT 'legacy-v1'")
+    embedding_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_embeddings)").fetchall()}
+    if "content_version" not in embedding_columns:
+        conn.execute("ALTER TABLE rag_embeddings ADD COLUMN content_version TEXT NOT NULL DEFAULT 'legacy-v1'")
+    message_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_chat_messages)").fetchall()}
+    if message_columns and "tool_trace_json" not in message_columns:
+        conn.execute("ALTER TABLE rag_chat_messages ADD COLUMN tool_trace_json TEXT NOT NULL DEFAULT '[]'")
+    if message_columns and "run_id" not in message_columns:
+        conn.execute("ALTER TABLE rag_chat_messages ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_chat_msg_run ON rag_chat_messages(run_id)")
+    run_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(rag_agent_runs)").fetchall()}
+    if run_columns and "checkpoint_json" not in run_columns:
+        conn.execute("ALTER TABLE rag_agent_runs ADD COLUMN checkpoint_json TEXT NOT NULL DEFAULT '{}'")
+    if run_columns and "worker_id" not in run_columns:
+        conn.execute("ALTER TABLE rag_agent_runs ADD COLUMN worker_id TEXT NOT NULL DEFAULT ''")
+    if run_columns and "heartbeat_at" not in run_columns:
+        conn.execute("ALTER TABLE rag_agent_runs ADD COLUMN heartbeat_at TEXT NOT NULL DEFAULT ''")
 
 
 def text_hash(value: str | bytes) -> str:
@@ -241,7 +399,12 @@ def stable_id(*values: str) -> str:
     return hashlib.sha1("\x1f".join(str(value or "") for value in values).encode("utf-8")).hexdigest()[:24]
 
 
-def reset_index(library: dict[str, Any], *, source_types: Iterable[str] | None = None) -> None:
+def reset_index(
+    library: dict[str, Any],
+    *,
+    source_types: Iterable[str] | None = None,
+    preserve_embeddings: bool = False,
+) -> None:
     ensure_store(library)
     with connect(library) as conn:
         if source_types:
@@ -255,13 +418,31 @@ def reset_index(library: dict[str, Any], *, source_types: Iterable[str] | None =
         else:
             doc_ids = [str(row["doc_id"]) for row in conn.execute("SELECT doc_id FROM rag_documents").fetchall()]
         for doc_id in doc_ids:
+            chunk_rows = conn.execute("SELECT chunk_id FROM rag_chunks WHERE doc_id = ?", (doc_id,)).fetchall()
+            chunk_ids = [str(row["chunk_id"]) for row in chunk_rows]
+            if chunk_ids and not preserve_embeddings:
+                placeholders = ",".join("?" for _ in chunk_ids)
+                conn.execute(f"DELETE FROM rag_embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
             conn.execute("DELETE FROM rag_chunk_fts WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM rag_assets WHERE doc_id = ?", (doc_id,))
+            conn.execute("DELETE FROM rag_chunk_parents WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM rag_chunks WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM rag_documents WHERE doc_id = ?", (doc_id,))
         if not source_types:
             conn.execute("DELETE FROM rag_notes")
         conn.commit()
+
+
+def cleanup_orphan_embeddings(conn: sqlite3.Connection) -> int:
+    cursor = conn.execute(
+        """
+        DELETE FROM rag_embeddings
+        WHERE NOT EXISTS (
+          SELECT 1 FROM rag_chunks WHERE rag_chunks.chunk_id = rag_embeddings.chunk_id
+        )
+        """
+    )
+    return max(0, int(cursor.rowcount or 0))
 
 
 def upsert_document(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
@@ -318,12 +499,30 @@ def upsert_document(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
 
 def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: list[Any]) -> None:
     title = str(document.get("title") or "")
+    config = conn.execute("SELECT embedding_enabled, embedding_provider, embedding_model FROM rag_config WHERE library_id = ?", (str(document["library_id"]),)).fetchone()
+    embedding_enabled = bool(config and int(config["embedding_enabled"] or 0) and str(config["embedding_provider"] or "") and str(config["embedding_model"] or ""))
+    embedding_provider = str(config["embedding_provider"] or "").strip().lower() if config else ""
+    embedding_name = str(config["embedding_model"] or "").strip() if config else ""
+    embedding_model = f"{embedding_provider}:{embedding_name}" if embedding_enabled else ""
+    parent_ids = _insert_chunk_parents(conn, document, chunks)
     for index, chunk in enumerate(chunks):
         content = str(chunk.content or "").strip()
         if not content:
             continue
         chunk_id = f"chunk-{stable_id(str(document['doc_id']), str(index), text_hash(content))}"
         content_digest = text_hash(content)
+        existing_embedding = None
+        if embedding_enabled:
+            existing_embedding = conn.execute(
+                """
+                SELECT embedding_hash
+                FROM rag_embeddings
+                WHERE chunk_id = ? AND provider = ? AND model = ?
+                  AND content_hash = ? AND content_version = ?
+                """,
+                (chunk_id, embedding_provider, embedding_name, content_digest, CHUNK_CONTENT_VERSION),
+            ).fetchone()
+        reusable_embedding = bool(existing_embedding and str(existing_embedding["embedding_hash"] or ""))
         excerpt = content[:320]
         payload = {
             "chunk_id": chunk_id,
@@ -332,12 +531,14 @@ def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: li
             "item_key": document["item_key"],
             "attachment_key": document.get("attachment_key", ""),
             "chunk_index": index,
+            "parent_chunk_id": parent_ids.get(index, ""),
             "chunk_type": chunk.chunk_type,
+            "content_version": CHUNK_CONTENT_VERSION,
             "content": content,
             "content_hash": content_digest,
             "excerpt": excerpt,
             "section_title": chunk.section_title,
-            "section_path": chunk.section_title,
+            "section_path": str(getattr(chunk, "section_path", "") or chunk.section_title or ""),
             "section_level": int(chunk.section_level or 0),
             "estimated_page": chunk.estimated_page,
             "position_json": "{}",
@@ -348,21 +549,26 @@ def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: li
             "has_tables": 1 if "|" in content and "---" in content else 0,
             "has_equations": 1 if "$" in content else 0,
             "has_code": 1 if "```" in content else 0,
+            "embedding_status": "embedded" if reusable_embedding else ("pending" if embedding_enabled else "not_configured"),
+            "embedding_model": embedding_model,
+            "embedding_hash": str(existing_embedding["embedding_hash"] or "") if reusable_embedding else "",
             "created_at": now_iso(),
         }
         conn.execute(
             """
             INSERT INTO rag_chunks (
-              chunk_id, doc_id, library_id, item_key, attachment_key, chunk_index, chunk_type,
-              content, content_hash, excerpt, section_title, section_path, section_level,
+              chunk_id, doc_id, library_id, item_key, attachment_key, chunk_index, parent_chunk_id, chunk_type,
+              content_version, content, content_hash, excerpt, section_title, section_path, section_level,
               estimated_page, position_json, token_count, char_count, word_count, has_assets,
-              has_tables, has_equations, has_code, created_at
+              has_tables, has_equations, has_code, embedding_status, embedding_model,
+              embedding_hash, created_at
             )
             VALUES (
-              :chunk_id, :doc_id, :library_id, :item_key, :attachment_key, :chunk_index, :chunk_type,
-              :content, :content_hash, :excerpt, :section_title, :section_path, :section_level,
+              :chunk_id, :doc_id, :library_id, :item_key, :attachment_key, :chunk_index, :parent_chunk_id, :chunk_type,
+              :content_version, :content, :content_hash, :excerpt, :section_title, :section_path, :section_level,
               :estimated_page, :position_json, :token_count, :char_count, :word_count, :has_assets,
-              :has_tables, :has_equations, :has_code, :created_at
+              :has_tables, :has_equations, :has_code, :embedding_status, :embedding_model,
+              :embedding_hash, :created_at
             )
             """,
             payload,
@@ -384,6 +590,67 @@ def insert_chunks(conn: sqlite3.Connection, document: dict[str, Any], chunks: li
                 content,
             ),
         )
+
+
+def _insert_chunk_parents(
+    conn: sqlite3.Connection,
+    document: dict[str, Any],
+    chunks: list[Any],
+) -> dict[int, str]:
+    groups: dict[str, list[tuple[int, Any]]] = {}
+    for index, chunk in enumerate(chunks):
+        content = str(getattr(chunk, "content", "") or "").strip()
+        if not content:
+            continue
+        section_path = str(getattr(chunk, "section_path", "") or getattr(chunk, "section_title", "") or "").strip()
+        group_key = section_path or f"__root__:{getattr(chunk, 'chunk_type', 'paragraph')}"
+        groups.setdefault(group_key, []).append((index, chunk))
+
+    parent_ids: dict[int, str] = {}
+    for group_key, members in groups.items():
+        first = members[0][1]
+        section_title = str(getattr(first, "section_title", "") or "")
+        section_path = str(getattr(first, "section_path", "") or section_title)
+        section_level = int(getattr(first, "section_level", 0) or 0)
+        content_parts: list[str] = []
+        seen: set[str] = set()
+        for _, chunk in members:
+            value = str(getattr(chunk, "content", "") or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            content_parts.append(value)
+        parent_content = "\n\n".join(content_parts)[:12000]
+        if not parent_content:
+            continue
+        parent_chunk_id = f"parent-{stable_id(str(document['doc_id']), group_key)}"
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO rag_chunk_parents (
+              parent_chunk_id, doc_id, library_id, item_key, attachment_key,
+              section_title, section_path, section_level, content, content_hash,
+              child_count, char_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                parent_chunk_id,
+                str(document["doc_id"]),
+                str(document["library_id"]),
+                str(document["item_key"]),
+                str(document.get("attachment_key") or ""),
+                section_title,
+                section_path,
+                section_level,
+                parent_content,
+                text_hash(parent_content),
+                len(members),
+                len(parent_content),
+                now_iso(),
+            ),
+        )
+        for index, _ in members:
+            parent_ids[index] = parent_chunk_id
+    return parent_ids
 
 
 def insert_asset(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
@@ -425,6 +692,115 @@ def update_config_stats(library: dict[str, Any], *, status: str = "completed") -
     return index_status(library)
 
 
+def embedding_config(library: dict[str, Any]) -> dict[str, Any]:
+    ensure_store(library)
+    with connect(library) as conn:
+        row = conn.execute("SELECT * FROM rag_config WHERE library_id = ?", (str(library["library_id"]),)).fetchone()
+    payload = dict(row) if row else {}
+    config_json = payload.get("config_json") or "{}"
+    try:
+        extra = json.loads(str(config_json))
+    except json.JSONDecodeError:
+        extra = {}
+    embedding_extra = extra.get("embedding") if isinstance(extra.get("embedding"), dict) else {}
+    return {
+        "enabled": bool(int(payload.get("embedding_enabled") or 0)),
+        "provider": str(payload.get("embedding_provider") or ""),
+        "model": str(payload.get("embedding_model") or ""),
+        "dim": int(payload["embedding_dim"]) if payload.get("embedding_dim") is not None else None,
+        "vector_store_type": str(payload.get("vector_store_type") or "none"),
+        "vector_store_path": str(payload.get("vector_store_path") or ""),
+        "batch_size": int(embedding_extra.get("batch_size") or 64),
+        "api_key": str(embedding_extra.get("api_key") or ""),
+        "base_url": str(embedding_extra.get("base_url") or ""),
+    }
+
+
+def save_embedding_config(
+    library: dict[str, Any],
+    *,
+    enabled: bool,
+    provider: str,
+    model: str,
+    dim: int | None = None,
+    vector_store_type: str = "sqlite_blob",
+    api_key: str = "",
+    base_url: str = "",
+    batch_size: int = 64,
+) -> dict[str, Any]:
+    ensure_store(library)
+    clean_provider = str(provider or "").strip().lower()
+    clean_model = str(model or "").strip()
+    clean_vector_store = str(vector_store_type or "sqlite_blob").strip() or "sqlite_blob"
+    clean_dim = int(dim) if dim is not None else None
+    timestamp = now_iso()
+    with connect(library) as conn:
+        row = conn.execute("SELECT config_json FROM rag_config WHERE library_id = ?", (str(library["library_id"]),)).fetchone()
+        try:
+            extra = json.loads(str((row or {})["config_json"] or "{}")) if row else {}
+        except json.JSONDecodeError:
+            extra = {}
+        extra["embedding"] = {
+            "api_key": str(api_key or "").strip(),
+            "base_url": str(base_url or "").strip(),
+            "batch_size": max(1, min(int(batch_size or 64), 512)),
+        }
+        conn.execute(
+            """
+            UPDATE rag_config
+            SET embedding_enabled = ?, embedding_provider = ?, embedding_model = ?,
+                embedding_dim = ?, vector_store_type = ?, config_json = ?,
+                updated_at = ?
+            WHERE library_id = ?
+            """,
+            (
+                1 if enabled else 0,
+                clean_provider,
+                clean_model,
+                clean_dim,
+                clean_vector_store,
+                json_dumps(extra),
+                timestamp,
+                str(library["library_id"]),
+            ),
+        )
+        if not enabled:
+            conn.execute(
+                """
+                UPDATE rag_chunks
+                SET embedding_status = 'not_configured',
+                    embedding_model = '',
+                    embedding_hash = ''
+                """
+            )
+        else:
+            model_label = f"{clean_provider}:{clean_model}"
+            conn.execute(
+                """
+                UPDATE rag_chunks
+                SET embedding_status = CASE WHEN EXISTS (
+                      SELECT 1 FROM rag_embeddings e
+                      WHERE e.chunk_id = rag_chunks.chunk_id
+                        AND e.provider = ? AND e.model = ?
+                        AND e.content_hash = rag_chunks.content_hash
+                        AND e.content_version = rag_chunks.content_version
+                    ) THEN 'embedded' ELSE 'pending' END,
+                    embedding_model = ?,
+                    embedding_hash = COALESCE((
+                      SELECT e.embedding_hash FROM rag_embeddings e
+                      WHERE e.chunk_id = rag_chunks.chunk_id
+                        AND e.provider = ? AND e.model = ?
+                        AND e.content_hash = rag_chunks.content_hash
+                        AND e.content_version = rag_chunks.content_version
+                      LIMIT 1
+                    ), '')
+                """,
+                (clean_provider, clean_model, model_label, clean_provider, clean_model),
+            )
+        conn.commit()
+    return embedding_config(library)
+
+
 def index_status(library: dict[str, Any]) -> dict[str, Any]:
     ensure_store(library)
     with connect(library) as conn:
@@ -445,10 +821,35 @@ def index_status(library: dict[str, Any]) -> dict[str, Any]:
             ORDER BY chunk_type
             """
         ).fetchall()
+        embedding_rows = conn.execute(
+            """
+            SELECT embedding_status, COUNT(*) AS chunk_count
+            FROM rag_chunks
+            GROUP BY embedding_status
+            ORDER BY embedding_status
+            """
+        ).fetchall()
+        embedding_count = conn.execute("SELECT COUNT(*) FROM rag_embeddings").fetchone()[0]
+        stale_chunk_count = conn.execute(
+            "SELECT COUNT(*) FROM rag_chunks WHERE content_version != ?",
+            (CHUNK_CONTENT_VERSION,),
+        ).fetchone()[0]
     payload = dict(config) if config else {"library_id": str(library["library_id"]), "index_status": "pending"}
     payload["rag_db_path"] = str(rag_db_path(library))
     payload["sources"] = [dict(row) for row in source_rows]
     payload["chunk_types"] = [dict(row) for row in chunk_rows]
+    payload["embedding"] = {
+        "enabled": bool(int(payload.get("embedding_enabled") or 0)),
+        "provider": str(payload.get("embedding_provider") or ""),
+        "model": str(payload.get("embedding_model") or ""),
+        "dim": payload.get("embedding_dim"),
+        "vector_store_type": str(payload.get("vector_store_type") or "none"),
+        "stored_embeddings": int(embedding_count or 0),
+        "statuses": [dict(row) for row in embedding_rows],
+    }
+    payload["content_version"] = CHUNK_CONTENT_VERSION
+    payload["stale_chunk_count"] = int(stale_chunk_count or 0)
+    payload["requires_reindex"] = bool(stale_chunk_count)
     return payload
 
 
@@ -600,6 +1001,50 @@ def delete_knowledge_base(library: dict[str, Any], knowledge_base_id: str) -> di
     clean_id = str(existing["knowledge_base_id"])
     timestamp = now_iso()
     with connect(library) as conn:
+        conn.execute(
+            """
+            DELETE FROM rag_agent_events
+            WHERE run_id IN (
+              SELECT run_id
+              FROM rag_agent_runs
+              WHERE conversation_id IN (
+                SELECT conversation_id
+                FROM rag_chat_sessions
+                WHERE library_id = ? AND knowledge_base_id = ?
+              )
+            )
+            """,
+            (str(library["library_id"]), clean_id),
+        )
+        conn.execute(
+            """
+            DELETE FROM rag_agent_runs
+            WHERE conversation_id IN (
+              SELECT conversation_id
+              FROM rag_chat_sessions
+              WHERE library_id = ? AND knowledge_base_id = ?
+            )
+            """,
+            (str(library["library_id"]), clean_id),
+        )
+        conn.execute(
+            """
+            DELETE FROM rag_chat_messages
+            WHERE conversation_id IN (
+              SELECT conversation_id
+              FROM rag_chat_sessions
+              WHERE library_id = ? AND knowledge_base_id = ?
+            )
+            """,
+            (str(library["library_id"]), clean_id),
+        )
+        conn.execute(
+            """
+            DELETE FROM rag_chat_sessions
+            WHERE library_id = ? AND knowledge_base_id = ?
+            """,
+            (str(library["library_id"]), clean_id),
+        )
         conn.execute("DELETE FROM rag_knowledge_base_items WHERE knowledge_base_id = ?", (clean_id,))
         conn.execute(
             """

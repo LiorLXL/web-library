@@ -1,4 +1,4 @@
 interface:
   display_name: "Agentic RAG"
-  short_description: "Use local library Evidence Packs for grounded RAG answers."
-  default_prompt: "Use $agentic-rag to answer from the current library Evidence Pack with citations."
+  short_description: "Ground library answers with scoped retrieval and citations."
+  default_prompt: "Use $agentic-rag to answer from the active library scope with retrieval tools and inline citations."

@@ -1,0 +1,196 @@
+{
+  "schema_version": "agentic-rag-eval/v1",
+  "suite_id": "agentic-rag-smoke-v1",
+  "description": "Deterministic 20-case smoke suite for scoped metadata, keyword, semantic and hybrid retrieval.",
+  "default_top_k": 8,
+  "cases": [
+    {
+      "case_id": "action-chunking-purpose",
+      "question": "Action chunking long-horizon manipulation robustness",
+      "task_type": "factual",
+      "mode": "keyword",
+      "scope": {"knowledge_base_name": "VLA Core"},
+      "expected": {"min_results": 1, "required_item_keys": ["ACTION2024"], "required_sections": ["Method"]},
+      "tags": ["keyword", "method"]
+    },
+    {
+      "case_id": "action-sequence-mechanism",
+      "question": "temporally coherent action sequences temporal ensembling",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "scope": {"knowledge_base_name": "Long Horizon"},
+      "expected": {"min_results": 1, "required_item_keys": ["ACTION2024"]},
+      "tags": ["hybrid", "long-horizon"]
+    },
+    {
+      "case_id": "diffusion-action-expert",
+      "question": "conditional diffusion action expert LIBERO",
+      "task_type": "factual",
+      "mode": "hybrid",
+      "scope": {"knowledge_base_name": "VLA Core"},
+      "expected": {"min_results": 2, "required_item_keys": ["DIFFVLA24"]},
+      "tags": ["hybrid", "architecture"]
+    },
+    {
+      "case_id": "self-generated-reasoning",
+      "question": "self-generated reasoning spatially ambiguous instructions",
+      "task_type": "factual",
+      "mode": "keyword",
+      "scope": {"knowledge_base_name": "VLA Core"},
+      "expected": {"min_results": 1, "required_item_keys": ["DIFFVLA24"]},
+      "tags": ["keyword", "ablation"]
+    },
+    {
+      "case_id": "hamster-hierarchy",
+      "question": "hierarchical 2D trajectory low-level policy",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "scope": {"knowledge_base_name": "Long Horizon"},
+      "expected": {"min_results": 1, "required_item_keys": ["HAMSTER25"], "required_sections": ["Hierarchical"]},
+      "tags": ["hybrid", "planning"]
+    },
+    {
+      "case_id": "xvla-soft-prompt",
+      "question": "soft prompt cross embodiment bridge data",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "scope": {"knowledge_base_name": "VLA Core"},
+      "expected": {"min_results": 1, "required_item_keys": ["XVLA2025"]},
+      "tags": ["hybrid", "transfer"]
+    },
+    {
+      "case_id": "smolvla-efficiency",
+      "question": "450M consumer GPU asynchronous inference",
+      "task_type": "factual",
+      "mode": "keyword",
+      "scope": {"knowledge_base_name": "Efficient and Transfer"},
+      "expected": {"min_results": 1, "required_item_keys": ["SMOLVLA25"], "required_sections": ["Efficiency"]},
+      "tags": ["keyword", "efficiency"]
+    },
+    {
+      "case_id": "rt2-web-transfer",
+      "question": "web knowledge robotic control actions text tokens",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "scope": {"knowledge_base_name": "Efficient and Transfer"},
+      "expected": {"min_results": 1, "required_item_keys": ["RT2VLA23"]},
+      "tags": ["hybrid", "transfer"]
+    },
+    {
+      "case_id": "dexcap-portable-mocap",
+      "question": "portable motion capture mocap dexterous demonstrations",
+      "task_type": "factual",
+      "mode": "keyword",
+      "scope": {"knowledge_base_name": "VLA Core"},
+      "expected": {"min_results": 1, "required_item_keys": ["DEXCAP24"]},
+      "tags": ["keyword", "data"]
+    },
+    {
+      "case_id": "survey-open-challenges",
+      "question": "safety data diversity evaluation challenges",
+      "task_type": "summary",
+      "mode": "hybrid",
+      "scope": {"knowledge_base_name": "VLA Core"},
+      "expected": {"min_results": 1, "required_item_keys": ["SURVEY25"], "required_sections": ["Open Challenges"]},
+      "tags": ["hybrid", "survey"]
+    },
+    {
+      "case_id": "compare-long-horizon-methods",
+      "question": "action chunking hierarchical planning long horizon",
+      "task_type": "comparative",
+      "mode": "hybrid",
+      "top_k": 10,
+      "scope": {"knowledge_base_name": "Long Horizon"},
+      "expected": {"min_results": 2, "min_distinct_items": 2, "required_item_keys": ["ACTION2024", "HAMSTER25"]},
+      "tags": ["comparison", "coverage"]
+    },
+    {
+      "case_id": "libero-benchmark",
+      "question": "LIBERO benchmark eight percentage points",
+      "task_type": "factual",
+      "mode": "keyword",
+      "scope": {"knowledge_base_name": "VLA Core"},
+      "expected": {"min_results": 1, "required_item_keys": ["DIFFVLA24"], "required_sections": ["Evaluation"]},
+      "tags": ["keyword", "result"]
+    },
+    {
+      "case_id": "smolvla-semantic-paraphrase",
+      "question": "affordable compact robot policy consumer hardware efficient control",
+      "task_type": "factual",
+      "mode": "semantic",
+      "scope": {"knowledge_base_name": "Efficient and Transfer"},
+      "expected": {"min_results": 1, "required_item_keys": ["SMOLVLA25"]},
+      "tags": ["semantic", "paraphrase"]
+    },
+    {
+      "case_id": "rt2-co-finetuning",
+      "question": "co-fine-tuning web data robot trajectories",
+      "task_type": "factual",
+      "mode": "hybrid",
+      "scope": {"knowledge_base_name": "Efficient and Transfer"},
+      "expected": {"min_results": 1, "required_item_keys": ["RT2VLA23"], "required_sections": ["Co-Fine-Tuning"]},
+      "tags": ["hybrid", "training"]
+    },
+    {
+      "case_id": "xvla-zero-shot-transfer",
+      "question": "cross embodiment zero-shot new robot platform",
+      "task_type": "factual",
+      "mode": "semantic",
+      "scope": {"knowledge_base_name": "Efficient and Transfer"},
+      "expected": {"min_results": 1, "required_item_keys": ["XVLA2025"]},
+      "tags": ["semantic", "transfer"]
+    },
+    {
+      "case_id": "dexcap-capture-hardware",
+      "question": "instrumented gloves RGB-D cameras object poses",
+      "task_type": "factual",
+      "mode": "hybrid",
+      "scope": {"knowledge_base_name": "VLA Core"},
+      "expected": {"min_results": 1, "required_item_keys": ["DEXCAP24"], "required_sections": ["Capture System"]},
+      "tags": ["hybrid", "hardware"]
+    },
+    {
+      "case_id": "metadata-title-smolvla",
+      "question": "SmolVLA",
+      "task_type": "factual",
+      "mode": "metadata",
+      "scope": {"knowledge_base_name": "Efficient and Transfer"},
+      "expected": {"min_results": 1, "required_item_keys": ["SMOLVLA25"]},
+      "tags": ["metadata", "title"]
+    },
+    {
+      "case_id": "negative-metadata-no-match",
+      "question": "nonexistent quantum protein folding catalyst",
+      "task_type": "negative",
+      "mode": "metadata",
+      "scope": {"knowledge_base_name": "VLA Core"},
+      "expected": {"max_results": 0, "required_warnings": ["no_evidence_found"]},
+      "tags": ["negative", "empty"]
+    },
+    {
+      "case_id": "scope-blocks-diffusion-paper",
+      "question": "conditional diffusion action expert",
+      "task_type": "scope",
+      "mode": "keyword",
+      "scope": {"knowledge_base_name": "Efficient and Transfer"},
+      "expected": {
+        "min_results": 1,
+        "excluded_item_keys": ["DIFFVLA24"],
+        "allowed_item_keys": ["XVLA2025", "SMOLVLA25", "RT2VLA23"]
+      },
+      "tags": ["scope", "fallback"]
+    },
+    {
+      "case_id": "empty-knowledge-base",
+      "question": "action chunking manipulation",
+      "task_type": "negative",
+      "mode": "hybrid",
+      "scope": {"knowledge_base_name": "Empty Scope"},
+      "expected": {
+        "max_results": 0,
+        "required_warnings": ["semantic_search_empty_scope", "no_evidence_found"]
+      },
+      "tags": ["scope", "empty"]
+    }
+  ]
+}

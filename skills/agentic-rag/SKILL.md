@@ -1,45 +1,65 @@
 ---
 name: agentic-rag
-description: Grounded library-internal Agentic RAG workflow for Zotero Web Library. Use when answering questions, generating literature matrix cells, or drafting review text from a provided Evidence Pack built from Zotero metadata, MinerU PDF chunks, notes, citations, figures, HTML, or writing materials. Enforce citation-backed answers and evidence insufficiency rules.
+description: Ground Zotero Web Library research tasks in the active library scope. Use when answering factual or summary questions, comparing papers, inspecting the knowledge-base scope, extracting a literature-matrix value from supplied evidence, or drafting cited review text with the Agentic RAG tools or an Evidence Pack. Apply backend scope, retrieval refinement, parent-context reading, citation, degradation, and insufficient-evidence rules.
 ---
 
 # Agentic RAG
 
-## Core Rule
+## Non-negotiable Rules
 
-Answer from the active prompt's Evidence Pack. Do not invent papers, page numbers, experimental results, citations, or claims that are not supported by the provided evidence.
+- Use only evidence returned for the active backend-controlled scope. Never request or infer a broader `knowledge_base_id` or `item_keys` scope.
+- Ground every paper fact in retrieved evidence. Never invent papers, page numbers, methods, experimental results, citations, or conclusions.
+- Treat retrieval rank and reranker scores as ordering signals, not factual confidence.
+- Preserve supplied citation markers exactly. Never manufacture a marker.
+- State that evidence is insufficient and name the missing evidence type when the sufficiency gate fails.
 
-If evidence is missing or too weak, say that the current library evidence is insufficient and name the missing evidence type.
+## Operating Loop
 
-## Workflow
+1. Classify the task as `factual`, `summary`, `comparative`, `matrix`, `writing`, or `scope`.
+2. Identify the evidence needed and success condition before searching.
+3. Use `list_scope_documents` when the request is about scope or when comparison coverage is unclear.
+4. Use `search_evidence` for concise retrieval. Select `mode` and optional metadata/chunk filters from the task; do not repeat an identical call.
+5. Inspect warnings, source types, section paths, query lineage, and cross-paper coverage. Treat semantic or reranker failure as a degraded retrieval path, not automatically as task failure.
+6. Use `read_chunk_context` for claims that require method, result, limitation, table, figure-caption, or section-level detail. Prefer its parent context over assembling unrelated neighboring chunks.
+7. If evidence is incomplete, change at least one retrieval dimension: query wording, mode, filters, target paper, or chunk type. Stop when the evidence is sufficient, the controlled budget is exhausted, or no meaningful refinement remains.
+8. Run the sufficiency gate, then answer with inline citations or abstain with a concrete evidence gap.
+9. When the runtime requests the structured final envelope, return `answer_markdown`, `claims[]`, and `citations[]`; keep every factual claim's citations explicit so the backend verifier can check them.
 
-1. Read the user task and identify the output type: factual answer, analytical answer, comparison, matrix cell, or review-writing draft.
-2. Inspect the Evidence Pack before drafting.
-3. Use only evidence entries whose `source_type`, `item_key`, `chunk_id`, `note_id`, or `citation` fields support the claim.
-4. Preserve citation markers from the Evidence Pack beside the claims they support.
-5. Separate paper evidence, user notes, and model synthesis.
-6. Keep uncertainty visible when sources disagree or the evidence is incomplete.
+## Sufficiency Gate
 
-## Evidence Use
+Before answering, verify all of the following:
 
-- Prefer chunk evidence for method details, results, limitations, ablations, definitions, and quotations.
-- Prefer metadata evidence for title, authors, year, venue, DOI, tags, and bibliography facts.
-- Prefer note evidence only for the user's own interpretation, reading status, or project-specific judgment.
-- Use figure evidence only for visible figure/table/caption facts included in the Evidence Pack.
-- Do not cite a source just because it is top-ranked; cite it only when its text supports the sentence.
+- Each factual claim has supporting text and an existing citation marker.
+- Content questions use chunk evidence rather than metadata alone.
+- Comparative claims have evidence for every paper or explicitly mark the missing side.
+- Synthesis is distinguishable from what an individual paper states.
+- Conflicting or degraded evidence is visible in the answer.
+
+## Capability Boundaries
+
+- Use only `search_evidence`, `read_chunk_context`, and `list_scope_documents` in the current Function Calling runtime.
+- Treat `figure_caption` and `table` chunks as text evidence only. Do not claim visual inspection unless an actual figure/table evidence object is supplied.
+- Handle a matrix cell only when its extraction evidence is supplied. The current chat runtime does not expose `read_matrix` or `compare_matrix`.
+- The Phase 2 chat runtime persists `TaskPlan`, `EvidenceState`, state-boundary checkpoints, verification results, and sanitized execution events. Treat those runtime objects as authoritative; do not invent state transitions or verification outcomes.
+- A semantic sufficiency judge may assess text support only after deterministic citation, registry, scope, content-evidence, and comparison-coverage gates pass. It cannot override a hard-gate failure.
+- The backend permits at most one controlled answer repair. If verification still fails, remove unsupported claims or abstain; never keep an unverified claim for fluency.
+- User-visible execution events are concise summaries of planning, state changes, tools, evidence coverage, and verification. They are not raw hidden chain-of-thought.
+- A persisted `running` task from a dead worker becomes `interrupted`; restart only through the explicit runtime action, which begins again from the saved user turn rather than replaying a partial model/tool call.
 
 ## Output Rules
 
-- For direct Q&A, answer concisely and include citations inline.
-- For comparisons, group claims by paper or dimension and keep citations attached to each row or bullet.
-- For matrix cells, return the requested cell value plus its citations; do not add unrelated narrative.
-- For review writing, label synthesis as synthesis and retain citations on factual claims.
-- If no evidence is found, return an evidence-insufficient answer instead of a general knowledge answer.
+- Lead with the answer, then provide only the evidence needed to support it.
+- Keep citations adjacent to the claims they support.
+- Include only citations actually used by supported claims; explored but unused evidence belongs in runtime state, not the displayed source list.
+- Compare by a shared dimension and mark unavailable cells as "evidence not found" in the response language.
+- Return only the requested value and citations for a matrix cell.
+- Label review-level synthesis and retain citations on underlying factual claims.
+- Return an evidence-insufficient answer instead of filling gaps with general knowledge.
 
 ## References
 
-Load these only when needed:
+Read these as follows:
 
-- `references/tool-contract.md`: Evidence Pack fields and internal retrieval-tool meanings.
-- `references/retrieval-policy.md`: Task-specific retrieval and evidence selection policy.
-- `references/citation-format.md`: Citation marker format and citation behavior.
+- Read `references/tool-contract.md` whenever calling tools or consuming an Evidence Pack.
+- Read `references/retrieval-policy.md` for comparison, matrix, writing, query refinement, or degraded retrieval.
+- Read `references/citation-format.md` before producing cited output.

@@ -13,6 +13,7 @@ import re
 import sqlite3
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from collections import Counter
@@ -29,9 +30,6 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from . import app_store
 from .citation_export import CitationExportError, export_citations, export_filename
 from .codex_agent import (
-    build_agentic_rag_chat_prompt,
-    run_codex_connectivity_probe as rag_codex_connectivity_probe,
-    run_codex_prompt as rag_codex_prompt,
     run_reading_chat_turn,
     recommend_matrix_fields,
     run_reading_matrix_for_item,
@@ -43,6 +41,9 @@ from .rag import (
     chunk_read as rag_chunk_read,
     create_knowledge_base as rag_create_knowledge_base,
     delete_knowledge_base as rag_delete_knowledge_base,
+    embedding_config as rag_embedding_config,
+    embed_missing_chunks as rag_embed_missing_chunks,
+    embedding_status as rag_embedding_status,
     index_library as rag_index_library,
     index_mineru_results as rag_index_mineru_results,
     index_status as rag_index_status,
@@ -52,7 +53,14 @@ from .rag import (
     metadata_search as rag_metadata_search,
     remove_knowledge_base_items as rag_remove_knowledge_base_items,
     retrieve as rag_retrieve,
+    run_agentic_chat as rag_run_agentic_chat,
+    save_embedding_config as rag_save_embedding_config,
+    semantic_search as rag_semantic_search,
 )
+from .rag.agent.client import missing_model_config_fields, normalize_openai_base_url
+from .rag.agent.jobs import cancel_agent_chat_job, restart_agent_chat_job, start_agentic_chat_job
+from .rag.agent.memory import load_conversation
+from .rag.agent.runtime import load_agent_events, load_agent_run, reconcile_interrupted_runs
 from .retrieval import CandidateImportError, RetrievalError, imported_items_from_candidates, retrieval_source_statuses, search_retrieval
 from .retrieval.importing import imported_item_from_candidate
 from .retrieval.models import SearchOptions, candidate_material_type, normalized_material_type
@@ -249,6 +257,27 @@ def api_config_codex_for_library(library_id: str) -> dict[str, Any]:
     config = api_config_for_library(library_id)
     codex = config.get("codex") if isinstance(config.get("codex"), dict) else {}
     return default_codex_config(codex)
+
+
+def library_embedding_config_response(library: dict[str, Any], *, include_secrets: bool = False) -> dict[str, Any]:
+    config = rag_embedding_config(library)
+    api_key = clean_secret(config.get("api_key"))
+    provider = clean_secret(config.get("provider")) or "openai"
+    model = clean_secret(config.get("model")) or "text-embedding-3-small"
+    base_url = clean_secret(config.get("base_url")) or CODEX_DEFAULT_BASE_URL
+    return {
+        "enabled": bool(config.get("enabled")),
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+        "api_key": api_key if include_secrets else "",
+        "masked_api_key": masked_secret(api_key),
+        "configured": bool(config.get("enabled") and provider and model and (provider != "openai" or api_key)),
+        "source": "preference" if api_key else "none",
+        "dim": config.get("dim"),
+        "batch_size": int(config.get("batch_size") or 64),
+        "vector_store_type": clean_secret(config.get("vector_store_type")) or "sqlite_blob",
+    }
 
 
 def effective_code_source_token(library_id: str, key: str, env_name: str) -> str:
@@ -14402,11 +14431,72 @@ def create_app() -> Flask:
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
+    @app.get("/api/library/<library_id>/rag/embeddings/config")
+    def api_rag_embeddings_config(library_id: str):
+        try:
+            library = library_or_404(library_id)
+            include_secrets = request.args.get("include_secrets") == "1"
+            return jsonify({"ok": True, "config": library_embedding_config_response(library, include_secrets=include_secrets)})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/embeddings/config")
+    def api_rag_save_embeddings_config(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        raw = payload.get("embedding") if isinstance(payload.get("embedding"), dict) else payload
+        try:
+            library = library_or_404(library_id)
+            existing = rag_embedding_config(library)
+            raw_api_key = clean_secret(raw.get("api_key"))
+            api_key = clean_secret(existing.get("api_key")) if raw_api_key == API_CONFIG_SECRET_KEEP_VALUE else raw_api_key
+            raw_dim = raw.get("dim")
+            dim = int(raw_dim) if str(raw_dim or "").strip() else None
+            config = rag_save_embedding_config(
+                library,
+                enabled=bool(raw.get("enabled", False)),
+                provider=clean_secret(raw.get("provider")) or "openai",
+                model=clean_secret(raw.get("model")) or "text-embedding-3-small",
+                dim=dim,
+                vector_store_type=clean_secret(raw.get("vector_store_type")) or "sqlite_blob",
+                api_key=api_key,
+                base_url=clean_secret(raw.get("base_url")) or CODEX_DEFAULT_BASE_URL,
+                batch_size=int(raw.get("batch_size") or 64),
+            )
+            return jsonify({"ok": True, "config": library_embedding_config_response(library, include_secrets=False), "raw_config": {key: value for key, value in config.items() if key != "api_key"}})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/rag/embeddings/status")
+    def api_rag_embeddings_status(library_id: str):
+        try:
+            return jsonify({"ok": True, "status": rag_embedding_status(library_or_404(library_id))})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/embeddings/index")
+    def api_rag_embeddings_index(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        try:
+            result = rag_embed_missing_chunks(
+                library_or_404(library_id),
+                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                batch_size=int(payload.get("batch_size") or 64),
+                force=bool(payload.get("force", False)),
+            )
+            return jsonify({"ok": bool(result.get("ok", True)), **result})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
     @app.post("/api/library/<library_id>/rag/tools/retrieve")
     def api_rag_retrieve(library_id: str):
         payload = request.get_json(silent=True) or {}
         if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
             return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        if "filters" in payload and not isinstance(payload.get("filters"), dict):
+            return jsonify({"ok": False, "error": "filters must be an object"}), 400
         try:
             result = rag_retrieve(
                 library_or_404(library_id),
@@ -14417,6 +14507,7 @@ def create_app() -> Flask:
                 top_k=int(payload.get("top_k") or 8),
                 include_context=bool(payload.get("include_context", True)),
                 context_window=int(payload.get("context_window") or 1),
+                filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else None,
             )
             return jsonify({"ok": True, **result})
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
@@ -14425,13 +14516,74 @@ def create_app() -> Flask:
     @app.post("/api/library/<library_id>/rag/agent/check")
     def api_rag_agent_check(library_id: str):
         try:
-            library = library_or_404(library_id)
-            result = rag_codex_connectivity_probe(
-                library=library,
-                codex_config=api_config_codex_for_library(library_id),
+            library_or_404(library_id)
+            model_config = api_config_model_for_library(library_id)
+            missing = missing_model_config_fields(model_config)
+            return jsonify(
+                {
+                    "ok": True,
+                    "configured": not missing,
+                    "model": model_config.get("model", ""),
+                    "base_url": normalize_openai_base_url(model_config.get("base_url")),
+                    "missing": missing,
+                }
             )
-            return jsonify(result)
         except SourceError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/rag/chat/history")
+    def api_rag_chat_history(library_id: str):
+        conversation_id = str(request.args.get("conversation_id") or "").strip()
+        knowledge_base_id = str(request.args.get("knowledge_base_id") or "").strip()
+        if not conversation_id and not knowledge_base_id:
+            return jsonify({"ok": False, "error": "conversation_id 和 knowledge_base_id 至少需要一个。"}), 400
+        try:
+            conversation = load_conversation(
+                library_or_404(library_id),
+                conversation_id=conversation_id,
+                knowledge_base_id=knowledge_base_id,
+            )
+            return jsonify({"ok": True, **conversation})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.get("/api/library/<library_id>/rag/chat/runs/<run_id>")
+    def api_rag_chat_run(library_id: str, run_id: str):
+        try:
+            library = library_or_404(library_id)
+            run = load_agent_run(library, run_id)
+            if not run or str(run.get("library_id") or "") != library_id:
+                return jsonify({"ok": False, "error": "Agent 运行记录不存在。"}), 404
+            after_sequence = max(0, int(request.args.get("after_sequence") or 0))
+            if after_sequence:
+                run["events"] = load_agent_events(library, run_id, after_sequence=after_sequence)
+            return jsonify({"ok": True, **run})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/chat/runs/<run_id>/cancel")
+    def api_rag_chat_run_cancel(library_id: str, run_id: str):
+        try:
+            result = cancel_agent_chat_job(library_or_404(library_id), run_id)
+            return jsonify(result)
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/chat/runs/<run_id>/restart")
+    def api_rag_chat_run_restart(library_id: str, run_id: str):
+        try:
+            library = library_or_404(library_id)
+            model_config = api_config_model_for_library(library_id)
+            missing = missing_model_config_fields(model_config)
+            if missing:
+                return jsonify({"ok": False, "error": f"模型 API 配置不完整，请先配置：{', '.join(missing)}。"}), 400
+            result = restart_agent_chat_job(
+                library=library,
+                model_config=model_config,
+                run_id=run_id,
+            )
+            return jsonify(result), 202
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
     @app.post("/api/library/<library_id>/rag/chat")
@@ -14442,63 +14594,35 @@ def create_app() -> Flask:
         question = str(payload.get("question") or payload.get("query") or "").strip()
         if not question:
             return jsonify({"ok": False, "error": "question 不能为空。"}), 400
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        knowledge_base_id = str(payload.get("knowledge_base_id") or "").strip()
+        if not conversation_id and not knowledge_base_id:
+            return jsonify({"ok": False, "error": "新会话必须先选择知识库。"}), 400
         try:
             library = library_or_404(library_id)
-            evidence_pack = rag_retrieve(
-                library,
-                question,
-                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
-                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
-                mode=str(payload.get("mode") or "auto"),
-                top_k=int(payload.get("top_k") or 8),
-                include_context=bool(payload.get("include_context", True)),
-                context_window=int(payload.get("context_window") or 1),
-            )
-            sources = _rag_chat_sources(evidence_pack)
-            if not evidence_pack.get("results"):
-                return jsonify(
-                    {
-                        "ok": True,
-                        "answer": "当前知识库没有检索到足够证据，无法基于文库内容回答这个问题。请先刷新 RAG 索引、扩大知识库范围，或换一个更具体的检索问题。",
-                        "sources": [],
-                        "evidence_pack": evidence_pack,
-                        "tool_calls": evidence_pack.get("tool_calls") or [],
-                        "warnings": evidence_pack.get("warnings") or [],
-                    }
+            model_config = api_config_model_for_library(library_id)
+            missing = missing_model_config_fields(model_config)
+            if missing:
+                return jsonify({"ok": False, "error": f"模型 API 配置不完整，请先配置：{', '.join(missing)}。"}), 400
+            if str(payload.get("response_mode") or "").strip().lower() == "async":
+                result = start_agentic_chat_job(
+                    library=library,
+                    model_config=model_config,
+                    conversation_id=conversation_id,
+                    question=question,
+                    knowledge_base_id=knowledge_base_id,
+                    item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
                 )
-            prompt = build_agentic_rag_chat_prompt(question=question, evidence_pack=evidence_pack)
-            codex_result = rag_codex_prompt(
+                return jsonify(result), 202
+            result = rag_run_agentic_chat(
                 library=library,
-                codex_config=api_config_codex_for_library(library_id),
-                prompt=prompt,
-                include_agentic_rag_skill=True,
-                ephemeral=True,
+                model_config=model_config,
+                conversation_id=conversation_id,
+                question=question,
+                knowledge_base_id=knowledge_base_id,
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
             )
-            if not codex_result.get("ok"):
-                return jsonify(
-                    {
-                        "ok": False,
-                        "error": codex_result.get("message") or codex_result.get("assistant_text") or "Codex Agent 调用失败。",
-                        "sources": sources,
-                        "evidence_pack": evidence_pack,
-                        "tool_calls": evidence_pack.get("tool_calls") or [],
-                        "diagnostics": codex_result.get("diagnostics") or {},
-                    }
-                ), 400
-            return jsonify(
-                {
-                    "ok": True,
-                    "answer": codex_result.get("assistant_text") or "",
-                    "sources": sources,
-                    "evidence_pack": evidence_pack,
-                    "tool_calls": evidence_pack.get("tool_calls") or [],
-                    "warnings": evidence_pack.get("warnings") or [],
-                    "usage": codex_result.get("usage"),
-                    "diagnostics": codex_result.get("diagnostics") or {},
-                    "turn_id": codex_result.get("turn_id", ""),
-                    "turn_status": codex_result.get("turn_status", ""),
-                }
-            )
+            return jsonify(result)
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
         except Exception as exc:  # noqa: BLE001
@@ -14824,6 +14948,8 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
             return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        if "filters" in payload and not isinstance(payload.get("filters"), dict):
+            return jsonify({"ok": False, "error": "filters must be an object"}), 400
         try:
             result = rag_keyword_search(
                 library_or_404(library_id),
@@ -14832,6 +14958,7 @@ def create_app() -> Flask:
                 chunk_type=str(payload.get("chunk_type") or ""),
                 knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
                 item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else None,
             )
             return jsonify({"ok": True, **result})
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
@@ -14842,6 +14969,8 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
             return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        if "filters" in payload and not isinstance(payload.get("filters"), dict):
+            return jsonify({"ok": False, "error": "filters must be an object"}), 400
         try:
             result = rag_metadata_search(
                 library_or_404(library_id),
@@ -14849,6 +14978,28 @@ def create_app() -> Flask:
                 top_k=int(payload.get("top_k") or 10),
                 knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
                 item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else None,
+            )
+            return jsonify({"ok": True, **result})
+        except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/library/<library_id>/rag/tools/semantic_search")
+    def api_rag_semantic_search(library_id: str):
+        payload = request.get_json(silent=True) or {}
+        if "item_keys" in payload and not isinstance(payload.get("item_keys"), list):
+            return jsonify({"ok": False, "error": "item_keys must be a list"}), 400
+        if "filters" in payload and not isinstance(payload.get("filters"), dict):
+            return jsonify({"ok": False, "error": "filters must be an object"}), 400
+        try:
+            result = rag_semantic_search(
+                library_or_404(library_id),
+                str(payload.get("query") or ""),
+                top_k=int(payload.get("top_k") or 10),
+                chunk_type=str(payload.get("chunk_type") or ""),
+                knowledge_base_id=str(payload.get("knowledge_base_id") or ""),
+                item_keys=payload.get("item_keys") if isinstance(payload.get("item_keys"), list) else None,
+                filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else None,
             )
             return jsonify({"ok": True, **result})
         except (SourceError, ValueError, OSError, sqlite3.Error) as exc:
