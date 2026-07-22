@@ -1,9 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>光明科研工作站 - 文献综述分析平台</title>
+  {% include "_theme_head.html" %}
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&family=Noto+Serif+SC:wght@400;600;700;900&display=swap" rel="stylesheet">
@@ -45,6 +46,8 @@
           <span class="logo-subtitle">AI 文献综述分析平台</span>
         </div>
       </div>
+      {% set theme_toggle_variant = "landing" %}
+      {% include "_theme_toggle.html" %}
     </header>
 
     <section class="landing-hero">

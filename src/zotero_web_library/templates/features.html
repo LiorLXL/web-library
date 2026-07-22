@@ -1,9 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% if library %}{{ library.name }} - 多源检索{% else %}多源检索{% endif %}</title>
+  {% include "_theme_head.html" %}
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body class="feature-page"{% if library %} data-retrieval-page data-library-id="{{ library.library_id }}"{% endif %}>
@@ -17,6 +18,8 @@
     <a class="rail-btn" title="写作" href="{{ url_for('writing_page', library_id=library.library_id) }}">写</a>
 
     <a class="rail-btn" title="API 配置" href="{{ url_for('api_config_page', library_id=library.library_id) }}">配</a>
+    {% set theme_toggle_variant = "rail" %}
+    {% include "_theme_toggle.html" %}
   </aside>
   {% endif %}
   <main class="feature-shell">
@@ -37,6 +40,10 @@
         <a class="nav-action-btn" href="{{ url_for('api_config_page', library_id=library.library_id) }}">API 配置</a>
         {% endif %}
         <a class="nav-action-btn" href="{{ url_for('index') }}">源管理</a>
+        {% if not library %}
+        {% set theme_toggle_variant = "header" %}
+        {% include "_theme_toggle.html" %}
+        {% endif %}
       </nav>
     </header>
 

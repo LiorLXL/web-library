@@ -1,0 +1,14 @@
+<script>
+  (() => {
+    const storageKey = "guangming-theme";
+    let theme = "light";
+    try {
+      if (window.localStorage.getItem(storageKey) === "dark") theme = "dark";
+    } catch (_error) {
+      theme = "light";
+    }
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  })();
+</script>
+<script defer src="{{ url_for('static', filename='theme.js') }}"></script>

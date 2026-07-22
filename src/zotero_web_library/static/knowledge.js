@@ -784,7 +784,10 @@ function renderKnowledgeChat() {
       : "";
     host.innerHTML = transcript || activeRun
       ? `${transcript}${activeRun}`
-      : `<p class="inline-status-copy">${active ? "可以基于当前知识库的 RAG 证据向 Agent 提问。" : "选择知识库后，可基于 RAG 证据向 Agent 提问。"}</p>`;
+      : `<div class="knowledge-chat-empty">
+          <strong>${active ? "开始和知识库 Agent 对话" : "请先选择知识库"}</strong>
+          <span>${active ? "可以围绕当前知识库、矩阵字段和 RAG 证据继续提问。" : "选择知识库后，可以基于其中的条目与证据向 Agent 提问。"}</span>
+        </div>`;
     host.scrollTop = host.scrollHeight;
   }
   if (status) {
@@ -813,6 +816,8 @@ function renderKnowledgeChat() {
 function renderKnowledgeChatMessage(message) {
   const roleLabel = message.role === "user" ? "你" : message.role === "error" ? "错误" : "Agent";
   const role = ["user", "assistant", "error"].includes(message.role) ? message.role : "assistant";
+  const layoutRole = role === "user" ? "user" : "assistant";
+  const avatarLabel = role === "user" ? "我" : "Agent";
   const sources = Array.isArray(message.sources) ? message.sources : [];
   const toolTrace = Array.isArray(message.toolTrace) ? message.toolTrace : [];
   const agentTrace = Array.isArray(message.agentTrace) ? message.agentTrace : [];
@@ -821,23 +826,29 @@ function renderKnowledgeChatMessage(message) {
     ? `<button class="knowledge-run-restart" type="button" data-restart-agent-run="${escapeKnowledgeHtml(message.runId)}">重新开始</button>`
     : "";
   return `
-    <article class="knowledge-chat-message ${role}">
-      <div class="knowledge-chat-message-heading"><strong>${roleLabel}</strong>${restartAction}</div>
-      ${agentTrace.length ? renderKnowledgeAgentTrace(agentTrace, { running: false }) : toolTrace.length ? renderKnowledgeToolTrace(toolTrace) : ""}
-      <div class="knowledge-chat-answer">${renderKnowledgeMarkdown(message.content || "", sources, messageKey)}</div>
-      ${sources.length ? renderKnowledgeChatSources(sources, messageKey) : ""}
+    <article class="chat-message knowledge-chat-message ${layoutRole}${role === "error" ? " error" : ""}">
+      <div class="chat-avatar" aria-hidden="true">${avatarLabel}</div>
+      <div class="chat-bubble">
+        <div class="chat-meta knowledge-chat-message-heading"><span>${roleLabel}</span>${restartAction}</div>
+        ${agentTrace.length ? renderKnowledgeAgentTrace(agentTrace, { running: false }) : toolTrace.length ? renderKnowledgeToolTrace(toolTrace) : ""}
+        <div class="knowledge-chat-answer">${renderKnowledgeMarkdown(message.content || "", sources, messageKey)}</div>
+        ${sources.length ? renderKnowledgeChatSources(sources, messageKey) : ""}
+      </div>
     </article>
   `;
 }
 
 function renderKnowledgeActiveRun(run) {
   return `
-    <article class="knowledge-chat-message assistant knowledge-active-run">
-      <div class="knowledge-active-run-heading">
-        <strong>Agent</strong>
-        <span class="knowledge-run-badge"><i></i>${knowledgeState.chatCancelBusy ? "正在停止" : "运行中"}</span>
+    <article class="chat-message knowledge-chat-message assistant knowledge-active-run">
+      <div class="chat-avatar" aria-hidden="true">Agent</div>
+      <div class="chat-bubble">
+        <div class="chat-meta knowledge-active-run-heading">
+          <span>Agent</span>
+          <span class="knowledge-run-badge"><i></i>${knowledgeState.chatCancelBusy ? "正在停止" : "运行中"}</span>
+        </div>
+        ${renderKnowledgeAgentTrace(run.events || [], { running: true })}
       </div>
-      ${renderKnowledgeAgentTrace(run.events || [], { running: true })}
     </article>
   `;
 }

@@ -1,9 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ library.name }} - 知识库</title>
+  {% include "_theme_head.html" %}
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body data-knowledge-page data-library-id="{{ library.library_id }}">
@@ -16,6 +17,8 @@
     <a class="rail-btn" title="写作" href="{{ url_for('writing_page', library_id=library.library_id) }}">写</a>
 
     <a class="rail-btn" title="API 配置" href="{{ url_for('api_config_page', library_id=library.library_id) }}">配</a>
+    {% set theme_toggle_variant = "rail" %}
+    {% include "_theme_toggle.html" %}
   </aside>
   <main class="workspace app-page-shell">
     <header class="topbar">
@@ -87,16 +90,23 @@
 
       <aside class="knowledge-agent">
         <div class="workbench-panel-head">
-          <h2>智能体对话</h2>
+          <div>
+            <h2>智能体对话</h2>
+            <p class="knowledge-agent-subtitle">围绕当前知识库，保留运行过程、工具调用与引用证据。</p>
+          </div>
         </div>
         <div class="workbench-panel-body knowledge-agent-body">
           <div class="knowledge-chat-messages" data-knowledge-chat-messages></div>
-          <textarea rows="6" class="knowledge-chat-input" placeholder="围绕当前知识库、矩阵字段或勾选条目继续提问。"></textarea>
-          <div class="knowledge-chat-actions">
-            <button type="button" class="ghost-btn" data-knowledge-placeholder-action="compress">压缩记忆</button>
-            <button type="button" class="form-action-btn" data-knowledge-placeholder-action="send">发送任务</button>
+          <div class="knowledge-chat-composer">
+            <textarea rows="5" class="knowledge-chat-input" placeholder="围绕当前知识库、矩阵字段或勾选条目继续提问。"></textarea>
+            <div class="knowledge-chat-composer-footer">
+              <p class="inline-status-copy" data-knowledge-chat-status>围绕当前知识库条目、矩阵字段与解析资产继续提问。</p>
+              <div class="knowledge-chat-actions">
+                <button type="button" class="ghost-btn" data-knowledge-placeholder-action="compress">压缩记忆</button>
+                <button type="button" class="form-action-btn" data-knowledge-placeholder-action="send">发送任务</button>
+              </div>
+            </div>
           </div>
-          <p class="inline-status-copy" data-knowledge-chat-status>围绕当前知识库条目、矩阵字段与解析资产继续提问。</p>
         </div>
       </aside>
     </section>

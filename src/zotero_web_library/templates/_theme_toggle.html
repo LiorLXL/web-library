@@ -1,0 +1,12 @@
+{% set toggle_variant = theme_toggle_variant|default("header") %}
+<button
+  class="theme-toggle theme-toggle-{{ toggle_variant }}{{ ' rail-btn' if toggle_variant == 'rail' else '' }}"
+  type="button"
+  data-theme-toggle
+  aria-label="切换到深色模式"
+  aria-pressed="false"
+  title="切换到深色模式"
+>
+  <span class="theme-toggle-icon" data-theme-toggle-icon aria-hidden="true">☾</span>
+  <span class="theme-toggle-label" data-theme-toggle-label>深色模式</span>
+</button>

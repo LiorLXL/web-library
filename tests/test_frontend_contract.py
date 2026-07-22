@@ -893,6 +893,76 @@ def test_frontend_contains_refined_interaction_hooks() -> None:
     assert (root / "src" / "zotero_web_library" / "static" / "vendor" / "pdfjs" / "pdf.worker.min.js").exists()
 
 
+def test_frontend_contains_persistent_light_dark_theme_contract() -> None:
+    root = Path(__file__).resolve().parents[1]
+    template_root = root / "src" / "zotero_web_library" / "templates"
+    static_root = root / "src" / "zotero_web_library" / "static"
+    page_templates = [
+        "index.html",
+        "library.html",
+        "features.html",
+        "knowledge.html",
+        "reader.html",
+        "writing.html",
+        "api_config.html",
+    ]
+
+    theme_head = (template_root / "_theme_head.html").read_text(encoding="utf-8")
+    theme_toggle = (template_root / "_theme_toggle.html").read_text(encoding="utf-8")
+    theme_js = (static_root / "theme.js").read_text(encoding="utf-8")
+    app_css = (static_root / "app.css").read_text(encoding="utf-8")
+    reader_css = (static_root / "reader.css").read_text(encoding="utf-8")
+
+    for template_name in page_templates:
+        html = (template_root / template_name).read_text(encoding="utf-8")
+        assert 'data-theme="light"' in html
+        assert '{% include "_theme_head.html" %}' in html
+
+    for template_name in ["index.html", "library.html", "features.html", "knowledge.html", "reader.html", "writing.html", "api_config.html"]:
+        html = (template_root / template_name).read_text(encoding="utf-8")
+        assert '{% include "_theme_toggle.html" %}' in html
+
+    assert "guangming-theme" in theme_head
+    assert "document.documentElement.dataset.theme" in theme_head
+    assert "theme.js" in theme_head
+    assert "data-theme-toggle" in theme_toggle
+    assert "aria-pressed" in theme_toggle
+    assert 'const THEME_STORAGE_KEY = "guangming-theme"' in theme_js
+    assert "guangming:themechange" in theme_js
+    assert "prefers-reduced-motion: reduce" in theme_js
+    assert 'window.addEventListener("storage"' in theme_js
+    assert ':root[data-theme="dark"]' in app_css
+    assert 'html[data-theme="dark"]' in app_css
+    assert ".theme-toggle-rail" in app_css
+    assert "--color-reader-paper: #ffffff" in app_css
+    assert "background: var(--color-reader-paper)" in reader_css
+
+
+def test_retrieval_candidates_and_knowledge_chat_follow_theme_contract() -> None:
+    root = Path(__file__).resolve().parents[1]
+    static_root = root / "src" / "zotero_web_library" / "static"
+    template_root = root / "src" / "zotero_web_library" / "templates"
+    app_css = (static_root / "app.css").read_text(encoding="utf-8")
+    knowledge_js = (static_root / "knowledge.js").read_text(encoding="utf-8")
+    knowledge_html = (template_root / "knowledge.html").read_text(encoding="utf-8")
+
+    candidate_hover = app_css.split(".retrieval-candidate:hover", 1)[1].split("}", 1)[0]
+    recommended_score = app_css.split(".retrieval-ai-row.recommend {", 1)[1].split("}", 1)[0]
+    assert "background: var(--color-bg-hover)" in candidate_hover
+    assert "border-color: var(--color-border-focus)" in candidate_hover
+    assert "background: var(--color-success-soft)" in recommended_score
+    assert "border-color: var(--color-success-light)" in recommended_score
+
+    assert 'class="chat-message knowledge-chat-message' in knowledge_js
+    assert 'class="chat-avatar" aria-hidden="true">${avatarLabel}' in knowledge_js
+    assert 'class="chat-avatar" aria-hidden="true">Agent' in knowledge_js
+    assert 'class="chat-bubble"' in knowledge_js
+    assert "renderKnowledgeAgentTrace" in knowledge_js
+    assert "renderKnowledgeChatSources" in knowledge_js
+    assert 'class="knowledge-chat-composer"' in knowledge_html
+    assert "保留运行过程、工具调用与引用证据" in knowledge_html
+
+
 def test_translator_document_records_v1_boundaries() -> None:
     root = Path(__file__).resolve().parents[1]
     doc = (root / "docs" / "zotero-translators.md").read_text(encoding="utf-8")
